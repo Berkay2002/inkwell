@@ -142,6 +142,41 @@ pub(crate) fn apply(doc: &mut PdfDocument, profile: Profile, c: &Convert, stem: 
 
 /// The bytes of a new file: no encryption, a classic cross-reference table, a header the standard
 /// accepts.
+/// Brings the XMP packet in line with the document information after a property changed (the
+/// standards want the two to agree, and a reader that prefers XMP would otherwise show the old
+/// value). A document without a packet is left without one. A packet that is not UTF-8 is refused,
+/// so the properties are never left silently disagreeing. Returns whether the packet was rewritten.
+pub(crate) fn sync_xmp_with_info(doc: &mut PdfDocument) -> Result<bool> {
+    let cat = doc.catalog()?;
+    let Some(mut meta) = cat.get_dict("Metadata")?.filter(|m| m.is_stream().unwrap_or(false)) else { return Ok(false) };
+    let bytes = meta.read_stream().unwrap_or_default();
+    let old = String::from_utf8(bytes).map_err(|_| bad("the XMP metadata isn't UTF-8, so the properties aren't changed here; fix it in the source application"))?;
+    let info = doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false));
+    let props = check::info_props(info.as_ref());
+    // A cleared property leaves nothing to mirror, so its old XMP value is taken out here.
+    let mut base = old.clone();
+    for (set, key) in [
+        (&props.title, "dc:title"),
+        (&props.author, "dc:creator"),
+        (&props.subject, "dc:description"),
+        (&props.keywords, "pdf:Keywords"),
+    ] {
+        if set.as_deref().is_none_or(str::is_empty) {
+            xmp::remove_prop(&mut base, key);
+        }
+    }
+    let new = xmp::merge(&base, &props, &[], &[]);
+    if new == old {
+        return Ok(false);
+    }
+    let buf = Buffer::from_bytes(new.as_bytes())?;
+    // A stream with a filter becomes plain: other tools read the packet without decoding it.
+    meta.write_stream_buffer(&buf)?;
+    meta.dict_put("Type", PdfObject::new_name("Metadata")?)?;
+    meta.dict_put("Subtype", PdfObject::new_name("XML")?)?;
+    Ok(true)
+}
+
 pub(crate) fn write_new(doc: &PdfDocument, _profile: Profile) -> Result<Vec<u8>> {
     let mut o = PdfWriteOptions::default();
     o.set_garbage_level(3).set_compress(true).set_encryption(Encryption::None);

@@ -269,12 +269,14 @@ export function staleResultsLine(n: number): string {
 }
 
 /** What a finished build says: "1 804 files, 12 new, 3 changed; 2 could not be read". */
-export function buildLine(b: { files: number; added: number; changed: number; removed: number; damaged: number; password: number; cancelled: boolean }, hadIndex = true): string {
+export function buildLine(b: { files: number; added: number; changed: number; removed: number; damaged: number; password: number; tooLarge?: number; cancelled: boolean }, hadIndex = true): string {
   if (b.cancelled) return hadIndex ? "Stopped. The previous index is still in use." : "Stopped. Build it again to search this catalog.";
   const head = [`${plural(b.files, "file", "files")}`];
   if (b.added) head.push(`${b.added} new`);
   if (b.changed) head.push(`${b.changed} changed`);
   if (b.removed) head.push(`${b.removed} removed`);
   const bad = b.damaged + b.password;
-  return head.join(", ") + (bad ? `; ${bad} could not be read` : "");
+  const big = b.tooLarge ?? 0;
+  const left = [...(bad ? [`${bad} could not be read`] : []), ...(big ? [`${big} too large to index`] : [])];
+  return head.join(", ") + (left.length ? `; ${left.join(", ")}` : "");
 }

@@ -498,6 +498,8 @@ fn put_mk_colour(doc: &PdfDocument, widget: &mut PdfObject, key: &str, c: &Optio
 /// What a signed document keeps scripts from changing: every field, or those a signature's `/Lock` names.
 pub(crate) enum Lock {
     All,
+    /// The form was too large to check for a certification: it counts as locked, and the message says why.
+    Unchecked,
     Include(Vec<String>),
     Exclude(Vec<String>),
 }
@@ -541,8 +543,10 @@ fn reference_locks(v: &PdfObject) -> Vec<Lock> {
 /// so does the doubt.
 pub(crate) fn locks_of(doc: &PdfDocument, entries: &[Entry]) -> Vec<Lock> {
     let mut locks = locks_of_fields(entries);
-    if crate::outline::certified(doc).map_or(true, |c| c == Some(1)) {
-        locks.push(Lock::All);
+    match crate::outline::certified(doc) {
+        Err(_) => locks.push(Lock::Unchecked),
+        Ok(Some(1)) => locks.push(Lock::All),
+        Ok(_) => {}
     }
     locks
 }
@@ -565,7 +569,7 @@ pub(crate) fn locked(locks: &[Lock], e: &Entry) -> bool {
     let named = |names: &[String]| names.iter().any(|n| e.name == *n || e.name.starts_with(&format!("{n}.")));
     e.kind == FieldKind::Signature
         || locks.iter().any(|l| match l {
-            Lock::All => true,
+            Lock::All | Lock::Unchecked => true,
             Lock::Include(n) => named(n),
             Lock::Exclude(n) => !named(n),
         })

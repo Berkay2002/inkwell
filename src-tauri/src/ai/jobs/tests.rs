@@ -4,7 +4,7 @@
 use super::*;
 use crate::ai::actions::tests::{Host, fixture_doc, rev, sign, steps};
 use crate::ai::text::DocText;
-use crate::ai::tools::{NEVER, builtin, quiet};
+use crate::ai::tools::{Mode, NEVER, builtin, quiet};
 
 fn ctx_run<R>(h: &Host, f: impl FnOnce(&Ctx) -> R) -> R {
     let text = DocText { rev: 0, pages: 0, chunks: Vec::new(), chars: 0 };
@@ -57,11 +57,34 @@ fn make_dirty(h: &Host) {
 }
 
 #[test]
-fn the_open_documents_are_listed_with_this_one_marked() {
-    let h = fixture_doc("jobs-list");
-    let o = ok(&h, "list_open_documents", json!({}));
-    assert!(o.text.starts_with("1 document open"), "{}", o.text);
-    assert!(o.text.contains("a.pdf") && o.text.contains("3 pages") && o.text.contains("this document"), "{}", o.text);
+fn comparing_with_another_open_document_asks_every_time_and_names_it() {
+    use crate::engine::fixture::{self, Fixture};
+    let h = fixture_doc("jobs-compare-other");
+    // the other document is opened the way the user would: a file of its own in the same folder
+    let other = folder(&h).join("Older version.pdf");
+    std::fs::write(&other, fixture::build(&Fixture { pages: 2, lines: 4, needle_every: 2, ..Default::default() })).unwrap();
+    h.eng.open(&other.to_string_lossy()).unwrap();
+
+    // reading another document's content is asked about in every mode, Full too
+    let t = tool_named("compare_with_open_document");
+    assert_eq!(t.class, Class::Permanent);
+    for m in [Mode::Ask, Mode::Auto, Mode::Full] {
+        assert!(m.needs_approval(t.class), "{m:?}");
+    }
+    // the card names the file (found by name, any case)
+    let c = card(&h, "compare_with_open_document", json!({ "document": "older VERSION.pdf" })).unwrap().unwrap();
+    assert!(c.contains("Older version.pdf"), "{c}");
+    let o = ok(&h, "compare_with_open_document", json!({ "document": "Older version.pdf" }));
+    assert!(o.text.contains("Older version.pdf") && o.text.contains("change"), "{}", o.text);
+    assert!(o.text.contains("<<<DOCUMENT"), "document-derived lines are a data block: {}", o.text);
+
+    // unknown names, this document and nonsense are refused without saying what else is open
+    let e = card(&h, "compare_with_open_document", json!({ "document": "secret-plans.pdf" })).unwrap_err();
+    assert!(e.contains("No other open document") && !e.contains("Older version"), "{e}");
+    assert!(card(&h, "compare_with_open_document", json!({ "document": "a.pdf" })).is_err(), "this document is not another one");
+    assert!(card(&h, "compare_with_open_document", json!({})).unwrap_err().contains("document"));
+    // the listing tool is gone: names of open documents come from the user
+    assert!(builtin().iter().all(|t| t.name != "list_open_documents"));
 }
 
 #[test]
@@ -73,10 +96,9 @@ fn comparing_with_the_saved_file_lists_the_unsaved_changes() {
     let o = ok(&h, "compare_documents", json!({}));
     assert!(o.text.contains("change"), "{}", o.text);
     assert!(o.text.contains("<<<DOCUMENT"), "document-derived lines are a data block: {}", o.text);
-    // itself, a document that is not open, and nonsense are errors that say what to do
-    assert!(err_of(&h, "compare_documents", json!({ "with": h.doc })).contains("this document"));
-    assert!(err_of(&h, "compare_documents", json!({ "with": 999 })).contains("list_open_documents"));
-    assert!(err_of(&h, "compare_documents", json!({ "with": "the other one" })).contains("\"with\""));
+    // another document is not this tool's: it says which one to use, whatever is asked
+    assert!(err_of(&h, "compare_documents", json!({ "with": h.doc })).contains("compare_with_open_document"));
+    assert!(err_of(&h, "compare_documents", json!({ "with": "the other one" })).contains("compare_with_open_document"));
 }
 
 #[test]
@@ -191,11 +213,73 @@ fn recognizing_text_on_a_signed_document_is_refused_before_the_card() {
 
 #[test]
 fn the_job_tools_are_honest_about_their_class() {
-    for read in ["list_open_documents", "compare_documents"] {
-        assert_eq!(tool_named(read).class, Class::Read, "{read}");
-    }
+    assert_eq!(tool_named("compare_documents").class, Class::Read);
     // they write files or change the document: never silent in ask mode
     for edit in ["compress_document", "ocr_document", "export_document", "convert_to_standard", "create_blank_pdf"] {
         assert_eq!(tool_named(edit).class, Class::Edit, "{edit}");
     }
+}
+
+#[test]
+fn a_file_that_appears_at_the_chosen_name_is_never_replaced() {
+    use std::sync::atomic::AtomicBool;
+    let h = fixture_doc("jobs-no-replace");
+    let dir = folder(&h);
+    let cancel = AtomicBool::new(false);
+    let theirs = b"someone else's file".to_vec();
+
+    // compress: the name was free when it was picked and is taken by the time the output is published
+    let taken = dir.join("a (compressed).pdf");
+    std::fs::write(&taken, &theirs).unwrap();
+    let req = CompressRequest { doc: h.doc, preset: crate::compress::Preset::Smallest, custom: None, save_to: None };
+    let e = run_compress_new(&h.eng, &req, taken.clone(), &cancel, &mut |_| {}).unwrap_err();
+    assert_eq!(e.0, "output-exists");
+    assert_eq!(std::fs::read(&taken).unwrap(), theirs);
+
+    // export, a single file
+    let taken = dir.join("a.txt");
+    std::fs::write(&taken, &theirs).unwrap();
+    let req = ExportRequest { doc: h.doc, kind: ExportKind::Text { layout: false }, pages: None, save_to: String::new() };
+    let e = convert::export_new(&h.eng, &req, Target::File(taken.clone()), &cancel, &mut |_| {}).unwrap_err();
+    assert_eq!(e.to_string(), "output-exists");
+    assert_eq!(std::fs::read(&taken).unwrap(), theirs);
+
+    // conversion
+    let taken = dir.join("a (PDF-A-2b).pdf");
+    std::fs::write(&taken, &theirs).unwrap();
+    let c = crate::preflight::Convert { groups: vec![crate::preflight::FixGroup::Metadata], lang: Some("en-US".into()) };
+    let r = crate::preflight::convert_to_new_file(&h.eng, h.doc, crate::preflight::Profile::Pdfa2b, &c, &taken.to_string_lossy(), &mut |_| {}, &cancel);
+    assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("output-exists"));
+    assert_eq!(std::fs::read(&taken).unwrap(), theirs);
+    // none of them left a stray temporary file behind
+    let left = names(&dir);
+    assert!(left.iter().all(|n| !n.contains(".tmp") && !n.contains("partial")), "{left:?}");
+}
+
+#[test]
+fn converting_a_protected_document_is_refused_before_the_card_and_names_its_output() {
+    let h = fixture_doc("jobs-convert-protected");
+    // the card names the file the copy would be written to
+    let c = card(&h, "convert_to_standard", json!({ "profile": "pdfa-2b", "lang": "en-US" }));
+    if let Ok(Some(text)) = &c {
+        assert!(text.contains("(PDF-A-2b).pdf") && text.contains("original is not changed"), "{text}");
+    }
+    // a permissions password only: the file opens, but a converted copy would be written without it
+    let spec = crate::protect::ProtectSpec {
+        open_password: None,
+        permissions_password: Some("owner-pw".into()),
+        printing: Default::default(),
+        changes: Default::default(),
+        copy: true,
+        accessibility: true,
+        cipher: Default::default(),
+    };
+    h.eng.protect_and_save(h.doc, spec, None, None).unwrap();
+    let dir = folder(&h);
+    let files = names(&dir);
+    let args = json!({ "profile": "pdfa-2b", "lang": "en-US" });
+    let e = card(&h, "convert_to_standard", args.clone()).unwrap_err();
+    assert!(e.contains("password"), "{e}");
+    assert!(err_of(&h, "convert_to_standard", args).contains("password"));
+    assert_eq!(names(&dir), files, "nothing was written");
 }

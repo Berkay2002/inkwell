@@ -442,10 +442,12 @@ fn the_registry_names_are_unique_and_the_classes_are_honest() {
     for read in ["redact_list_marks", "list_comments", "list_form_fields"] {
         assert_eq!(class(read), Class::Read, "{read}");
     }
-    for edit in ["redact_find_and_mark", "redact_mark_area", "redact_unmark", "add_comment", "fill_form_fields", "organize_pages"] {
+    for edit in ["redact_find_and_mark", "redact_mark_area", "add_comment", "fill_form_fields", "organize_pages"] {
         assert_eq!(class(edit), Class::Edit, "{edit}");
     }
     assert_eq!(class("delete_pages"), Class::Destructive);
+    // the user's marks are not for text in a document to delete unasked, in Auto mode either
+    assert_eq!(class("redact_unmark"), Class::Destructive);
     assert_eq!(class("redact_apply"), Class::Permanent);
     // the model is told it can act, never that it cannot
     let prompt = crate::ai::text::BASE_INSTRUCTIONS;
@@ -457,7 +459,7 @@ fn the_registry_names_are_unique_and_the_classes_are_honest() {
 
 /// Installs a signed signature field (and, with `p`, a certification of that level); `lock` is
 /// the field's `/Lock` dictionary body, e.g. `/Action /All`.
-fn certify(h: &Host, p: Option<i32>, lock: Option<&str>) {
+pub(in crate::ai) fn certify(h: &Host, p: Option<i32>, lock: Option<&str>) {
     h.eng
         .apply_custom(h.doc, "Certify".into(), EditSource::User, false, |d| {
             let refs = match p {
@@ -474,6 +476,18 @@ fn certify(h: &Host, p: Option<i32>, lock: Option<&str>) {
                 field.dict_put("Lock", lock)?;
             }
             let field = d.add_object(&field)?;
+            // a signature widget sits on a page, as in a real file: the form scan reads widgets from the pages
+            let mut page = d.find_page(0)?;
+            let annots = match page.get_dict("Annots")? {
+                Some(a) => a,
+                None => {
+                    let a = d.new_object_from_str("[]")?;
+                    page.dict_put("Annots", a.clone())?;
+                    a
+                }
+            };
+            let mut annots = annots;
+            annots.array_push(field.clone())?;
             let form = match d.catalog()?.get_dict("AcroForm")? {
                 Some(f) => f,
                 None => {
@@ -547,6 +561,53 @@ fn a_certification_limits_comments_and_form_filling_to_what_it_allows() {
             assert_eq!(name_value(&h), "A");
         }
     }
+}
+
+#[test]
+fn a_password_field_is_listed_without_its_value_and_is_never_filled() {
+    let h = with_field("forms-password");
+    ok(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "hunter2" }] }));
+    let f = forms::list_all(&h.eng, h.doc).unwrap().fields.into_iter().find(|f| f.name == "Full name").unwrap();
+    let patch = forms::FieldPatch { password: Some(true), ..Default::default() };
+    forms::edit_one(&h.eng, h.doc, f.page, f.xref, &patch, EditSource::User).unwrap();
+    let l = ok(&h, "list_form_fields", json!({}));
+    assert!(l.text.contains("[password field]"), "{}", l.text);
+    assert!(!l.text.contains("hunter2"), "the secret reached the model: {}", l.text);
+    let (r, s) = (rev(&h), steps(&h));
+    let e = err_of(&h, "fill_form_fields", json!({ "fields": [{ "field": "Full name", "value": "x" }] }));
+    assert!(e.contains("password field"), "{e}");
+    assert_eq!((rev(&h), steps(&h)), (r, s));
+}
+
+#[test]
+fn a_query_that_matches_everywhere_is_refused_and_can_be_stopped() {
+    let h = open_bytes("mark-cap", fixture::build(&Fixture { pages: 501, lines: 4, needle_every: 1, ..Default::default() }));
+    let (r, s) = (rev(&h), steps(&h));
+    let e = err_of(&h, "redact_find_and_mark", json!({ "text": "needle" }));
+    assert!(e.contains("More than 500 matches"), "{e}");
+    assert_eq!((rev(&h), steps(&h)), (r, s), "a refused search marks nothing");
+    // a stop request ends the search with nothing marked
+    let t = tools().into_iter().find(|t| t.name == "redact_find_and_mark").unwrap();
+    let text = DocText { rev: 0, pages: 0, chunks: Vec::new(), chars: 0 };
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let c = Ctx { text: &text, host: &h, name: "a.pdf", current_page: 0, selection: None, cancel: &stop, progress: &crate::ai::tools::quiet };
+    let e = (t.run)(&c, &json!({ "text": "needle", "pages": [1, 2, 3] })).err().unwrap();
+    assert!(e.contains("Stopped by the user"), "{e}");
+    assert_eq!((rev(&h), steps(&h)), (r, s));
+}
+
+#[test]
+fn a_page_list_over_the_cap_is_an_error_and_not_cut() {
+    let h = fixture_doc("pages-cap");
+    let many: Vec<i64> = (1..=600).collect();
+    let e = err_of(&h, "redact_find_and_mark", json!({ "text": "needle", "pages": many.clone() }));
+    assert!(e.contains("500"), "{e}");
+    // get_text is in the reading registry
+    let t = crate::ai::tools::builtin().into_iter().find(|t| t.name == "get_text").unwrap();
+    let text = DocText { rev: 0, pages: 0, chunks: Vec::new(), chars: 0 };
+    let c = Ctx { text: &text, host: &h, name: "a.pdf", current_page: 0, selection: None, cancel: &crate::ai::tools::NEVER, progress: &crate::ai::tools::quiet };
+    let e = (t.run)(&c, &json!({ "pages": many })).err().unwrap();
+    assert!(e.contains("500"), "{e}");
 }
 
 #[test]

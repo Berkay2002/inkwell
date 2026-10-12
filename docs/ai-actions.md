@@ -27,8 +27,8 @@ match, shows them in the Redact rail for review, and applies on the user's word.
 |---|---|---|---|---|
 | `read` | no | no | no | listing marks, comments, form fields |
 | `edit` | yes | no | no | marking, comments, form fill, rotate, move, insert blank |
-| `destructive` | yes | yes | no | delete pages |
-| `permanent` | yes | yes | **yes** | `redact_apply`: cannot be taken back from the saved file |
+| `destructive` | yes | yes | no | delete pages, remove redaction marks, sanitize |
+| `permanent` | yes | yes | **yes** | `redact_apply`: cannot be taken back from the saved file; `compare_with_open_document`: reads another document, so the user is always asked |
 
 ## The tools (phases 1 and 2)
 
@@ -61,21 +61,24 @@ files).
 | Tool | Class | What it does |
 |---|---|---|
 | `page_marks` | edit | `kind` header_footer (six places, `<<1 of n>>` tokens), watermark, background, bates; `action` add / update / remove; `pages`. Add on a page that has the kind is an `Err` (use update). Picture marks need a file the user picks: not offered. |
-| `set_document_properties` | edit | title, author, subject, keywords; a no-op is an `Err` |
+| `set_document_properties` | edit | title, author, subject, keywords (the XMP packet is brought in line, and a cleared field leaves it); a no-op is an `Err`; refused on a certified document |
 | `edit_text` | edit | replace one piece of text (`find` must appear once on the page) keeping font, size and colour; text in a scan or in a font that cannot be edited is an `Err` that says so |
-| `sanitize_document` | destructive | metadata, hidden layers, scripts and actions, attached files (on) / hidden text, ALL comments, bookmarks (off); a full-rewrite snapshot, so the removed data is gone from the saved file |
+| `sanitize_document` | destructive | metadata, hidden layers, scripts and actions, attached files (on) / hidden text, ALL comments, bookmarks (off); a full-rewrite snapshot, so the removed data is gone from the saved file; refused on a certified document and on a signed one (the rewrite would void the signature) |
 | `check_accessibility` / `fix_accessibility` | read / edit | the a11y checker's list; safe fixes (title, language, tab order, tooltips, figure alt, autotag) as one step |
 | `check_preflight` | read | PDF/A, PDF/UA, PDF/X check: failing rules and what a conversion could settle |
 | `open_tool` | read | opens protect, security, merge, search-advanced, links, bookmarks, articles, output-preview, convert-colors, printer-marks, page-boxes, create-portfolio (and the tools it can also run) for the user |
-| `list_open_documents` / `compare_documents` | read | ids and names; changes between this document and the saved file or another open one |
+| `compare_documents` | read | changes between this document and the saved file |
+| `compare_with_open_document` | permanent | the changes between this document and another open one, found by file name; asks in every mode because it reads that document |
 | `compress_document` | edit | a smaller copy next to the document; wants the saved file (unsaved changes are an `Err`) |
 | `ocr_document` | edit | invisible text layer, one undo step; pages that have text are skipped; Windows or Tesseract engine |
 | `export_document` | edit | text, HTML, Word, images, extract_images into a new file or folder next to the document |
-| `convert_to_standard` | edit | a converted copy for PDF/A, PDF/UA or PDF/X plus a recheck; the original stays |
+| `convert_to_standard` | edit | a converted copy for PDF/A, PDF/UA or PDF/X plus a recheck; the original stays; a password-protected document is refused before the card (the copy would be written without its protection), and the card names the copy |
 | `create_blank_pdf` | edit | a new blank PDF (1-500 pages) offered as a separate document |
 
 Rules for the job tools: output is always a new file next to the document under a free name (`unique_stem`:
-`a (compressed).pdf`, `a (compressed) (2).pdf`), never over a file; progress goes to the activity trail line while
+`a (compressed).pdf`, `a (compressed) (2).pdf`), never over a file: the name is also created exclusively when the
+file is published (`run_compress_new`, `convert::export_new`, `preflight::convert_to_new_file`), so a file that appears
+there meanwhile fails the job with `output-exists` and is left alone; progress goes to the activity trail line while
 it runs; the panel's Stop ends the job and leaves nothing half-written; a made file is offered under the answer as
 **Open `<name>`** (`UiAction::File`, opened with its token); `open_tool` runs the tool as the All tools list would
 (`UiAction::OpenTool`, `aiOpenTool.ts`). Excluded for good (reasons in `aiCoverage.json`): digital signing and
@@ -85,13 +88,20 @@ file the user must pick (picture marks, insert image, merge).
 ## Rules every action tool follows
 
 - One call, one undo step; a call that changes nothing is `Err` (and pushes no step).
-- Signatures are read once (`src-tauri/src/signed.rs`): a signature field with a value, `/Perms /DocMDP`, or
-  `SigFlags`. What a change may do then follows the certification: no certification: content changes
+- Signatures are read the way every write path of the app reads them (`outline::signed` and `outline::certified`): a
+  signature field with a value, `/Perms /DocMDP`, or `SigFlags`. What a change may do then follows the certification: no certification: content changes
   (`redact_apply`, `organize_pages`, `delete_pages`) are refused with "This document is digitally signed ... save
   a copy of the file and make the change there", markup and form fills are incremental updates and go in;
   DocMDP P=1: nothing; P=2: form fills only, no comments or marks; P=3: forms and comments. A form field a
-  signature locked (`/Lock`, FieldMDP: All / Include / Exclude) is not filled. A signed document whose save would
+  signature locked (`/Lock`, FieldMDP: All / Include / Exclude, as `forms::set_value` decides it) is not filled. A signed document whose save would
   be a full rewrite (repaired on open, or redacted) refuses every change.
+- A password field (`/Ff` bit 14) is listed as `[password field]` without its value and is never filled: the user
+  types it. A page list or range over 500 pages is an `Err`, not cut; a search with more than 500 matches is an
+  `Err` and can be stopped (the search stops at 501 hits and honours the panel's Stop).
+- Every write goes through the module functions, which hold the guards (`outline::refuse_if_certified`,
+  `refuse_unless_annotating_allowed`, `forms::set_value` locks); `sanitize_document` and `set_document_properties`
+  call `refuse_if_certified` inside their closures. There is no second signature parser: `src-tauri/src/signed.rs` was
+  removed in favour of `outline::signed` / `outline::certified`.
 - The refusal comes **before** the approval card (`Tool.check`), so the user is never asked to approve what
   cannot happen. The same check runs again when the tool runs.
 - The card must say what happens: `fill_form_fields` shows `name = value` per field, `add_comment` says "every
@@ -122,10 +132,19 @@ file the user must pick (picture marks, insert image, merge).
 
 ## Verification (2026-10-12)
 
-Tests (after merging main 0a03617, which brought the Claude provider and the shared `gate.rs`):
+Tests (after merging main 15e84fb: ocr-plus, the guarded write paths of #29, `outline::signed` / `certified`; and the
+review fixes of b144e4e):
 
-- `cargo test --lib` full suite 1269 passed, 0 failed, 7 ignored; `ai::` 161 passed; `pnpm tsc --noEmit` clean, `pnpm vitest run`
-  711 passed (46 files), debug exe built from the merged tree.
+- `cargo test --lib` full suite 1352 passed, 0 failed, 7 ignored (`ai::` 169 passed); `pnpm tsc --noEmit` clean,
+  `pnpm vitest run` 803 passed (51 files).
+- Added with the review fixes: password fields hidden and never filled; page lists and searches over the cap are
+  errors, and a search honours Stop; a file that appears at the chosen name is never replaced by compress, export or
+  convert (`output-exists`); convert refuses a protected document before the card and its card names the copy;
+  `compare_with_open_document` asks in every mode and names the file; `sanitize_document` and
+  `set_document_properties` are refused on certified (and, for the rewrite, signed) documents, in
+  `engine/tests_certified.rs` too; a changed property reaches the XMP packet.
+
+The earlier numbers (before main 15e84fb): `cargo test --lib` 1269 passed, `ai::` 161, vitest 711 (46 files).
 
 Live, through the real app (debug exe, scratch data dir, a copy of `docs/study/samples/redact-source.pdf`,
 `AI_LIVE=1 node scripts/ai-actions-shots.mjs docs/screens/ai-actions-live 9246`, signed-in Codex, no scripted

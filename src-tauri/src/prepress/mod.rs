@@ -34,14 +34,5 @@ pub(crate) fn bad(m: impl Into<String>) -> EngineError {
     EngineError::Invalid(m.into())
 }
 
-/// A certified document (a /DocMDP signature) is left as it is: any change would void the certification.
-/// A signed one is not refused; its edits here are never removing ones, so its save stays incremental.
-pub(crate) fn refuse_certified(d: &mupdf::pdf::PdfDocument, what: &str) -> Result<()> {
-    if crate::outline::certified(d)?.is_some() {
-        return Err(bad(format!("This document is certified. {what} would void the certification, so Inkwell leaves the document as it is.")));
-    }
-    Ok(())
-}
-
 /// The total area coverage above which a page is flagged, in percent.
 pub const DEFAULT_TAC_LIMIT: f32 = 300.0;

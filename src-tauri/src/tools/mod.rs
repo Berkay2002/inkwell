@@ -22,6 +22,8 @@ use crate::compress::{self, Audit, Options, Preset};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, DocSource, Engine, EngineError};
 use crate::ocr::backend::{Recognizer, TesseractCli};
+use crate::ocr::detect::{self, Detection};
+use crate::ocr::lang::{self, Catalog, Plan};
 use crate::ocr::{self, Input, OcrError};
 
 // ---------------------------------------------------------------- errors and jobs
@@ -233,6 +235,30 @@ pub fn run_compress(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(compress::Progress),
 ) -> Result<compress::Report, ToolError> {
+    let replace = output.is_some();
+    compress_to(eng, req, output, replace, cancel, progress)
+}
+
+/// [`run_compress`] into `output`, a name that must not exist: a file that appears there while the job runs makes
+/// it fail with `output-exists` instead of being replaced (the assistant picks names itself, nobody confirmed one).
+pub fn run_compress_new(
+    eng: &Engine,
+    req: &CompressRequest,
+    output: PathBuf,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(compress::Progress),
+) -> Result<compress::Report, ToolError> {
+    compress_to(eng, req, Some(output), false, cancel, progress)
+}
+
+fn compress_to(
+    eng: &Engine,
+    req: &CompressRequest,
+    output: Option<PathBuf>,
+    replace: bool,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(compress::Progress),
+) -> Result<compress::Report, ToolError> {
     let input = PathBuf::from(eng.doc_entry(req.doc)?.path());
     let mut opts = match &req.custom {
         Some(c) => Options { preset: Preset::Custom, ..c.clone() },
@@ -240,7 +266,7 @@ pub fn run_compress(
     };
     // A name only gets here from a save token, where the user confirmed replacing a file. The
     // input is still never replaced (the engine checks).
-    opts.replace_output = output.is_some();
+    opts.replace_output = replace;
     opts.output = output;
     // The file on disk is what compress reads: its password, which Save may have just changed.
     opts.password = eng.file_password(req.doc)?.map(|p| p.to_string());
@@ -259,7 +285,9 @@ pub fn run_compress(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BackendChoice {
+    /// The engine is picked from the languages (see `ocr::lang::pick_engine`).
     #[default]
+    Auto,
     Windows,
     Tesseract,
 }
@@ -271,6 +299,12 @@ pub struct OcrLanguages {
     pub windows: Vec<String>,
     /// Present when `tesseract.exe` was found (with its tessdata).
     pub tesseract: Option<TesseractInfo>,
+    /// Both engines' languages merged: what the language list shows.
+    pub catalog: Catalog,
+    /// The user's Windows languages, display language first.
+    pub profile: Vec<String>,
+    /// The selection to start on when nothing better is known: display language plus English.
+    pub defaults: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,11 +326,69 @@ pub fn ocr_languages(tesseract_path: Option<&Path>) -> OcrLanguages {
     let windows = ocr::backend::WinRtOcr.languages().unwrap_or_default();
     #[cfg(not(windows))]
     let windows = Vec::new();
-    let tesseract = TesseractCli::discover(configured_tesseract(tesseract_path)).map(|t| TesseractInfo {
-        languages: t.languages().unwrap_or_default(),
+    let tess = TesseractCli::discover(configured_tesseract(tesseract_path));
+    let tess_langs = tess.as_ref().map(|t| t.languages().unwrap_or_default());
+    let tessdata = tess.as_ref().and_then(|t| t.tessdata.as_ref()).map(|d| d.to_string_lossy().into_owned());
+    let catalog = Catalog::build(&windows, tess_langs.as_deref(), tessdata);
+    let profile = ocr::backend::profile_languages();
+    let defaults = lang::default_languages(&profile, &catalog);
+    let tesseract = tess.map(|t| TesseractInfo {
+        languages: tess_langs.unwrap_or_default(),
         path: t.exe.to_string_lossy().into_owned(),
     });
-    OcrLanguages { windows, tesseract }
+    OcrLanguages { windows, tesseract, catalog, profile, defaults }
+}
+
+/// What the sheet shows for the chosen languages: the engine that will read them and what is missing.
+pub fn ocr_plan(languages: &[String], choice: BackendChoice, tesseract_path: Option<&Path>) -> Plan {
+    let l = ocr_languages(tesseract_path);
+    let requested: Vec<String> = if languages.is_empty() { l.defaults.clone() } else { languages.to_vec() };
+    let prefer = match choice {
+        BackendChoice::Auto => None,
+        BackendChoice::Windows => Some(lang::Engine::Windows),
+        BackendChoice::Tesseract => Some(lang::Engine::Tesseract),
+    };
+    lang::pick_engine(&requested, &l.catalog, prefer)
+}
+
+/// Settles the engine and the languages of a request from what is installed, and returns the
+/// recogniser. `req.languages` and `req.backend` are replaced by the plan's.
+pub fn resolve_backend(req: &mut OcrRequest, tesseract_path: Option<&Path>) -> Result<Box<dyn Recognizer>, ToolError> {
+    let plan = ocr_plan(&req.languages, req.backend, tesseract_path);
+    let engine = match plan.engine {
+        Some(lang::Engine::Windows) => BackendChoice::Windows,
+        Some(lang::Engine::Tesseract) => BackendChoice::Tesseract,
+        None => {
+            // Nothing installed reads the language; the sheet already showed how to add it.
+            return Err(ToolError(if req.backend == BackendChoice::Tesseract && ocr_languages(tesseract_path).tesseract.is_none() {
+                "tesseract-not-found".into()
+            } else {
+                "language-unavailable".into()
+            }));
+        }
+    };
+    req.languages = plan.languages;
+    req.backend = engine;
+    make_backend(engine, tesseract_path)
+}
+
+/// The language the document is probably in (see `ocr::detect`): existing text, a sample read, then
+/// the user's Windows languages.
+pub fn ocr_detect(eng: &Engine, doc: DocId, tesseract_path: Option<&Path>, cancel: &AtomicBool) -> Result<Detection, ToolError> {
+    let l = ocr_languages(tesseract_path);
+    #[cfg(windows)]
+    let win = Some(ocr::backend::WinRtOcr);
+    #[cfg(not(windows))]
+    let win: Option<ocr::backend::TesseractCli> = None;
+    let tess = TesseractCli::discover(configured_tesseract(tesseract_path));
+    let (_, source) = eng.doc_source(doc)?;
+    let run = |input: &Input| {
+        detect::detect(input, &l.catalog, &l.profile, win.as_ref().map(|w| w as &dyn Recognizer), tess.as_ref().map(|t| t as &dyn Recognizer), cancel)
+    };
+    Ok(match &source {
+        DocSource::Path(p) => run(&Input::Path(Path::new(p)))?,
+        DocSource::Bytes(b, n) => run(&Input::Bytes(&b[..*n]))?,
+    })
 }
 
 /// The recogniser for `choice`. Tesseract is only ever the configured path, `INKWELL_TESSERACT` or
@@ -307,9 +399,9 @@ pub fn make_backend(choice: BackendChoice, tesseract_path: Option<&Path>) -> Res
             .map(|t| Box::new(t) as Box<dyn Recognizer>)
             .ok_or_else(|| ToolError("tesseract-not-found".into())),
         #[cfg(windows)]
-        BackendChoice::Windows => Ok(Box::new(ocr::backend::WinRtOcr)),
+        BackendChoice::Windows | BackendChoice::Auto => Ok(Box::new(ocr::backend::WinRtOcr)),
         #[cfg(not(windows))]
-        BackendChoice::Windows => Err(ToolError("Windows OCR is only available on Windows".into())),
+        BackendChoice::Windows | BackendChoice::Auto => Err(ToolError("Windows OCR is only available on Windows".into())),
     }
 }
 
@@ -326,6 +418,14 @@ pub struct OcrRequest {
     pub force: bool,
     #[serde(default)]
     pub backend: BackendChoice,
+    /// What the pages look like afterwards (searchable image, cleaned up, editable text).
+    #[serde(default)]
+    pub style: ocr::Style,
+    /// Render resolution: 150, 200 (default) or 300.
+    pub dpi: Option<u32>,
+    /// The face editable text is set in.
+    #[serde(default)]
+    pub font: ocr::FontPref,
     /// A save token (`pick_save`): write a new file instead of changing the open document.
     pub save_to: Option<String>,
 }
@@ -342,7 +442,15 @@ pub struct OcrOutcome {
 
 fn options_for(eng: &Engine, req: &OcrRequest) -> Result<ocr::Options, ToolError> {
     let count = eng.doc_entry(req.doc)?.page_count();
-    let mut o = ocr::Options { languages: req.languages.clone(), force: req.force, ..Default::default() };
+    let mut o = ocr::Options { languages: req.languages.clone(), force: req.force, style: req.style, font: req.font, ..Default::default() };
+    if let Some(d) = req.dpi {
+        // The sheet offers three; anything else is snapped to the nearest rather than trusted.
+        o.dpi = [150u32, 200, 300].into_iter().min_by_key(|c| c.abs_diff(d)).unwrap_or(200);
+    }
+    if req.style == ocr::Style::Editable {
+        // Real text is only ever made from pages that have none: never over a page's own text.
+        o.force = false;
+    }
     if let Some(spec) = req.pages.as_deref().filter(|s| !s.trim().is_empty()) {
         o.pages = Some(ocr::parse_page_range(spec, count)?);
     }
@@ -373,9 +481,12 @@ pub fn run_ocr_as(
     source: EditSource,
 ) -> Result<OcrOutcome, ToolError> {
     let opts = options_for(eng, req)?;
+    // A certified document takes no change; a signed one no picture change. Nothing is read or changed.
+    eng.read_custom(req.doc, |d| Ok(ocr::check_signatures(d, opts.style)))??;
     let last = AtomicU32::new(0);
     let mono = |p: ocr::Progress| {
-        if last.fetch_max(p.done, Ordering::SeqCst) < p.done {
+        // The writing pass counts pages again from one: it is its own sequence.
+        if p.writing || last.fetch_max(p.done, Ordering::SeqCst) < p.done {
             progress(p);
         }
     };
@@ -419,31 +530,64 @@ pub fn run_ocr_as(
         // Nothing to add (pages already had text, or nothing was found): no undo step either.
         eng.edit_state(req.doc)?
     } else {
-        eng.apply_custom(
-            req.doc,
-            format!("Recognize text ({to_write} page{})", if to_write == 1 { "" } else { "s" }),
-            source,
-            false,
-            |pdf| {
-                // Page indices belong to the generation the pages were read from: an edit that
-                // landed meanwhile (delete, move) would put the text on the wrong pages.
-                if entry.generation() != rev {
-                    return Err(EngineError::Stale);
-                }
-                if ocr::is_signed(pdf) {
-                    warnings.push("The document is signed; saving it makes the signature invalid.".to_string());
-                }
-                applied = ocr::apply(pdf, &rec.pages, req.force).map_err(|e| EngineError::Invalid(e.to_string()))?;
-                Ok(rec
-                    .pages
-                    .iter()
-                    .filter(|p| p.status == ocr::PageStatus::Recognized)
-                    .map(|p| p.page)
-                    .collect())
-            },
-        )?
+        let pages = format!("{to_write} page{}", if to_write == 1 { "" } else { "s" });
+        let label = match opts.style {
+            ocr::Style::Searchable => format!("Recognize text ({pages})"),
+            ocr::Style::Cleaned => format!("Recognize text, cleaned up ({pages})"),
+            ocr::Style::Editable => format!("Recognize text as editable text ({pages})"),
+        };
+        let work = |pdf: &mut mupdf::pdf::PdfDocument| {
+            // Page indices belong to the generation the pages were read from: an edit that
+            // landed meanwhile (delete, move) would put the text on the wrong pages.
+            if entry.generation() != rev {
+                return Err(EngineError::Stale);
+            }
+            if crate::outline::signed(pdf) {
+                warnings.push("The document is signed; saving it makes the signature invalid.".to_string());
+            }
+            // Under the edit lock: a cancel stops the work between pages and the step is rolled back.
+            applied = ocr::apply_styled(pdf, &rec.pages, &opts, progress, cancel)
+                .map_err(|e| EngineError::Invalid(e.to_string()))?;
+            Ok(rec.pages.iter().filter(|p| p.status == ocr::PageStatus::Recognized).map(|p| p.page).collect())
+        };
+        if opts.style == ocr::Style::Searchable {
+            eng.apply_custom(req.doc, label, source, false, work)?
+        } else {
+            // Pictures were replaced: a save writes the file without the old ones.
+            eng.apply_removing(req.doc, label, source, work)?
+        }
     };
     Ok(OcrOutcome { report: ocr::build_report(&rec, &applied, warnings), state: Some(state), output: None })
+}
+
+/// Before and after pictures of one page, as `data:` URLs, for the sheet.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrPreview {
+    pub before: String,
+    pub after: String,
+    pub applied: ocr::ApplyReport,
+}
+
+/// Renders what `req.style` would do to page `page` (zero-based) of the open document, without
+/// changing it. The longer side of each picture is at most `max_px`.
+pub fn ocr_preview(
+    eng: &Engine,
+    req: &OcrRequest,
+    page: u32,
+    max_px: u32,
+    backend: &dyn Recognizer,
+    cancel: &AtomicBool,
+) -> Result<OcrPreview, ToolError> {
+    use base64::Engine as _;
+    let opts = options_for(eng, req)?;
+    let (_, source) = eng.doc_source(req.doc)?;
+    let p = match &source {
+        DocSource::Path(path) => ocr::preview(&Input::Path(Path::new(path)), page, backend, &opts, max_px, cancel)?,
+        DocSource::Bytes(b, n) => ocr::preview(&Input::Bytes(&b[..*n]), page, backend, &opts, max_px, cancel)?,
+    };
+    let url = |png: &[u8]| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png));
+    Ok(OcrPreview { before: url(&p.before), after: url(&p.after), applied: p.applied })
 }
 
 fn no_page_readable(rec: &ocr::Recognition) -> Option<String> {

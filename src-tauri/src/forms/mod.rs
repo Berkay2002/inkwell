@@ -737,6 +737,25 @@ pub fn set_value(doc: &mut PdfDocument, page: u32, xref: i32, value: &FieldValue
     set_value_rt(&Rt::off(doc), page, xref, value)
 }
 
+/// Why a signature keeps a field from being filled: typing never silently breaks a signature, so a field a signature
+/// covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused. `None` when it may be filled.
+fn lock_refusal(doc: &PdfDocument, entries: &[Entry], e: &Entry) -> Option<String> {
+    let locks = scripts::locks_of(doc, entries);
+    if e.kind == FieldKind::Signature || !scripts::locked(&locks, e) {
+        return None;
+    }
+    if locks.iter().any(|l| matches!(l, scripts::Lock::Unchecked)) {
+        return Some(format!("The field [ {} ] is left as it is: too many form fields to check the signature locks", e.name));
+    }
+    Some(format!("The field [ {} ] is locked by a signature", e.name))
+}
+
+/// True when a signature keeps `set_value` from filling this field: asked before the assistant shows its card.
+pub(crate) fn field_is_locked(doc: &PdfDocument, page: u32, xref: i32) -> Result<bool> {
+    let entries = scan(doc)?;
+    Ok(entries.iter().find(|e| e.page == page && e.xref == xref).is_some_and(|e| lock_refusal(doc, &entries, e).is_some()))
+}
+
 fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec<u32>> {
     let entries = rt.entries()?;
     let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
@@ -744,9 +763,8 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
     if flag(ff, FieldFlags::READ_ONLY) {
         return Err(bad(format!("The field [ {} ] is read-only", e.name)));
     }
-    // Typing never silently breaks a signature: a field a signature covers (its /Lock, a FieldMDP or a DocMDP of 1) is refused.
-    if e.kind != FieldKind::Signature && scripts::locked(&scripts::locks_of(rt.doc(), entries), e) {
-        return Err(bad(format!("The field [ {} ] is locked by a signature", e.name)));
+    if let Some(m) = lock_refusal(rt.doc(), entries, e) {
+        return Err(bad(m));
     }
     let mut touched = vec![page];
     let mut changed = Vec::new();

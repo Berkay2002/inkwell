@@ -579,6 +579,7 @@ fn set_document_properties(c: &Ctx, a: &Value) -> Result<Output, String> {
     let st = l
         .eng
         .apply_custom(l.doc, "Edit document properties".into(), l.source.clone(), false, move |d| {
+            crate::outline::refuse_if_certified(d, "Changing its properties")?;
             let mut info = match d.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false)) {
                 Some(i) => i,
                 None => {
@@ -596,6 +597,7 @@ fn set_document_properties(c: &Ctx, a: &Value) -> Result<Output, String> {
                     info.dict_put(*key, a11y::text_obj(d, v)?)?;
                 }
             }
+            crate::preflight::sync_xmp_with_info(d)?;
             Ok(Vec::new())
         })
         .map_err(err)?;

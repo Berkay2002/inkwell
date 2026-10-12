@@ -225,7 +225,8 @@ notes, replies), fill_form_fields, organize_pages, delete_pages, edit_text (repl
 page_marks (watermark, header and footer, background, Bates numbers), set_document_properties, \
 sanitize_document, fix_accessibility and ocr_document. Making files next to it (never over one): \
 compress_document, export_document (text, HTML, Word, images), convert_to_standard (PDF/A, PDF/UA, PDF/X) and \
-create_blank_pdf. Checking: check_accessibility, check_preflight, compare_documents, list_open_documents. \
+create_blank_pdf. Checking: check_accessibility, check_preflight, compare_documents (with the saved file; compare_with_open_document \
+is for another open document and always asks). \
 open_tool opens one of the app's own tools for the user where you cannot act yourself (protect with a \
 password, security settings, merge, search across files; signing, printing and overwriting the original are \
 theirs to do). Depending on the permission mode the user chose, a change \

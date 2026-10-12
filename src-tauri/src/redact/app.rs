@@ -82,12 +82,24 @@ pub enum ApplyOutcome {
 pub fn on_redactions_applied(_doc: DocId, _bytes: &[u8]) {}
 
 pub fn find(eng: &Engine, doc: DocId, q: &FindQuery) -> Result<Vec<HitDto>> {
+    find_capped(eng, doc, q, None, usize::MAX, None)
+}
+
+/// [`find`] over the zero-based pages in `only` (every page when `None`), stopping at `max` hits and when `cancel` is set.
+pub fn find_capped(
+    eng: &Engine,
+    doc: DocId,
+    q: &FindQuery,
+    only: Option<&[u32]>,
+    max: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<HitDto>> {
     let q = match q.clone() {
         FindQuery::Text { needle, case_sensitive, whole_word } => Query::Text { needle, case_sensitive, whole_word },
         FindQuery::Pattern { pattern } => Query::Pattern(pattern),
         FindQuery::Regex { pattern, case_sensitive } => Query::Regex { pattern, case_sensitive },
     };
-    let hits = eng.read_custom(doc, |d| super::find(d, &q).map_err(err))?;
+    let hits = eng.read_custom(doc, |d| super::find_capped(d, &q, only, max, cancel).map_err(err))?;
     Ok(hits.iter().map(|h| HitDto { page: h.page as u32, text: h.text.clone(), quads: h.quads.iter().map(quad_dto).collect(), before: h.before.clone(), after: h.after.clone() }).collect())
 }
 
@@ -105,6 +117,7 @@ pub fn mark_hits(eng: &Engine, doc: DocId, hits: &[HitDto], source: EditSource) 
     pages.dedup();
     let label = format!("Mark {} item{} for redaction", hits.len(), s(hits.len()));
     eng.apply_custom(doc, label, source, false, |d| {
+        crate::outline::refuse_unless_annotating_allowed(d, "Marking text for redaction")?;
         super::mark_hits(d, &hits, &MarkStyle::default()).map_err(err)?;
         Ok(pages)
     })
@@ -115,6 +128,7 @@ pub fn mark_area(eng: &Engine, doc: DocId, page: u32, area: [f32; 4], source: Ed
     let [x0, y0, x1, y1] = area;
     let rect = Rect { x0: x0.min(x1), y0: y0.min(y1), x1: x0.max(x1), y1: y0.max(y1) };
     eng.apply_custom(doc, "Mark an area for redaction".into(), source, false, |d| {
+        crate::outline::refuse_unless_annotating_allowed(d, "Marking an area for redaction")?;
         super::add_area_mark(d, page as i32, rect, &MarkStyle::default()).map_err(err)?;
         Ok(vec![page])
     })
@@ -124,6 +138,7 @@ pub fn mark_pages(eng: &Engine, doc: DocId, pages: &[u32], source: EditSource) -
     let label = format!("Mark {} page{} for redaction", pages.len(), s(pages.len()));
     let pages = pages.to_vec();
     eng.apply_custom(doc, label, source, false, |d| {
+        crate::outline::refuse_unless_annotating_allowed(d, "Marking pages for redaction")?;
         for &p in &pages {
             super::mark_page(d, p as i32, &MarkStyle::default()).map_err(err)?;
         }
@@ -135,6 +150,7 @@ pub fn unmark(eng: &Engine, doc: DocId, marks: &[(u32, i32)], source: EditSource
     let label = format!("Remove {} redaction mark{}", marks.len(), s(marks.len()));
     let marks = marks.to_vec();
     eng.apply_custom(doc, label, source, false, |d| {
+        crate::outline::refuse_unless_annotating_allowed(d, "Removing a redaction mark")?;
         for &(p, xref) in &marks {
             if !super::remove_mark(d, p as i32, xref).map_err(err)? {
                 return Err(EngineError::Invalid(format!("no redaction mark {xref} on page {}", p + 1)));
@@ -196,6 +212,24 @@ pub fn preview_sanitize(eng: &Engine, doc: DocId, opts: &Sanitize) -> Result<San
     })
 }
 
+/// Redaction rewrites the whole file: a certified document is refused, and a signed one unless the result goes to
+/// a new file (`in_place` false), which leaves the signed original as it is.
+fn ensure_applicable(eng: &Engine, doc: DocId, in_place: bool) -> Result<()> {
+    eng.read_custom(doc, |d| applicable(d, in_place))
+}
+
+/// [`ensure_applicable`] on the open document: it runs again inside the edit lane, so a signature added between the
+/// first look and the step is caught too.
+fn applicable(d: &PdfDocument, in_place: bool) -> Result<()> {
+    crate::outline::refuse_if_certified(d, "Redacting it")?;
+    if in_place && crate::outline::signed(d) {
+        return Err(EngineError::Invalid(
+            "This document is signed, and redacting it in place would break its signature: save the redacted copy as a new file".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Applies every mark as one undo step labelled "Redact n items", then, with `save_to`, saves the
 /// verified bytes there (Save as: the document then lives there; the original file is untouched).
 pub fn apply(eng: &Engine, doc: DocId, sanitize: Sanitize, save_to: Option<String>, source: EditSource) -> Result<ApplyOutcome> {
@@ -216,6 +250,7 @@ pub fn apply_expecting(
     source: EditSource,
     expect: Option<&str>,
 ) -> Result<ApplyOutcome> {
+    ensure_applicable(eng, doc, save_to.is_none())?;
     let n = list_marks(eng, doc)?.len();
     if n == 0 {
         return Err(EngineError::Invalid("nothing is marked for redaction".into()));
@@ -224,7 +259,9 @@ pub fn apply_expecting(
     let mut report = None;
     let mut leaks = None;
     let label = format!("Redact {n} item{}", s(n));
+    let in_place = save_to.is_none();
     let r = eng.apply_redaction(doc, label, source, |d| {
+        applicable(d, in_place)?;
         if let Some(want) = expect {
             if marks_digest(&mark_dtos(d)?) != want {
                 return Err(EngineError::Invalid(MARKS_CHANGED.into()));
@@ -366,6 +403,8 @@ fn pick_save_target(app: &tauri::AppHandle, suggested: &str) -> Option<String> {
 pub async fn redact_apply(app: tauri::AppHandle, eng: Eng<'_>, doc: DocId, options: ApplyArgs) -> Result<ApplyOutcome> {
     let eng = eng.inner().clone();
     blocking(move || {
+        // Refused before any dialog.
+        ensure_applicable(&eng, doc, !options.save)?;
         // Ask first: a cancelled dialog leaves the document as it was.
         let save_to = if options.save {
             match pick_save_target(&app, &redacted_path(&eng.edit_state(doc)?.path)) {
@@ -391,6 +430,12 @@ pub async fn redact_apply(app: tauri::AppHandle, eng: Eng<'_>, doc: DocId, optio
 pub fn sanitize_doc(eng: &Engine, doc: DocId, o: Sanitize, source: EditSource) -> Result<(EditState, SanitizeReport)> {
     let mut report = SanitizeReport::default();
     let state = eng.apply_sanitizing(doc, "Remove hidden information".into(), source, |d| {
+        crate::outline::refuse_if_certified(d, "Removing its hidden information")?;
+        if crate::outline::signed(d) {
+            return Err(EngineError::Invalid(
+                "This document is signed, and removing its hidden information rewrites the whole file, which would break the signature. Remove the signature first, or do this on a copy without it.".into(),
+            ));
+        }
         report = super::sanitize(d, &o, &[]).map_err(err)?;
         let r = &report;
         let removed = r.metadata + r.hidden_layer_blocks + r.hidden_text_pages + r.scripts_actions + r.embedded_files + r.annotations + r.form_fields + r.bookmarks;

@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use serde::Serialize;
 
 pub use create::{create, discard_scratch, write_scratch_bytes, CreateOutput, CreateRequest, CreateSource, ImageInput, PageSize, TextInput};
-pub use export::{export, export_document, ExportKind, ExportOutput, ExportRequest, ImageFormat, Target};
+pub use export::{export, export_document, export_new, ExportKind, ExportOutput, ExportRequest, ImageFormat, Target};
 
 // ---------------------------------------------------------------- errors, progress
 
@@ -138,6 +138,45 @@ impl Staging {
             }
         }
         Ok(())
+    }
+}
+
+impl Staging {
+    /// [`Staging::publish`] that never replaces a file: a hard link (atomic) or, where the file system has no links,
+    /// an exclusive create and a copy. A name that is taken meanwhile is an error (`output-exists`) and the files
+    /// already moved are taken back out.
+    pub fn publish_new(&self, files: &[(String, PathBuf)]) -> Result<(), Error> {
+        for (staged, to) in files {
+            if let Err(e) = link_new(&self.path(staged), to) {
+                for (_, done) in files.iter().take_while(|(s, _)| s != staged) {
+                    let _ = fs::remove_file(done);
+                }
+                return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    std::io::Error::new(std::io::ErrorKind::AlreadyExists, "output-exists").into()
+                } else {
+                    e.into()
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `to` is made from `from` and never replaces a file that exists.
+fn link_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::io::ErrorKind::AlreadyExists;
+    match fs::hard_link(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == AlreadyExists => Err(e),
+        Err(_) => {
+            let mut dst = fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+            let copied = fs::File::open(from).and_then(|mut src| std::io::copy(&mut src, &mut dst)).and_then(|_| dst.sync_all());
+            if copied.is_err() {
+                drop(dst);
+                let _ = fs::remove_file(to);
+            }
+            copied
+        }
     }
 }
 

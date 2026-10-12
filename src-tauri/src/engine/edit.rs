@@ -1238,7 +1238,11 @@ impl Engine {
     }
 
     fn apply_locked(&self, entry: &DocEntry, ed: &mut Editor, op: &EditOp, source: EditSource) -> Result<EditState> {
+        // Every page operation changes the page tree: a certification does not survive one, at any /P.
+        crate::outline::refuse_if_certified(&ed.doc.doc, "Changing its pages")?;
         let sizes = ed.step().sizes.clone();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
         // A panic must also roll back below, or the next edit would snapshot what it left behind.
         let ran = catch_unwind(AssertUnwindSafe(|| run(&mut ed.doc.doc, op, &sizes))).unwrap_or(Err(EngineError::Panic));
         let changed = ran.and_then(|c| match c {
@@ -1248,6 +1252,8 @@ impl Engine {
                 if drops {
                     crate::search::catalog::embed::drop_if_stale(&ed.doc.doc)?;
                 }
+                // A signed document's save stays incremental: a deleted page stays in the file, unused.
+                let drops = drops && !signed;
                 let snap = ed.snapshot()?;
                 let doc = open_snap(&snap, entry)?;
                 let pages = op.touched(sizes.len(), after.len());
@@ -1459,6 +1465,8 @@ impl Engine {
         let ed = self.lane(entry, lane)?;
         let len = ed.step().snap.len;
         let page_count = ed.step().sizes.len();
+        // Read before the edit runs: it may be the one that takes the signature away.
+        let signed = crate::outline::signed(&ed.doc.doc);
         let ran = catch_unwind(AssertUnwindSafe(|| {
             let out = f(&mut ed.doc.doc)?;
             // An edit that takes content out (pages included, as `drops` below sees them) must not leave it
@@ -1485,7 +1493,9 @@ impl Engine {
             };
             let doc = open_snap(&snap, entry)?;
             let sizes = Arc::new(page_sizes(&doc.doc)?);
-            let drops = removes || sizes.len() < ed.step().sizes.len();
+            // Content taken out makes the save a full rewrite, which would void a signature: a signed document's
+            // stays incremental (the removed objects stay in the file, unused, as in outline and links).
+            let drops = (removes || sizes.len() < ed.step().sizes.len()) && !signed;
             Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
         });
         match changed {
@@ -1526,12 +1536,19 @@ impl Engine {
     /// Reverts the last step (or the last assistant turn). A no-op (returning the state) when
     /// there is nothing to undo.
     pub fn undo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, |ed| ed.undo_target())
+        self.travel(id, None, |ed| ed.undo_target())
+    }
+
+    /// [`Engine::undo`] only while the document is still at generation `rev` (the one a step just made): checked
+    /// under the lane lock, so a step that landed since (an assistant edit, an undo and redo) is never undone in
+    /// its place. `Err(Stale)` then, and nothing changes.
+    pub fn undo_if(&self, id: DocId, rev: u32) -> Result<EditState> {
+        self.travel(id, Some(rev), |ed| ed.undo_target())
     }
 
     /// Reapplies what was undone last. A no-op when there is nothing to redo.
     pub fn redo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, |ed| ed.redo_target())
+        self.travel(id, None, |ed| ed.redo_target())
     }
 
     /// Shows the document as of history entry `index` (undo or redo up to it). Later entries
@@ -1539,7 +1556,7 @@ impl Engine {
     pub fn restore(&self, id: DocId, index: usize) -> Result<EditState> {
         // Checked under the lane lock: an edit in between may have dropped the entry.
         let mut bad = index > 0;
-        let state = self.travel(id, |ed| {
+        let state = self.travel(id, None, |ed| {
             bad = index >= ed.steps.len();
             Some(index).filter(|_| !bad)
         })?;
@@ -1573,11 +1590,20 @@ impl Engine {
             .collect())
     }
 
-    fn travel(&self, id: DocId, target: impl FnOnce(&Editor) -> Option<usize>) -> Result<EditState> {
+    fn travel(&self, id: DocId, only_at: Option<u32>, target: impl FnOnce(&Editor) -> Option<usize>) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
-        let Some(ed) = lane.as_mut() else { return Ok(clean_state(&entry)) };
-        let Some(to) = target(ed).filter(|&t| t != ed.cur) else { return Ok(ed.state(&entry)) };
+        // The generation only moves under this lock (`publish`), so this cannot change before the step is taken.
+        if only_at.is_some_and(|rev| entry.layout.read().rev != rev) {
+            return Err(EngineError::Stale);
+        }
+        // A conditional undo that finds nothing to undo did not undo: the caller must not think it did.
+        let nothing = |entry: &DocEntry, ed: Option<&Editor>| match only_at {
+            Some(_) => Err(EngineError::Stale),
+            None => Ok(ed.map_or_else(|| clean_state(entry), |ed| ed.state(entry))),
+        };
+        let Some(ed) = lane.as_mut() else { return nothing(&entry, None) };
+        let Some(to) = target(ed).filter(|&t| t != ed.cur) else { return nothing(&entry, Some(ed)) };
         ed.doc = open_snap(&ed.steps[to].snap, &entry)?;
         ed.cur = to;
         Ok(self.publish(&entry, ed))
@@ -1727,6 +1753,10 @@ impl Engine {
         let mut lane = entry.editor.lock();
         let ed = self.lane(&entry, &mut lane)?;
         ed.ensure_extractable(&entry)?;
+        if delete_after {
+            // Before the file is written: the delete that follows is refused on a certified document.
+            crate::outline::refuse_if_certified(&ed.doc.doc, "Removing the extracted pages")?;
+        }
         let pages = check_pages(pages, ed.step().sizes.len())?;
         let bytes = new_pdf(&[(&ed.doc.doc, &pages)])?;
         write_atomic(Path::new(out), &bytes, pages.len() as u32, Readback::default())?;
@@ -1815,3 +1845,7 @@ mod security;
 #[cfg(test)]
 #[path = "tests_edit.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_certified.rs"]
+mod tests_certified;

@@ -253,6 +253,24 @@ pub fn page_list_label(pages: &[i64]) -> String {
     }
 }
 
+/// The most pages one call may name.
+const MAX_PAGES_ASKED: usize = 500;
+
+/// [`pages_requested`] for a call that acts on them: a list or range over the cap is refused, not cut.
+pub(super) fn pages_checked(args: &Value) -> Result<Vec<i64>, String> {
+    let over = match args.get("pages").and_then(Value::as_array) {
+        Some(a) => a.len() > MAX_PAGES_ASKED,
+        None => matches!((int(args, "from"), int(args, "to")), (Some(a), Some(b)) if b.saturating_sub(a) >= MAX_PAGES_ASKED as i64),
+    };
+    if over {
+        return Err(format!(
+            "Too many pages in one call (at most {MAX_PAGES_ASKED}). Nothing was done; ask for fewer pages, or leave the pages out for every page."
+        ));
+    }
+    Ok(pages_requested(args))
+}
+
+/// Only for labels and cards: a list over the cap is cut here (see [`pages_checked`]).
 pub(super) fn pages_requested(args: &Value) -> Vec<i64> {
     if let Some(a) = args.get("pages").and_then(Value::as_array) {
         // capped like a range: a model-built list of millions of pages must not stall the turn
@@ -452,7 +470,7 @@ fn outline(c: &Ctx, _: &Value) -> Result<Output, String> {
 fn get_text(c: &Ctx, a: &Value) -> Result<Output, String> {
     let n = c.text.pages;
     let mut pages: Vec<u32> = Vec::new();
-    for p in pages_requested(a) {
+    for p in pages_checked(a)? {
         if p < 1 || p > n as i64 {
             return Err(format!("Page {p} does not exist: the document has {n} page{}.", if n == 1 { "" } else { "s" }));
         }

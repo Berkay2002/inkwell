@@ -4,6 +4,7 @@
 use super::*;
 use crate::ai::actions::tests::{Host, fixture_doc, rev, sign, steps};
 use crate::ai::text::DocText;
+use crate::engine::edit::EditSource;
 use crate::ai::tools::{NEVER, quiet};
 
 fn ctx_run<R>(h: &Host, f: impl FnOnce(&Ctx) -> R) -> R {
@@ -151,6 +152,52 @@ fn properties_are_set_once_and_a_repeat_is_an_error() {
     assert!(err_of(&h, "set_document_properties", json!({ "creator": "x" })).contains("no option"));
     assert!(err_of(&h, "set_document_properties", json!({ "title": 7 })).contains("must be text"));
     assert_eq!(steps(&h), s + 1);
+}
+
+/// The XMP packet as text (empty when the document has none).
+fn xmp_of(h: &Host) -> String {
+    h.eng.read_custom(h.doc, |d| Ok(crate::a11y::matterhorn::xmp(&d.catalog()?)?.unwrap_or_default())).unwrap()
+}
+
+#[test]
+fn properties_reach_the_xmp_packet_too_and_a_cleared_one_leaves_it() {
+    let h = fixture_doc("tb-props-xmp");
+    // a packet that names an old title and author, as an export from another application leaves it
+    h.eng
+        .apply_custom(h.doc, "Add XMP".into(), EditSource::User, false, |d| {
+            let xml = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">                <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">                <dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">Old title</rdf:li></rdf:Alt></dc:title>                <dc:creator><rdf:Seq><rdf:li>Old author</rdf:li></rdf:Seq></dc:creator>                </rdf:Description></rdf:RDF></x:xmpmeta>";
+            let mut stm = d.add_stream(&mupdf::Buffer::from_bytes(xml.as_bytes())?, None, false)?;
+            stm.dict_put("Type", mupdf::pdf::PdfObject::new_name("Metadata")?)?;
+            stm.dict_put("Subtype", mupdf::pdf::PdfObject::new_name("XML")?)?;
+            d.catalog()?.dict_put("Metadata", stm)?;
+            Ok(Vec::new())
+        })
+        .unwrap();
+    ok(&h, "set_document_properties", json!({ "title": "New title", "author": "" }));
+    let x = xmp_of(&h);
+    assert!(x.contains("New title") && !x.contains("Old title"), "{x}");
+    assert!(!x.contains("Old author"), "a cleared author stays in the packet: {x}");
+}
+
+#[test]
+fn a_certified_document_takes_no_property_change_and_no_sanitize_and_a_signed_one_no_rewrite() {
+    let h = fixture_doc("tb-cert-props");
+    crate::ai::actions::tests::certify(&h, Some(2), None);
+    let (r, s) = (rev(&h), steps(&h));
+    for (tool, args) in [("set_document_properties", json!({ "title": "T" })), ("sanitize_document", json!({}))] {
+        // the assistant's own guard answers first; the closure's `refuse_if_certified` is the backstop
+        // (`engine/tests_certified.rs` runs the same writes without it)
+        let e = err_of(&h, tool, args);
+        assert!(e.contains("certified") || e.contains("digitally signed"), "{tool}: {e}");
+    }
+    assert_eq!((rev(&h), steps(&h)), (r, s));
+    // signed but not certified: a sanitize is a full rewrite, which would void the signature
+    let h = fixture_doc("tb-signed-sanitize");
+    sign(&h);
+    let s = steps(&h);
+    let e = err_of(&h, "sanitize_document", json!({}));
+    assert!(e.contains("signed"), "{e}");
+    assert_eq!(steps(&h), s);
 }
 
 #[test]

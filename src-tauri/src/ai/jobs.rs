@@ -1,5 +1,5 @@
 //! The assistant's tools that take time or write files: compress, recognize text, export, convert to
-//! PDF/A / PDF/UA / PDF/X, create a blank PDF, compare, and listing the open documents.
+//! PDF/A / PDF/UA / PDF/X, create a blank PDF, and compare.
 //!
 //! Same rules as `actions.rs` and `toolbox.rs`. A tool that makes a file writes a new one next to
 //! the document under a name that is not taken (the original and every other file stay as they
@@ -12,7 +12,7 @@ use super::toolbox::{engine, guard_content, unknown_keys};
 use super::tools::{Class, Ctx, Lane, Output, Tool, UiAction, clip, int, page_list_label, pages_requested, tool};
 use crate::convert::{self, CreateSource, ExportKind, ExportRequest, ImageFormat, Target};
 use crate::engine::{DocId, DocSource, Engine};
-use crate::tools::{BackendChoice, CompressRequest, OcrRequest, ToolError, make_backend, run_compress, run_ocr_as};
+use crate::tools::{BackendChoice, CompressRequest, OcrRequest, ToolError, make_backend, run_compress_new, run_ocr_as};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -22,33 +22,32 @@ use std::sync::Arc;
 const MAX_REPORT: usize = 6_000;
 
 pub fn tools() -> Vec<Arc<Tool>> {
-    let none = json!({ "type": "object", "additionalProperties": false, "properties": {} });
     vec![
         tool(
-            "list_open_documents",
-            "Lists the documents open in the app (id, file name, pages) so one can be compared with this one. Names only; \
-             nothing of their content is read.",
-            none,
-            Class::Read,
-            |_| "List open documents".into(),
-            list_open_documents,
-        ),
-        tool(
             "compare_documents",
-            "Compares this document as it is now with another one and lists what changed (text, formatting, images, pages, \
-             comments, form fields, metadata). with = \"saved\" (default) compares with the file on disk, so it lists the \
-             unsaved changes; with = an id from list_open_documents compares with that open document (older → this one). \
-             Reads both; changes nothing.",
+            "Compares this document as it is now with the file it was opened from, and lists what changed (text, \
+             formatting, images, pages, comments, form fields, metadata): the unsaved changes. Reads both; changes \
+             nothing. To compare with a different open document use compare_with_open_document.",
             json!({ "type": "object", "additionalProperties": false, "properties": {
-                "with": { "description": "\"saved\", or the id of another open document", "type": ["string", "integer"] },
+                "with": { "description": "only \"saved\" (the default)", "type": "string", "enum": ["saved"] },
             } }),
             Class::Read,
-            |a| match a.get("with") {
-                Some(v) if v.as_str().is_none_or(|s| !s.trim().eq_ignore_ascii_case("saved")) => "Compare with another open document".into(),
-                _ => "Compare with the saved file".into(),
-            },
+            |_| "Compare with the saved file".into(),
             compare_documents,
         ),
+        tool(
+            "compare_with_open_document",
+            "Compares this document with ANOTHER open document and lists what differs (older = the other one). \
+             document: the file name of the other open document, as the user said it. This reads the other \
+             document's content, so the user is asked to approve it every time, in every mode.",
+            json!({ "type": "object", "additionalProperties": false, "required": ["document"], "properties": {
+                "document": { "type": "string", "description": "the file name of the other open document, e.g. invoice-v1.pdf" },
+            } }),
+            Class::Permanent,
+            |a| format!("Compare with “{}”", clip(str_arg(a, "document").unwrap_or("another open document"), 60)),
+            compare_with_open_document,
+        )
+        .checked(compare_other_check),
         tool(
             "compress_document",
             "Makes a smaller copy of the document next to it (\"<name> (compressed).pdf\"); the original is not changed. \
@@ -112,7 +111,8 @@ pub fn tools() -> Vec<Arc<Tool>> {
             Class::Edit,
             |a| format!("Convert a copy to {}", profile_label(a)),
             convert_to_standard,
-        ),
+        )
+        .checked(convert_check),
         tool(
             "create_blank_pdf",
             "Creates a new blank PDF (1-500 pages, page_size letter or a4) as a separate unsaved document the user can open. \
@@ -213,20 +213,6 @@ fn name_of(path: &str) -> String {
     Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
 }
 
-fn list_open_documents(c: &Ctx, _: &Value) -> Result<Output, String> {
-    let l = engine(c)?;
-    let mut docs = l.eng.open_docs();
-    docs.sort_by_key(|d| d.id);
-    let lines: Vec<String> = docs
-        .iter()
-        .map(|d| format!("{}: {} ({}){}", d.id, name_of(&d.path()), plural(d.page_count() as usize, "page"), if d.id == l.doc { " ← this document" } else { "" }))
-        .collect();
-    if lines.is_empty() {
-        return Err("No document is open.".into());
-    }
-    Ok(Output::text(format!("{} open:\n{}", plural(lines.len(), "document"), data_block(&lines.join("\n")))))
-}
-
 /// The bytes a document shows now (unsaved changes included).
 fn bytes_of(eng: &Engine, doc: DocId) -> Result<Vec<u8>, String> {
     match eng.doc_source(doc).map_err(err)?.1 {
@@ -235,36 +221,10 @@ fn bytes_of(eng: &Engine, doc: DocId) -> Result<Vec<u8>, String> {
     }
 }
 
-fn compare_documents(c: &Ctx, a: &Value) -> Result<Output, String> {
+/// What `compare_documents` and `compare_with_open_document` do once the other side is known: `old` is the
+/// bytes of the older document and `old_name` how the answer calls it.
+fn compare_bytes(c: &Ctx, l: &Lane, old: Vec<u8>, old_name: String, old_pw: Option<&str>) -> Result<Output, String> {
     use crate::diff::{ChangeKind, CompareOptions};
-    let l = engine(c)?;
-    unknown_keys(a, &["with"], "compare_documents")?;
-    let other: Option<DocId> = match a.get("with") {
-        None | Some(Value::Null) => None,
-        Some(v) if v.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("saved")) => None,
-        Some(_) => {
-            let id = int(a, "with").ok_or("\"with\" must be \"saved\" or the id of an open document (list_open_documents).")?;
-            let id = DocId::try_from(id).map_err(|_| "That is not a document id (list_open_documents).".to_string())?;
-            if id == l.doc {
-                return Err("That is this document. Give another document's id, or \"saved\" for the file on disk.".into());
-            }
-            Some(id)
-        }
-    };
-    let (old, old_name, old_pw) = match other {
-        Some(id) => {
-            let entry = l.eng.doc_entry(id).map_err(|_| "No open document has that id (list_open_documents).".to_string())?;
-            (bytes_of(l.eng, id)?, name_of(&entry.path()), l.eng.password(id).map_err(err)?)
-        }
-        None => {
-            if !l.eng.edit_state(l.doc).map_err(err)?.dirty {
-                return Err("There are no unsaved changes: this document is the saved file. Give \"with\" another open document's id to compare with.".into());
-            }
-            let path = doc_path(&l)?;
-            let bytes = std::fs::read(&path).map_err(|e| format!("Could not read the saved file: {e}"))?;
-            (bytes, format!("the saved {}", name_of(&path.to_string_lossy())), l.eng.password(l.doc).map_err(err)?)
-        }
-    };
     let new = bytes_of(l.eng, l.doc)?;
     let opts = CompareOptions {
         password_a: old_pw.map(|p| p.to_string()),
@@ -312,6 +272,66 @@ fn compare_documents(c: &Ctx, a: &Value) -> Result<Output, String> {
     Ok(Output::text(s))
 }
 
+fn compare_documents(c: &Ctx, a: &Value) -> Result<Output, String> {
+    let l = engine(c)?;
+    unknown_keys(a, &["with"], "compare_documents")?;
+    match a.get("with") {
+        None | Some(Value::Null) => {}
+        Some(v) if v.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("saved")) => {}
+        Some(_) => {
+            return Err("compare_documents only compares with the saved file. To compare with another open document use compare_with_open_document.".into());
+        }
+    }
+    if !l.eng.edit_state(l.doc).map_err(err)?.dirty {
+        return Err("There are no unsaved changes: this document is the saved file. To compare with another open document use compare_with_open_document.".into());
+    }
+    let path = doc_path(&l)?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("Could not read the saved file: {e}"))?;
+    let name = format!("the saved {}", name_of(&path.to_string_lossy()));
+    let pw = l.eng.password(l.doc).map_err(err)?;
+    compare_bytes(c, &l, bytes, name, pw.as_ref().map(|p| p.as_str()))
+}
+
+/// The one other open document called `name` (file name, any case). Several of that name, or none, are errors that
+/// do not list what else is open: the model gets to know a document's name only from the user.
+fn other_document(l: &Lane, name: &str) -> Result<(DocId, String), String> {
+    let want = name.trim().to_lowercase();
+    if want.is_empty() {
+        return Err("\"document\" is required: the file name of the other open document.".into());
+    }
+    let matches: Vec<(DocId, String)> = l
+        .eng
+        .open_docs()
+        .iter()
+        .filter(|d| d.id != l.doc)
+        .map(|d| (d.id, name_of(&d.path())))
+        .filter(|(_, n)| n.to_lowercase() == want)
+        .collect();
+    match matches.len() {
+        0 => Err(format!("No other open document is called “{}”. Ask the user which document to compare with.", clip(name, 80))),
+        1 => Ok(matches.into_iter().next().expect("one match")),
+        _ => Err(format!("More than one open document is called “{}”. Ask the user to close the others, or to say which one.", clip(name, 80))),
+    }
+}
+
+fn compare_other_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
+    unknown_keys(a, &["document"], "compare_with_open_document")?;
+    let name = str_arg(a, "document").ok_or("\"document\" is required: the file name of the other open document.")?;
+    let Some(l) = c.host.lane() else { return Ok(None) };
+    let (_, found) = other_document(&l, name)?;
+    Ok(Some(format!("Reads the content of the open document “{found}” and sends what differs from this one to the assistant")))
+}
+
+fn compare_with_open_document(c: &Ctx, a: &Value) -> Result<Output, String> {
+    let l = engine(c)?;
+    unknown_keys(a, &["document"], "compare_with_open_document")?;
+    let name = str_arg(a, "document").ok_or("\"document\" is required: the file name of the other open document.")?;
+    let (id, found) = other_document(&l, name)?;
+    let bytes = bytes_of(l.eng, id)?;
+    let pw = l.eng.password(id).map_err(err)?;
+    compare_bytes(c, &l, bytes, found, pw.as_ref().map(|p| p.as_str()))
+}
+
 // ---- compress ------------------------------------------------------------------------------------
 
 fn preset_arg(a: &Value) -> Result<crate::compress::Preset, String> {
@@ -350,7 +370,8 @@ fn compress_document(c: &Ctx, a: &Value) -> Result<Output, String> {
     let dest = sibling(&l, " (compressed)", "pdf")?;
     let req = CompressRequest { doc: l.doc, preset, custom: None, save_to: None };
     let mut last = -1i32;
-    let r = run_compress(l.eng, &req, Some(dest.clone()), c.cancel, &mut |p| {
+    // a name nobody confirmed: a file that appears there meanwhile is never replaced
+    let r = run_compress_new(l.eng, &req, dest.clone(), c.cancel, &mut |p| {
         let pct = (p.fraction * 100.0) as i32;
         if pct != last {
             last = pct;
@@ -405,7 +426,7 @@ fn ocr_document(c: &Ctx, a: &Value) -> Result<Output, String> {
         "tesseract" => BackendChoice::Tesseract,
         o => return Err(format!("Unknown engine \"{o}\". Use windows or tesseract.")),
     };
-    let req = OcrRequest { doc: l.doc, pages: range_of(&pages), languages, force: bool_arg(a, "force", false), backend, save_to: None };
+    let req = OcrRequest { doc: l.doc, pages: range_of(&pages), languages, force: bool_arg(a, "force", false), backend, style: Default::default(), dpi: None, font: Default::default(), save_to: None };
     let tesseract = c.host.tesseract();
     let rec = make_backend(backend, tesseract.as_deref()).map_err(|e| job_err(e.0))?;
     let out = run_ocr_as(
@@ -510,7 +531,7 @@ fn export_document(c: &Ctx, a: &Value) -> Result<Output, String> {
     };
     let req = ExportRequest { doc: l.doc, kind: kind.clone(), pages: range_of(&pages), save_to: String::new() };
     let mut last = u32::MAX;
-    let r = convert::export(l.eng, &req, target, c.cancel, &mut |p| {
+    let r = convert::export_new(l.eng, &req, target, c.cancel, &mut |p| {
         if p.done != last {
             last = p.done;
             (c.progress)(format!("Exporting: {} of {}", p.done, p.total.max(1)));
@@ -541,12 +562,28 @@ fn profile_label(a: &Value) -> &'static str {
     super::toolbox::profile_arg(a).map_or("a standard", |p| p.label())
 }
 
-fn convert_to_standard(c: &Ctx, a: &Value) -> Result<Output, String> {
-    use crate::preflight::{Convert, check_doc, convert_to_file};
-    let l = engine(c)?;
+/// Everything `convert_to_standard` can refuse, and what it would write, worked out before the user is asked: the
+/// preflight check runs here (and again when the tool runs, on whatever the document is by then).
+struct ConvertJob {
+    profile: crate::preflight::Profile,
+    convert: crate::preflight::Convert,
+    dest: PathBuf,
+}
+
+fn convert_job(c: &Ctx, l: &Lane, a: &Value) -> Result<ConvertJob, String> {
+    use crate::preflight::{Convert, check_doc};
     unknown_keys(a, &["profile", "lang"], "convert_to_standard")?;
     let profile = super::toolbox::profile_arg(a)?;
     let lang = super::toolbox::text_arg(a, "lang", 35)?.filter(|t| !t.is_empty());
+    // The copy is written without encryption: a document its owner keeps from being copied out of is refused (as
+    // export and extract do), and a protected one is not made into an open one on the assistant's say-so.
+    l.eng.ensure_extractable(l.doc).map_err(err)?;
+    if l.eng.security_info(l.doc).map_err(err)?.encrypted {
+        return Err("This document is password protected, and a converted copy is written without its protection, so the \
+                    assistant does not make one. Tell the user they can convert it themselves in the Preflight tool \
+                    (as a new file)."
+            .into());
+    }
     let mut last = u32::MAX;
     let before = check_doc(l.eng, l.doc, profile, &mut |p| {
         if p.done != last {
@@ -567,10 +604,25 @@ fn convert_to_standard(c: &Ctx, a: &Value) -> Result<Output, String> {
         return Err(format!("No safe fix applies to what fails, so a conversion would not change the result.{why} Tell the user."));
     }
     let suffix = format!(" ({})", profile.label().replace('/', "-"));
-    let dest = sibling(&l, &suffix, "pdf")?;
-    let convert = Convert { groups, lang };
+    let dest = sibling(l, &suffix, "pdf")?;
+    Ok(ConvertJob { profile, convert: Convert { groups, lang }, dest })
+}
+
+fn convert_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
+    let Some(l) = c.host.lane() else { return Ok(None) };
+    let job = convert_job(c, &l, a)?;
+    Ok(Some(format!(
+        "Saves the converted copy “{}” next to the document; the original is not changed",
+        file_name(&job.dest)
+    )))
+}
+
+fn convert_to_standard(c: &Ctx, a: &Value) -> Result<Output, String> {
+    use crate::preflight::convert_to_new_file;
+    let l = engine(c)?;
+    let ConvertJob { profile, convert, dest } = convert_job(c, &l, a)?;
     let mut last = u32::MAX;
-    let done = convert_to_file(l.eng, l.doc, profile, &convert, &dest.to_string_lossy(), &mut |p| {
+    let done = convert_to_new_file(l.eng, l.doc, profile, &convert, &dest.to_string_lossy(), &mut |p| {
         if p.done != last {
             last = p.done;
             (c.progress)(format!("Converting: page {} of {}", p.done.max(1), p.pages));

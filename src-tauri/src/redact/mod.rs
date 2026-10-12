@@ -59,6 +59,9 @@ pub enum RedactError {
     /// known about what it contains, so it is not used.
     #[error("the redacted copy is encrypted and there is no password to check it with")]
     NeedsPassword,
+    /// A search that was asked to stop.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 type Result<T> = std::result::Result<T, RedactError>;
@@ -291,6 +294,19 @@ fn joined(pt: &PageText) -> Option<(PageText, Vec<usize>)> {
 pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 pub fn find(doc: &Document, query: &Query) -> Result<Vec<Hit>> {
+    find_capped(doc, query, None, usize::MAX, None)
+}
+
+/// [`find`] over the pages in `only` (zero-based; every page when `None`), stopping once `max` hits are
+/// collected, so a pattern that matches everything on a big document does not build millions of them, and with
+/// `Cancelled` when `cancel` is set between pages.
+pub fn find_capped(
+    doc: &Document,
+    query: &Query,
+    only: Option<&[u32]>,
+    max: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<Hit>> {
     let re = match query {
         Query::Text { needle, case_sensitive, whole_word } => literal_regex(needle, *case_sensitive, *whole_word)?,
         Query::Regex { pattern, case_sensitive } => {
@@ -303,6 +319,12 @@ pub fn find(doc: &Document, query: &Query) -> Result<Vec<Hit>> {
     }
     let mut hits = Vec::new();
     for p in 0..doc.page_count()? {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err(RedactError::Cancelled);
+        }
+        if only.is_some_and(|o| !o.contains(&(p as u32))) {
+            continue;
+        }
         let pt = index_page(&doc.load_page(p)?)?;
         let alt = joined(&pt);
         let views = std::iter::once((&pt, None)).chain(alt.as_ref().map(|(v, at)| (v, Some(at))));
@@ -321,6 +343,9 @@ pub fn find(doc: &Document, query: &Query) -> Result<Vec<Hit>> {
                 if !quads.is_empty() {
                     let (before, after) = context(&pt.text, &r);
                     hits.push(Hit { page: p, text: pt.text[r].to_owned(), quads, before, after });
+                    if hits.len() >= max {
+                        return Ok(hits);
+                    }
                 }
             }
         }

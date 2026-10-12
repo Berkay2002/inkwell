@@ -71,33 +71,51 @@ pub(super) enum Touch {
 /// Refuses a change a signature forbids, with a sentence the model relays. `fields` are the fully
 /// qualified names of the form fields a `Touch::Fields` change would fill. Run before the user is
 /// asked (the tool's `check`) and again when the change is made.
-pub(super) fn guard(l: &Lane, touch: Touch, fields: &[String]) -> Result<(), String> {
-    let s = l.eng.read_custom(l.doc, |d| Ok(crate::signed::inspect(d))).map_err(err)?;
-    if !s.signed {
+pub(super) fn guard(l: &Lane, touch: Touch, fields: &[(u32, i32, String)]) -> Result<(), String> {
+    // The signature reading every write path of the app uses (`outline`): signed, the certification's `/P`,
+    // and whether a save of this document could be incremental.
+    let (signed, certified, incremental) = l
+        .eng
+        .read_custom(l.doc, |d| Ok((crate::outline::signed(d), crate::outline::certified(d)?, d.can_be_saved_incrementally())))
+        .map_err(err)?;
+    if !signed {
         return Ok(());
     }
     // repaired on open, or redacted in this session: either way every save is a full rewrite
-    if s.rewrite || l.eng.edit_state(l.doc).map_err(err)?.redacted {
+    if !incremental || l.eng.edit_state(l.doc).map_err(err)?.redacted {
         return Err(REWRITE.into());
     }
     match touch {
         Touch::Content => Err(SIGNED.into()),
-        Touch::Annotations if s.certified.is_some_and(|p| p <= 2) => Err(
+        Touch::Annotations if certified.is_some_and(|p| p <= 2) => Err(
             "This document is certified so that comments are not allowed after signing, and adding one would invalidate \
              the signature. Tell the user; they can save a copy of the file and make the change there."
                 .into(),
         ),
-        Touch::Fields if s.certified == Some(1) => Err(
+        Touch::Fields if certified == Some(1) => Err(
             "This document is certified so that no change at all is allowed after signing, so filling a field would \
              invalidate the signature. Tell the user; they can save a copy of the file and fill that."
                 .into(),
         ),
-        Touch::Fields => match fields.iter().find(|f| s.locks_field(f)) {
-            Some(f) => Err(format!(
-                "The field \"{f}\" is locked by a signature, so changing it would invalidate the signature. Nothing was changed; tell the user."
-            )),
-            None => Ok(()),
-        },
+        Touch::Fields => {
+            let locked = l
+                .eng
+                .read_custom(l.doc, |d| {
+                    for (page, xref, name) in fields {
+                        if forms::field_is_locked(d, *page, *xref)? {
+                            return Ok(Some(name.clone()));
+                        }
+                    }
+                    Ok(None)
+                })
+                .map_err(err)?;
+            match locked {
+                Some(f) => Err(format!(
+                    "The field \"{f}\" is locked by a signature, so changing it would invalidate the signature. Nothing was changed; tell the user."
+                )),
+                None => Ok(()),
+            }
+        }
         Touch::Annotations => Ok(()),
     }
 }
@@ -142,7 +160,7 @@ pub(super) fn bool_arg(a: &Value, key: &str, default: bool) -> bool {
 /// `pages` / `from`-`to` as 0-based indices, checked against the document. Empty: not given.
 pub(super) fn pages_arg(a: &Value, count: u32) -> Result<Vec<u32>, String> {
     let mut out = Vec::new();
-    for p in pages_requested(a) {
+    for p in super::tools::pages_checked(a)? {
         if p < 1 || p > count as i64 {
             return Err(format!("Page {p} does not exist: the document has {}.", plural(count as usize, "page")));
         }
@@ -191,10 +209,20 @@ fn covered(h: &HitDto, marks: &[MarkDto]) -> bool {
     })
 }
 
-fn find_hits(l: &Lane, q: &FindQuery, pages: &[u32]) -> Result<Vec<HitDto>, String> {
-    let mut hits = crate::redact::app::find(l.eng, l.doc, q).map_err(err)?;
-    if !pages.is_empty() {
-        hits.retain(|h| pages.contains(&h.page));
+/// The matches of `q` on `pages` (every page when empty). The scan stops at the first match with `first_only`, and
+/// otherwise at more than [`MAX_HITS`] (an error: a query that matches everything must not build millions of hits);
+/// it ends early when the user stops the turn.
+fn find_hits(l: &Lane, cancel: &std::sync::atomic::AtomicBool, q: &FindQuery, pages: &[u32], first_only: bool) -> Result<Vec<HitDto>, String> {
+    let max = if first_only { 1 } else { MAX_HITS + 1 };
+    let only = (!pages.is_empty()).then_some(pages);
+    let hits = crate::redact::app::find_capped(l.eng, l.doc, q, only, max, Some(cancel)).map_err(|e| match e {
+        EngineError::Invalid(m) if m == "cancelled" => "Stopped by the user. Nothing was changed.".to_string(),
+        e => err(e),
+    })?;
+    if !first_only && hits.len() > MAX_HITS {
+        return Err(format!(
+            "More than {MAX_HITS} matches: too many to handle in one go. Nothing was changed; narrow it with \"pages\" or a more specific query."
+        ));
     }
     Ok(hits)
 }
@@ -328,12 +356,13 @@ pub fn tools() -> Vec<Arc<Tool>> {
         tool(
             "redact_unmark",
             "Removes redaction marks (nothing was removed from the document yet, so this only takes boxes away). Give \
-             \"marks\" (ids from redact_list_marks) or \"all\": true. Changes the document (the user approves it).",
+             \"marks\" (ids from redact_list_marks) or \"all\": true. The user is asked to approve it in Ask and Auto mode.",
             json!({ "type": "object", "additionalProperties": false, "properties": {
                 "marks": { "type": "array", "items": { "type": "string" }, "description": "ids like p3#41" },
                 "all": { "type": "boolean" },
             } }),
-            Class::Edit,
+            // the user's own marks: text in a document must not be able to delete them without a question
+            Class::Destructive,
             |a| match a.get("marks").and_then(Value::as_array) {
                 _ if bool_arg(a, "all", false) => "Remove all redaction marks".into(),
                 Some(m) if !m.is_empty() => format!("Remove {} redaction mark{}", m.len(), if m.len() == 1 { "" } else { "s" }),
@@ -516,7 +545,7 @@ fn redact_find_and_mark(c: &Ctx, a: &Value) -> Result<Output, String> {
     let (q, what) = query_arg(a)?;
     let count = state(&l)?.page_count;
     let pages = pages_arg(a, count)?;
-    let hits = find_hits(&l, &q, &pages)?;
+    let hits = find_hits(&l, c.cancel, &q, &pages, false)?;
     if hits.is_empty() {
         return Err(format!("No match for {what} in the document text{}: nothing was marked. Scanned pages have no text to match; use redact_mark_area for those.",
             if pages.is_empty() { String::new() } else { format!(" on {}", pages_label(&pages)) }));
@@ -699,7 +728,7 @@ fn reviewed_marks(l: &Lane, a: &Value) -> Result<(Vec<MarkDto>, Vec<u32>), Strin
     let mut on: Vec<u32> = marks.iter().map(|m| m.page).collect();
     on.sort_unstable();
     on.dedup();
-    let said: Vec<u32> = pages_requested(a).iter().filter(|p| **p >= 1).map(|p| *p as u32 - 1).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let said: Vec<u32> = super::tools::pages_checked(a)?.iter().filter(|p| **p >= 1).map(|p| *p as u32 - 1).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let digest = str_arg(a, "marks_digest").unwrap_or_default();
     if expected != marks.len() as i64 || said != on || digest != crate::redact::app::marks_digest(&marks) {
         return Err(format!(
@@ -848,8 +877,9 @@ fn comment_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
     }
     let (q, what) = query_with(a, "find")?;
     let st = state(&l)?;
-    let mut hits = find_hits(&l, &q, &pages_arg(a, st.page_count)?)?;
-    if bool_arg(a, "first_only", false) {
+    let first = bool_arg(a, "first_only", false);
+    let mut hits = find_hits(&l, c.cancel, &q, &pages_arg(a, st.page_count)?, first)?;
+    if first {
         hits.truncate(1);
     }
     if hits.is_empty() {
@@ -884,7 +914,7 @@ fn add_comment(c: &Ctx, a: &Value) -> Result<Output, String> {
             let (page, at) = match str_arg(a, "find") {
                 Some(f) => {
                     let q = FindQuery::Text { needle: f.to_string(), case_sensitive: bool_arg(a, "case_sensitive", false), whole_word: false };
-                    let hits = find_hits(&l, &q, &pages_arg(a, st.page_count)?)?;
+                    let hits = find_hits(&l, c.cancel, &q, &pages_arg(a, st.page_count)?, true)?;
                     let h = hits.first().ok_or_else(|| format!("“{}” does not appear in the document text. Nothing was changed.", one_line(f, 40)))?;
                     let q = h.quads[0];
                     (h.page, [q[2].max(q[6]) + 4.0, q[1].min(q[3])])
@@ -906,7 +936,7 @@ fn add_comment(c: &Ctx, a: &Value) -> Result<Output, String> {
                 _ => Kind::Squiggly,
             };
             let (q, what) = query_with(a, "find").map_err(|e| format!("{e} \"find\" is the text to mark, copied from the document."))?;
-            let mut hits = find_hits(&l, &q, &pages_arg(a, st.page_count)?)?;
+            let mut hits = find_hits(&l, c.cancel, &q, &pages_arg(a, st.page_count)?, bool_arg(a, "first_only", false))?;
             if hits.is_empty() {
                 return Err(format!("{what} does not appear in the document text{}. Nothing was changed.",
                     if pages_requested(a).is_empty() { "" } else { " on those pages" }));
@@ -956,6 +986,11 @@ fn kind_label(k: FieldKind) -> &'static str {
 
 fn field_line(f: &FieldDto) -> String {
     let mut s = format!("[{}] \"{}\" {}", id_of(f.page, f.xref), f.name, kind_label(f.kind));
+    if f.password {
+        // a secret the model neither reads nor sets: the user types it
+        s.push_str(" [password field]");
+        return s;
+    }
     match f.kind {
         FieldKind::Checkbox => {
             let _ = write!(s, " = {}", if f.checked { "on" } else { "off" });
@@ -1044,9 +1079,17 @@ fn fill_plan(l: &Lane, a: &Value) -> Result<FillPlan, String> {
         if target.read_only {
             return Err(format!("The field \"{}\" is read-only. Nothing was changed.", target.name));
         }
+        if target.password {
+            return Err(format!("The field \"{}\" is a password field: the user types it themselves. Nothing was changed.", target.name));
+        }
         plan.push((target.page, target.xref, value, target.name.clone()));
     }
     Ok(plan)
+}
+
+/// The (page, xref, name) of each field of a fill plan, for the signature guard.
+fn fill_targets(plan: &[(u32, i32, FieldValue, String)]) -> Vec<(u32, i32, String)> {
+    plan.iter().map(|(p, x, _, n)| (*p, *x, n.clone())).collect()
 }
 
 fn value_words(v: &FieldValue) -> String {
@@ -1062,8 +1105,7 @@ fn value_words(v: &FieldValue) -> String {
 fn fill_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
     let Some(l) = c.host.lane() else { return Ok(None) };
     let plan = fill_plan(&l, a)?;
-    let names: Vec<String> = plan.iter().map(|p| p.3.clone()).collect();
-    guard(&l, Touch::Fields, &names)?;
+    guard(&l, Touch::Fields, &fill_targets(&plan))?;
     let mut lines: Vec<String> = plan.iter().take(8).map(|(_, _, v, n)| format!("{} = {}", one_line(n, 40), value_words(v))).collect();
     if plan.len() > 8 {
         lines.push(format!("and {} more", plan.len() - 8));
@@ -1074,7 +1116,7 @@ fn fill_check(c: &Ctx, a: &Value) -> Result<Option<String>, String> {
 fn fill_form_fields(c: &Ctx, a: &Value) -> Result<Output, String> {
     let l = lane(c)?;
     let plan = fill_plan(&l, a)?;
-    guard(&l, Touch::Fields, &plan.iter().map(|p| p.3.clone()).collect::<Vec<_>>())?;
+    guard(&l, Touch::Fields, &fill_targets(&plan))?;
     let noop = l
         .eng
         .read_custom(l.doc, |d| {

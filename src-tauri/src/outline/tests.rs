@@ -445,7 +445,7 @@ fn outline_pdf(root: &str, items: &[String]) -> Vec<u8> {
 }
 
 /// `outline_pdf` with `catalog` more keys in the document catalog (built whole, so the xref stays exact).
-fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
+pub(crate) fn outline_pdf_with(catalog: &str, root: &str, items: &[String]) -> Vec<u8> {
     let content = "BT /F1 24 Tf 72 700 Td (Chapter One) Tj ET BT /F1 12 Tf 72 600 Td (Plain body text of the document, long enough.) Tj ET BT /F1 12 Tf 72 560 Td (More plain body text in the same size here.) Tj ET";
     let mut objs = vec![
         format!("<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R {catalog} >>"),
@@ -735,11 +735,11 @@ fn checked_certification_of(name: &str, catalog: &str, objs: &[&str]) -> (std::r
 }
 
 /// A signature value whose `/Reference` holds `refs` (raw dictionaries).
-fn sig_value(refs: &str) -> String {
+pub(crate) fn sig_value(refs: &str) -> String {
     format!("/V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> /Reference [ {refs} ] >>")
 }
 
-fn doc_mdp(params: &str) -> String {
+pub(crate) fn doc_mdp(params: &str) -> String {
     format!("<< /Type /SigRef /TransformMethod /DocMDP {params} >>")
 }
 
@@ -990,4 +990,27 @@ fn an_unsigned_document_is_still_rewritten_without_what_was_deleted() {
     eng.save(id, None).unwrap();
     let saved = std::fs::read(&path).unwrap();
     assert!(!String::from_utf8_lossy(&saved).contains("Secret title"), "a deleted bookmark's title does not stay in the file");
+}
+
+/// A signature whose `/Reference` is `refs`, as an object that the reads below can be made to fail on.
+fn sig_object(refs: &str) -> PdfObject {
+    let pdf = outline_pdf_with(&format!("/Perms << /DocMDP << /Type /Sig /Reference {refs} >> >>"), "<< /Type /Outlines /Count 0 >>", &[]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    doc.catalog().unwrap().get_dict("Perms").unwrap().unwrap().get_dict("DocMDP").unwrap().unwrap()
+}
+
+#[test]
+fn a_signature_reference_that_cannot_be_read_counts_as_certifying() {
+    // MuPDF repairs a damaged file on its own, so a file cannot make a read fail: the reads are made to.
+    let sig = sig_object("[ << /TransformMethod /DocMDP /TransformParams << /P 3 >> >> ]");
+    let ok = |o: &PdfObject, k: &str| o.get_dict(k);
+    assert_eq!(reference_p_with(&sig, &ok), Some(3));
+    for failing in ["Reference", "TransformMethod", "TransformParams", "P"] {
+        let get = |o: &PdfObject, k: &str| if k == failing { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+        assert_eq!(reference_p_with(&sig, &get), Some(1), "{failing} unreadable");
+    }
+    // An entry that is not a DocMDP is not made strict by being unreadable elsewhere: only what is read counts.
+    let other = sig_object("[ << /TransformMethod /FieldMDP /TransformParams << /P 3 >> >> ]");
+    let get = |o: &PdfObject, k: &str| if k == "TransformParams" { Err(mupdf::Error::InvalidPdfDocument) } else { o.get_dict(k) };
+    assert_eq!(reference_p_with(&other, &get), None);
 }
