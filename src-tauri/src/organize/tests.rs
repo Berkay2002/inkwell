@@ -776,3 +776,28 @@ fn a_password_typed_full_width_opens_a_file_protect_wrote_in_nfkc() {
     // still refused when it is not the password in any form
     assert_eq!(combine::inspect(&[with_password(&locked, "ＸＹＺ")], opt).unwrap().files[0].state, FileState::Encrypted);
 }
+
+#[test]
+fn unlocking_for_combine_refuses_a_document_that_is_not_waiting_for_a_password() {
+    let d = dir("combine-unlock-scope");
+    let locked = locked_copy(&d, "locked.pdf", 2, true);
+    let plain = write(&d, "plain.pdf", 2, 0);
+    let eng = Engine::new(2, 64 << 20);
+    // a tab: opened with its password, then a wrong one comes in through the combine command
+    let (tab, r) = eng.open_pending(&locked);
+    assert!(matches!(r, Err(crate::engine::EngineError::NeedsPassword)));
+    assert_eq!(eng.authenticate(tab, "secret-pw").unwrap().page_count, 2);
+    assert!(eng.unlock_pending(tab, "not-it").is_err());
+    assert!(eng.unlock_pending(tab, "secret-pw").is_err(), "it is open already");
+    assert_eq!(eng.edit_state(tab).unwrap().page_count, 2, "and it still has its password");
+    assert!(eng.outline(tab).is_ok());
+    // a document that never needed one
+    let open_plain = eng.open(&plain).unwrap().doc;
+    assert!(eng.unlock_pending(open_plain, "x").is_err());
+    assert!(eng.outline(open_plain).is_ok());
+    // the one that is waiting: a wrong password changes nothing, the right one opens it
+    let (wait, _) = eng.open_pending(&locked);
+    assert!(matches!(eng.unlock_pending(wait, "not-it"), Err(crate::engine::EngineError::BadPassword)));
+    assert!(matches!(eng.unlock_pending(wait, "not-it"), Err(crate::engine::EngineError::BadPassword)));
+    assert_eq!(eng.unlock_pending(wait, "secret-pw").unwrap().page_count, 2);
+}

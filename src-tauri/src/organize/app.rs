@@ -64,11 +64,12 @@ pub struct Combined {
 
 /// Opens a locked source's engine handle (the one the sheet drew its row with) with the password the
 /// person typed, so its pages can be drawn. Unlike `authenticate` this does not start a history for the
-/// file: it is only a source. A wrong password is `bad-password` and changes nothing.
+/// file: it is only a source. A wrong password is `bad-password` and changes nothing; a document that is
+/// not waiting for a password (an open tab) is refused.
 #[tauri::command]
 pub async fn combine_unlock(eng: Eng<'_>, doc: DocId, password: Secret) -> Result<crate::engine::OpenInfo> {
     let eng = eng.inner().clone();
-    blocking(move || eng.authenticate(doc, password.as_str())).await
+    blocking(move || eng.unlock_pending(doc, password.as_str())).await
 }
 
 /// Combines into the file a save token names, and hands back an open token for it.
