@@ -1928,3 +1928,38 @@ fn skipped_matches_carry_the_words_around_them() {
     let rows: Vec<(&str, &str, &str)> = r.skipped.iter().map(|s| (s.before.as_str(), s.text.as_str(), s.after.as_str())).collect();
     assert_eq!(rows, [("A wellknown ", "fox", " and a fox"), ("fox and a ", "fox", "")], "{r:?}");
 }
+
+#[test]
+fn a_word_replaced_by_nothing_at_a_line_end_leaves_no_blank_line_and_keeps_the_other_breaks() {
+    let d = dir("replace-keeps-lines-emptied");
+    let (eng, id, _) = open(&d, &pages_pdf(&[THREE_LINES]));
+    do_replace(&eng, id, &req("cat", "", SearchOpts::default())).unwrap();
+    assert_eq!(page_lines(&eng, id), ["One", "Two", "Three long hats here"]);
+    eng.undo(id).unwrap();
+    // A whole line emptied: its neighbours stay lines of their own.
+    do_replace(&eng, id, &req("Two", "", SearchOpts::default())).unwrap();
+    assert_eq!(page_lines(&eng, id), ["One cat", "Three long hats here"]);
+    // The same in a block of lines in different styles.
+    let mixed = "BT /F1 12 Tf 72 700 Td 14 TL (One cat) Tj T* /F2 12 Tf (Bold two) Tj T* /F1 12 Tf (Three long hats here) Tj ET";
+    let (eng, id, _) = open(&dir("replace-keeps-lines-emptied-mixed"), &pages_pdf(&[mixed]));
+    do_replace(&eng, id, &req("Bold two", "", SearchOpts::default())).unwrap();
+    assert_eq!(page_lines(&eng, id), ["One cat", "Three long hats here"]);
+}
+
+#[test]
+fn what_spills_over_from_a_longer_justified_line_is_not_stretched() {
+    let d = dir("replace-justified-spill");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let long = "Justified text spreads the free width of every line but the last over its spaces, so both edges line up.";
+    let change = BlockChange { text: Some(long.into()), align: Some(Align::Justify), width: Some(160.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &change, EditSource::User).unwrap();
+    let n = blocks(&eng, id, 0).unwrap().blocks[1].lines.len();
+    do_replace(&eng, id, &req("spreads", "spreads very far and wide", SearchOpts::default())).unwrap();
+    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert!(b.lines.len() > n, "{:?}", page_lines(&eng, id));
+    let right = b.lines[0][2];
+    // The line the spill-over is on is as short as it is, and the lines after it are still justified.
+    let narrow = b.lines.iter().position(|l| l[2] < right - 5.0).expect("a short line");
+    assert!(narrow < b.lines.len() - 1, "{:?}", b.lines);
+    assert!(b.lines[narrow + 1..b.lines.len() - 1].iter().all(|l| (l[2] - right).abs() < 0.6), "{:?}", b.lines);
+}

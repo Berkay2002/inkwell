@@ -656,6 +656,11 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
         if !word.is_empty() {
             words.push((spaces, word));
         }
+        // A line end that left nothing before it (its text was replaced by nothing) is not a blank line.
+        if words.is_empty() && !ends {
+            continue;
+        }
+        let first = out.len();
         let mut line: Vec<Item> = Vec::new();
         let mut w = 0.0;
         for (sp, mut wd) in words {
@@ -678,7 +683,8 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
                 line.extend(wd);
             }
         }
-        out.push(LineOut { items: line, ends_para: ends });
+        // What spills over from a line that grew ends the paragraph's text there: not stretched to the width.
+        out.push(LineOut { items: line, ends_para: ends || out.len() > first });
     }
     out
 }

@@ -461,7 +461,9 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
     let (mut at, mut si) = (0usize, 0usize);
     // The lines of the block stay as they were: each space that stood for a line end (not one a match
     // swallows) is marked in the text it is in, and found again in the new text's coordinates.
-    let ends: Vec<usize> = b.breaks.iter().copied().filter(|&p| all.get(p) == Some(&' ')).collect();
+    // (Not when the text itself holds the mark character.)
+    let marked = all.contains(&END) || with.contains(END);
+    let ends: Vec<usize> = b.breaks.iter().copied().filter(|&p| !marked && all.get(p) == Some(&' ')).collect();
     let (mut line_ends, mut now) = (Vec::new(), 0usize);
     for (ri, run) in b.runs.iter().enumerate() {
         let (mut t, mut hit) = (String::new(), false);
@@ -492,20 +494,23 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
             specs.push(RunChange { source: Some(ri), ..Default::default() });
         } else {
             // The text as the rewrite will read it (spaces collapsed): the marks go, their places stay. A
-            // replacement that ends in a space against a line end would be collapsed by the rewrite and
-            // shift what follows: that run's lines are left to reflow.
+            // space just before a line end goes (a word replaced by nothing at a line's end). A replacement
+            // that ends in a space against a line end would still be collapsed by the rewrite and shift what
+            // follows: that run's lines are left to reflow.
             let t = collapse(&t);
-            let plain: String = t.chars().filter(|&c| c != END).collect();
-            let kept = collapse(&plain) == plain;
-            let mut k = 0;
+            let (mut plain, mut marks) = (String::new(), Vec::new());
             for c in t.chars() {
                 if c == END {
-                    if kept {
-                        line_ends.push(now + k);
+                    if plain.ends_with(' ') {
+                        plain.pop();
                     }
+                    marks.push(plain.chars().count());
                 } else {
-                    k += 1;
+                    plain.push(c);
                 }
+            }
+            if collapse(&plain) == plain {
+                line_ends.extend(marks.iter().map(|m| now + m));
             }
             let plain = collapse(&plain);
             now += plain.chars().count();
