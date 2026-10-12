@@ -46,6 +46,7 @@ import {
   linkState,
   locate,
   pressFeedback,
+  SIGNED_LINKS,
   onlyProblems,
   rgbToHex,
   targetLabel,
@@ -311,7 +312,7 @@ describe("link actions", () => {
   });
 
   it("asks with the count before it removes every link, and removes nothing on Cancel", async () => {
-    vi.mocked(api.linksAudit).mockResolvedValue({ total: 7, external: 2, broken: 0, rows: [] });
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 7, external: 2, broken: 0, signed: false, rows: [] });
     vi.mocked(message).mockResolvedValue("Cancel");
     expect(await useNav.getState().removeAllLinks(1)).toBe(false);
     expect(vi.mocked(message).mock.calls[0][0]).toMatch(/Remove all 7 links/);
@@ -325,8 +326,18 @@ describe("link actions", () => {
     expect(useNav.getState().docs[1].notice).toBe("7 links removed.");
   });
 
+  it("repeats the signed warning in the confirm from the audit, with no page loaded", async () => {
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 2, external: 0, broken: 0, signed: true, rows: [] });
+    vi.mocked(message).mockResolvedValue("Cancel");
+    await useNav.getState().removeAllLinks(1);
+    expect(vi.mocked(message).mock.calls[0][0]).toContain(SIGNED_LINKS);
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 2, external: 0, broken: 0, signed: false, rows: [] });
+    await useNav.getState().removeAllLinks(1);
+    expect(vi.mocked(message).mock.calls[1][0]).not.toContain("signed");
+  });
+
   it("says so, and asks nothing, when the document has no links", async () => {
-    vi.mocked(api.linksAudit).mockResolvedValue({ total: 0, external: 0, broken: 0, rows: [] });
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 0, external: 0, broken: 0, signed: false, rows: [] });
     expect(await useNav.getState().removeAllLinks(1)).toBe(false);
     expect(message).not.toHaveBeenCalled();
     expect(editLinks).not.toHaveBeenCalled();

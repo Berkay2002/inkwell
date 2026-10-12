@@ -551,6 +551,8 @@ export interface LinkAudit {
   total: number;
   external: number;
   broken: number;
+  /** The document is signed: a change to its links is saved after the signature. */
+  signed: boolean;
   /** The first broken ones. */
   rows: { page: number; id: number; what: string }[];
 }

@@ -468,8 +468,11 @@ export const useNav = create<Store>((set, get) => {
       // The count and the removal belong to one generation: a change while the dialog is open comes back stale.
       const rev = docRev(doc);
       let total: number;
+      let signed: boolean;
       try {
-        total = (await api.linksAudit(doc)).total;
+        const a = await api.linksAudit(doc);
+        total = a.total;
+        signed = a.signed;
       } catch (e) {
         patch(doc, { notice: String(e) });
         return false;
@@ -478,7 +481,6 @@ export const useNav = create<Store>((set, get) => {
         patch(doc, { notice: "This document has no links." });
         return false;
       }
-      const signed = Object.values(of(doc).links).some((l) => l.signed);
       const r = await message(
         `Remove all ${plural(total, "link")} from this document?\n\nOther annotations and the bookmarks stay. You can undo it.${signed ? `\n\n${SIGNED_LINKS}` : ""}`,
         { title: "Remove all links", kind: "warning", buttons: { ok: "Remove", cancel: "Cancel" } },
