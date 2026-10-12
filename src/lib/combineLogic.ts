@@ -60,9 +60,11 @@ export function pagesIn(text: string, count: number): Set<number> | null {
 }
 
 /**
- * Whether the sheet should say the combined file has no password and no restrictions: a row was unlocked
- * here, or a file that goes in has security of its own (an owner-password-only one has no password to enter).
+ * Whether the sheet should say the combined file has no password and no restrictions: a file that goes in
+ * has security of its own (a password typed here, or an owner-password-only file, which has none to type).
+ * A locked row that was never unlocked is left out, so it counts for nothing. `files` is the plan, row by
+ * row; until it has caught up, a typed password stands for the file.
  */
 export function securityDropped(entries: { password?: string | null; locked?: unknown }[], files: { encrypted: boolean }[]): boolean {
-  return entries.some((e) => e.password || e.locked != null) || files.some((f) => f.encrypted);
+  return entries.some((e, i) => e.locked == null && (files[i] ? files[i].encrypted : !!e.password));
 }
