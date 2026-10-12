@@ -1622,6 +1622,27 @@ fn the_list_and_the_engine_read_the_same_certification_level() {
     assert_eq!(e.to_string(), w.refused.clone().unwrap());
 }
 
+#[test]
+fn a_lock_with_p_sets_the_document_level() {
+    let p1 = "The document is certified with no changes allowed, so it can't be signed again.";
+    let level = |b: &[u8]| pdf::list(&PdfDocument::from_bytes(b).unwrap(), b, &trust_tests).unwrap().certify;
+    // PDF 2.0: /Lock /P 1 allows no changes, as a P=1 certification does.
+    let b = lock_sign(&lease(), "Tenant", "<</Action/All/P 1>>", "");
+    assert_eq!(level(&b), Some(1));
+    assert_eq!(field(&infos(&b), "Witness").refused.as_deref(), Some(p1));
+    assert_eq!(pdf::sign(&b, &ids().1, &SignRequest { field: Some("Witness".into()), ..unseen() }).unwrap_err().to_string(), p1);
+    assert_eq!(pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err().to_string(), p1);
+    // /P 2 is the level, and a /P that isn't a number counts as 1.
+    assert_eq!(level(&lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Other)]/P 2>>", "")), Some(2));
+    assert_eq!(level(&lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Other)]/P(2)>>", "")), Some(1));
+    // Stripped by a later update: the signed revision still has it.
+    let stripped = append(&b, |d| {
+        let mut t = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+        t.dict_delete("Lock").unwrap();
+    });
+    assert_eq!(level(&stripped), Some(1));
+}
+
 /// `bytes` with the text field Note filled in a later revision.
 fn fill_note(bytes: &[u8]) -> Vec<u8> {
     append(bytes, |d| {

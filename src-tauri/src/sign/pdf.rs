@@ -111,11 +111,11 @@ pub(super) fn sign_with(base: &[u8], id: &DigitalId, req: &SignRequest, tamper: 
         return Err(refuse(format!("this document has more than {MAX_SIGNATURES} signatures, more than Inkwell checks")));
     }
     // DocMDP (ISO 32000-1 12.8.2.2): a certification that allows no changes ends the document.
-    let p = docmdp_level(&doc);
+    let (locks, lock_p) = locks_of(&fields, base);
+    let p = [docmdp_level(&doc), lock_p].into_iter().flatten().min();
     if p == Some(1) {
         return Err(refuse(CERTIFIED_P1));
     }
-    let locks = locks_of(&fields, base);
     if req.certify.is_some() && (signed_before || crate::outline::signed(&doc)) {
         return Err(refuse("only the first signature can certify a document; this one is already signed"));
     }
@@ -573,41 +573,65 @@ fn refusal(p: Option<u8>, locks: &Locks, f: &SigField) -> Option<String> {
 type Locks = Vec<(Vec<crate::forms::scripts::Lock>, String)>;
 
 /// The locks of every signed field, valid or not (the safe side): what it carries now and what it carried in the
-/// revision it signs, so a later update can't take a lock away by rewriting `/Lock` or `/Reference`.
-fn locks_of(fields: &[SigField], bytes: &[u8]) -> Locks {
+/// revision it signs, so a later update can't take a lock away by rewriting `/Lock` or `/Reference`. Also the lowest
+/// `/Lock /P` among them (PDF 2.0, ISO 32000-2 12.7.5.5): a document-level DocMDP level like a certification's.
+fn locks_of(fields: &[SigField], bytes: &[u8]) -> (Locks, Option<u8>) {
     use crate::forms::scripts::signature_locks;
-    fields
+    let mut p = None;
+    let locks = fields
         .iter()
         .filter(|g| g.value.is_some())
         .map(|g| {
             let mut l = signature_locks(&g.field, &g.widget);
-            l.extend(signed_locks(g, bytes));
+            let (was, was_p) = signed_locks(g, bytes);
+            l.extend(was);
+            p = [p, lock_p(&g.field, &g.widget), was_p].into_iter().flatten().min();
             (l, g)
         })
         .filter(|(l, _)| !l.is_empty())
         // The signer's name once per signature (it parses the CMS), not once per field asked about.
         .filter_map(|(l, g)| Some((l, signer_name(g.value.as_ref()?))))
-        .collect()
+        .collect();
+    (locks, p)
+}
+
+/// A signed field's `/Lock /P` (the field's `/Lock`, else its widget's, as `signature_locks` reads it), clamped to 1-3;
+/// one that can't be read counts as 1, no changes allowed.
+fn lock_p(field: &PdfObject, widget: &PdfObject) -> Option<u8> {
+    let live = |o: &PdfObject| o.get_dict("Lock").map(|l| l.filter(|l| !l.is_null().unwrap_or(true)));
+    let lock = match (live(field), live(widget)) {
+        (Ok(Some(l)), _) | (Ok(None), Ok(Some(l))) => l,
+        (Ok(None), Ok(None)) => return None,
+        _ => return Some(1),
+    };
+    if !lock.is_dict().unwrap_or(false) {
+        return None;
+    }
+    match lock.get_dict("P") {
+        Ok(None) => None,
+        Ok(Some(p)) => Some(p.as_int().map_or(1, |p| p.clamp(1, 3) as u8)),
+        Err(_) => Some(1),
+    }
 }
 
 /// The locks the signature in `g` carried in the revision it signs (the field holding the same signature
-/// dictionary there, whatever it is called now: renaming it later must not drop its locks). None when it covers the
-/// whole file (the current ones are those). A revision that can't be read, or that has no field holding this
-/// signature, locks everything: what it locked is unknown.
-fn signed_locks(g: &SigField, bytes: &[u8]) -> Vec<crate::forms::scripts::Lock> {
+/// dictionary there, whatever it is called now: renaming it later must not drop its locks), and its `/Lock /P`. None
+/// when it covers the whole file (the current ones are those). A revision that can't be read, or that has no field
+/// holding this signature, locks everything: what it locked is unknown.
+fn signed_locks(g: &SigField, bytes: &[u8]) -> (Vec<crate::forms::scripts::Lock>, Option<u8>) {
     use crate::forms::scripts::{Lock, signature_locks};
-    let Some(v) = g.value.as_ref() else { return Vec::new() };
+    let Some(v) = g.value.as_ref() else { return (Vec::new(), None) };
     let end = out_covered(v);
     if end.is_some_and(|e| e <= bytes.len() && bytes[e..].iter().all(u8::is_ascii_whitespace)) {
-        return Vec::new();
+        return (Vec::new(), None);
     }
-    let then = |e: usize| -> Option<Vec<Lock>> {
+    let then = |e: usize| -> Option<(Vec<Lock>, Option<u8>)> {
         let vn = ind(v)?;
         let then = PdfDocument::from_bytes(bytes.get(..e)?).ok()?;
         let h = sig_fields(&then).ok()?.into_iter().find(|h| h.value.as_ref().and_then(ind) == Some(vn))?;
-        Some(signature_locks(&h.field, &h.widget))
+        Some((signature_locks(&h.field, &h.widget), lock_p(&h.field, &h.widget)))
     };
-    end.and_then(then).unwrap_or_else(|| vec![Lock::All])
+    end.and_then(then).unwrap_or_else(|| (vec![Lock::All], None))
 }
 
 /// The signer of the first signature whose lock covers the field named `name`.
@@ -824,13 +848,13 @@ const MAX_REVISIONS: usize = 64;
 
 pub fn list(doc: &PdfDocument, bytes: &[u8], trust: &Trust) -> Result<SignList> {
     let fields = sig_fields(doc)?;
-    let p = docmdp_level(doc);
     // Each signature hashes the file and parses the revision it signs: a bound on the work.
     if fields.iter().filter(|f| f.value.is_some()).count() > MAX_SIGNATURES {
         return Err(refuse(format!("this document has more than {MAX_SIGNATURES} signatures, more than Inkwell checks")));
     }
     let mut infos: Vec<SignatureInfo> = fields.iter().map(|f| info(f, bytes, trust)).collect();
-    let locks = locks_of(&fields, bytes);
+    let (locks, lock_p) = locks_of(&fields, bytes);
+    let p = [docmdp_level(doc), lock_p].into_iter().flatten().min();
     for (f, i) in fields.iter().zip(infos.iter_mut()) {
         i.locked_by = locked_by(&locks, &f.name);
         if f.value.is_none() {
