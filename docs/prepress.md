@@ -88,7 +88,7 @@ In Output Preview the inspector is the "Object inspector" toggle under the Previ
 link is not followed), asks `prepress_inspect` for the page point under it, mapped back through the view's rotation
 and zoom exactly as the ink probe's. The rail lists the objects topmost first: kind (with the font of a text run or
 the pixels of an image), colour space, values, CMYK equivalent with its ink, and overprint yes or no; an empty
-answer says "Nothing is painted here". A ring marks the point, the same size at any zoom. Escape clears the ring
+answer says "Nothing is painted here". A ring marks the point, the same size at any zoom. Escape (when no field, menu or dialog takes it) clears the ring
 and the list and the mode stays; closing Output Preview, or switching the toggle off, leaves the mode. An answer
 is dropped when a newer click was made, or the document's generation or current page moved, or the mode ended
 while it was asked. It reads only: no edit, no new generation, the document does not become modified, so a

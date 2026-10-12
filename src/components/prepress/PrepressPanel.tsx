@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { type DocState } from "../../store";
 import type { Inspected } from "../../lib/prepressApi";
 import { currentSeps, usePrepress } from "../../lib/prepressStore";
 import { CERTIFIED_REASON, NOTHING_PAINTED, type Plate, coverageText, isSolo, objectLines, plateList, readout, showInk } from "../../lib/prepressLogic";
 import { Icon } from "../Icons";
-import { useEscape } from "../OrganizePlus";
 import { PlateThumb } from "./PlateThumb";
 import "../a11y/a11y.css";
 import "./prepress.css";
@@ -22,11 +21,18 @@ export function PrepressPanel({ doc }: { doc: DocState }) {
     if (open) void st().refresh(id);
   }, [open, id, doc.currentPage, doc.rev]);
 
-  // Escape drops the marker and the list; the mode stays
+  // Escape drops the marker and the list; the mode stays. Last to hear it: a field, menu or dialog takes it first.
   const marked = open && d?.inspect.at != null;
   const sheetOpen = usePrepress((s) => s.sheet != null);
-  const clear = useCallback(() => st().clearInspect(id), [id]);
-  useEscape(marked && !sheetOpen, clear);
+  useEffect(() => {
+    if (!marked || sheetOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || (e.target as HTMLElement | null)?.closest("input, textarea, select, [role=dialog], [role=menu]")) return;
+      st().clearInspect(id);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [marked, sheetOpen, id]);
 
   if (!open) return null;
   const s = d?.settings;
