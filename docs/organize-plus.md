@@ -117,6 +117,11 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   special handling. A signature field of a source arrives empty (its value and appearance are dropped, the
   field stays), so the result is never a signed document that fails to verify. The row says "x.pdf's signature
   is not carried over". Insert pages from file does the same.
+- A source's security is never carried over: a source with a password or owner restrictions goes in, the result
+  has neither, and the row says "x.pdf's password and restrictions are not carried over", naming the rights
+  its permission bits withheld (printing, editing, commenting, form filling and the like) when there are any. An
+  owner-password-only source has no password to type, so the row note and the footer ("The combined file has no
+  password and no restrictions") are where this shows. A source that forbids copying or page changes is left out.
 - Labels are carried page by page: a source's section that is cut by a page range or reordered becomes several
   sections in the result, each with the number the page had in its source.
 - The attachments list does not show portfolio (collection) structure; a PDF Portfolio opens in its own file list (docs/portfolios.md).
