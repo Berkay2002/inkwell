@@ -1,6 +1,7 @@
 # Forms: fill, then author
 
-Engine: `src-tauri/src/forms/` (`mod.rs` fields, filling, reset; `author.rs` create/move/edit/delete/tab order/detect;
+Engine: `src-tauri/src/forms/` (`mod.rs` fields, filling, reset; `author.rs` create/move/edit/delete/tab order/detect; `layout.rs` align, centre, distribute, match size,
+nudge, duplicate, copies and rename;
 `af.rs` the script subset; `detect.rs` auto-detection; `app.rs` the Tauri commands). Every change is one edit-core step
 (one undo step, kept by Save, recorded in history). UI: Forms rail (Ctrl+Alt+F), `FormLayer` over each page, field
 tool strip while preparing a form.
@@ -78,7 +79,7 @@ button, signature); click for the default size or drag a rectangle. Select a fie
 handles, or change its properties in the rail: name, tooltip, required, read-only, hidden, default value, character
 limit, comb, multiple lines, password, choices, export value, button label and action, text size and colour, alignment,
 border and fill, number/percentage/date/time/special/pattern/custom-script format (with a live sample), range or custom validation, calculation (sum, product, average, smallest, largest, simplified field notation or a custom script) and the calculation order (see [forms-js.md](forms-js.md)). A radio button drawn
-while another is selected joins its group. Delete removes the selection (the Delete key too).
+while another is selected joins its group. Delete removes the selection (the Delete key too; with several fields picked, all of them, as one step).
 
 *Find fields on this page* runs auto-detection (underscore runs, rules under labels, empty boxes, small squares, boxes
 drawn as four lines) and says what it would add before it adds anything; *Add them* is one undo step. Names come from the
@@ -87,9 +88,47 @@ label next to the field; a blank labelled Signature, Sign or Signed becomes a si
 Fields are built as plain AcroForm dictionaries (MuPDF only creates signature widgets): `/FT /Tx /Btn /Ch /Sig`, `/Ff`,
 `/MK`, `/DA` with the form's `/DR` Helvetica and ZapfDingbats, `/AP` from MuPDF.
 
+## Layout tools
+Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step, and a refused one records none.
+
+- **Picking.** Ctrl, Cmd or Shift click adds a field to the picked ones (or takes it out); dragging a box on empty
+  page picks every visible field it touches (with Ctrl, Cmd or Shift it adds). The **anchor** is the field picked last
+  (a box picks in reading order, so the last one in the box), and has a heavier outline. A plain click picks one field.
+  There is no group drag: a press on a field picks just that one, and it moves alone.
+- **Align** (left, right, top, bottom, horizontal centres, vertical centres) and **Same width / height / size** follow the
+  anchor, as in Acrobat, and need two or more fields on one page. "Horizontal centres" gives the fields one x centre (a
+  column); "vertical centres" one y centre (a row). Same size keeps each field's top-left corner and pulls the field back
+  onto the page if it would run off.
+- **Centre on the page** (horizontally, vertically, both) moves the picked fields as a group, per page.
+- **Distribute** (horizontally, vertically) needs three or more fields: the two outermost stay and the gaps between
+  the others become equal (a gap may be negative when the fields are wider than the room).
+- **Nudge**: arrow keys move the picked fields 1 pt (Shift: 10 pt), clamped to the page. The presses of a burst are added
+  up and sent at key up as one step.
+- All of it is worked out in page space, as shown: `/Rotate` and a crop box that does not start at the origin are
+  honoured, and the written rectangles are put back into the page's unrotated space.
+- **Duplicate on other pages** adds a widget of the same field to each page named, at the same place: same name, same
+  field, one value (Acrobat's behaviour), so filling one fills them all. A page where the field does not fit refuses
+  the whole step. Radio buttons and signature fields are not duplicated. A field that was one dictionary (field and
+  widget merged) becomes a parent with widget kids. At most 2 000 pages.
+- **Create multiple copies** (rows × columns, space between across and down in points) lays a grid to the right of and
+  below the field. The field itself becomes `name.0` and the copies `name.1`, `name.2` … in row order. The gaps are the
+  space *between* fields, not offsets. A copy that would run off the page is left out and the answer says how many.
+  Refused for a field with several widgets, a calculated field and a radio or signature field. At most 500 copies.
+  Calculations that use the old name through the simplified notation follow the rename; a script that calls
+  `getField("name")` does not, and keeps naming the old field.
+- **Rename**: F2 or a double click on a row of the Fields list edits the field's **full** dotted name in place (the name
+  box in the properties edits the last part only). Groups of a dotted name are created or reused, and a group the
+  rename empties is removed. A name that is already a field of the **same kind** offers *Merge* (the widgets join that
+  field); a different kind is refused with a message, radio groups and signature fields never merge, and no field can be
+  named below another field or over a group.
+- **Refused**: a certified document at any `/P` (P 3 allows form fill and comments, not changing fields); a field a
+  signature covers (`/Lock`) and a signature field that is signed. The controls are disabled with the reason as their
+  tooltip. A signed, uncertified document is changed incrementally: the signed bytes stay a prefix of the file.
+- Caps: 1 000 widgets per step, 500 copies, 2 000 pages.
+- Not built: dragging a group, and an assistant tool for any of this.
+
 ## Later (not built)
 - FDF, XFDF and JSON export and import of field values. `forms_list` already carries name, value(s) and kind for every
   field, so each format is a reader/writer over that list (`forms_set_value` takes the values back); XFDF can reuse the
   field naming of `FieldDto::name` (dotted full names).
-- Field alignment tools (align, centre, match size, distribute) and the Fields list's rename-in-place.
 - Signing a signature field (see the Sign task).
