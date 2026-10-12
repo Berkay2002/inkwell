@@ -1271,7 +1271,6 @@ fn new_file(doc: &mut PdfDocument, page: u32, r: [f32; 4], st: &Style, c: &Comme
         // Last, for the same reason as the appearance's objects in `finish`.
         let fs = attach::install(doc, file)?;
         a.object().dict_put("FS", fs)?;
-        a.update()?;
         Ok(())
     })();
     if let Err(e) = made {

@@ -554,6 +554,25 @@ fn filter_arrays_are_checked_to_the_end_and_a_stage_is_charged_where_it_runs() {
 }
 
 #[test]
+fn a_refused_appearance_shared_by_many_comments_is_charged_at_each_use() {
+    // 2 MB of content that ends in `sh` (not carried): decoded once, but each comment copies and scans it, so the
+    // allowance (256 MB) ends the work after about 128 of them, not after all.
+    let mut content = "0 ".repeat(1 << 20).into_bytes();
+    content.extend_from_slice(b" sh");
+    let n = 150;
+    let mut objs = vec![stream_obj(5, RED_FORM, &content)];
+    objs.extend((0..n).map(|i| obj(10 + i, &freetext(i, 5))));
+    let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + i)).collect();
+    let (eng, id, _) = blank("ap-shared-refused");
+    let s = run(&eng, id, &fdf_file(&refs, &objs));
+    assert_eq!((s.added, s.appearances), (n, 0), "{s:?}");
+    let count = |w: &str| s.notes.iter().find(|r| r.reason == w).map_or(0, |r| r.count);
+    let (full, cut) = (count(ap::UNSUPPORTED), count(ap::NO_ROOM));
+    assert_eq!(full + cut, n, "{:?}", s.notes);
+    assert!((100..=130).contains(&full) && cut >= 20, "{full} scanned in full, {cut} cut off by the allowance");
+}
+
+#[test]
 fn many_small_attachments_are_not_held_back_by_the_decode_allowance() {
     let n = 300;
     let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + 2 * i)).collect();

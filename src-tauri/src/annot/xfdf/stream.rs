@@ -3,7 +3,8 @@
 //! The filters are run here, one stage at a time, and not by MuPDF, because only the last stage's output can be
 //! bounded there: a Flate stream that inflates to gigabytes of white space and an ASCII hex filter after it ends up as
 //! one byte and passes any cap on the result. Every stage's output is capped and charged to the file's decode allowance
-//! (`Budget::spend_work`), and a stream that many comments share is decoded once (`Budget::stream_known`).
+//! (`Budget::spend_work`), and a stream that many comments share is decoded once (`Budget::stream_known`); each use of
+//! the decoded bytes is charged their size again.
 //!
 //! What is decoded: Flate, ASCII hex and ASCII 85, in the shapes `[ASCII]? [Flate]{0,2}` (at most one ASCII filter,
 //! and only first, on bytes that are in the file: after a decompressor it would eat the white space a bomb is made of).
@@ -173,6 +174,13 @@ pub(super) fn run(raw: Vec<u8>, stages: &[Stage], cap: usize, b: &Budget) -> Res
 fn load(s: &PdfObject, cap: usize, predictors: bool, b: &Budget) -> Unpacked {
     let num = number_of(s);
     if let Some(r) = num.and_then(|n| b.stream_known(n, cap, predictors)) {
+        // Decoding is not done again, but using the bytes is work: each comment that shares them copies and reads them.
+        if let Ok(d) = &r {
+            if b.work_left() < d.len() {
+                return Err(Unpack::NoWork);
+            }
+            b.spend_work(d.len());
+        }
         return r;
     }
     let r = chain(s, predictors).and_then(|stages| {
