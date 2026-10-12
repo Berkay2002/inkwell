@@ -1864,14 +1864,16 @@ fn a_longer_replacement_wraps_only_its_own_line() {
     let after = line_boxes(&eng, id);
     assert_eq!(after.len(), 3);
     assert!(after.iter().zip(&before).all(|(a, b)| (a[1] - b[1]).abs() < 0.5), "{after:?}");
-    // Wider than the block: its overflow wraps onto a line of its own, the lines below keep theirs.
+    // Wider than the block: its overflow goes on at the start of the next line, which takes it in and
+    // stays a line of its own; the line below that keeps its words.
     eng.undo(id).unwrap();
-    do_replace(&eng, id, &req("cat", "cat who sat on the very large mat", SearchOpts::default())).unwrap();
+    do_replace(&eng, id, &req("cat", "cat on a big mat", SearchOpts::default())).unwrap();
     let lines = page_lines(&eng, id);
-    assert_eq!(lines.len(), 4, "{lines:?}");
-    assert!(lines[0].starts_with("One cat who"), "{lines:?}");
-    assert_eq!(&lines[2..], ["Two", "Three long hats here"], "{lines:?}");
-    assert_eq!(line_boxes(&eng, id).len(), 4);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines[0].starts_with("One cat on"), "{lines:?}");
+    assert!(lines[1].ends_with("Two") && lines[1].len() > 3, "{lines:?}");
+    assert_eq!(lines[2], "Three long hats here", "{lines:?}");
+    assert_eq!(line_boxes(&eng, id).len(), 3);
 }
 
 #[test]
@@ -1947,19 +1949,26 @@ fn a_word_replaced_by_nothing_at_a_line_end_leaves_no_blank_line_and_keeps_the_o
 }
 
 #[test]
-fn what_spills_over_from_a_longer_justified_line_is_not_stretched() {
+fn what_spills_over_from_a_longer_justified_line_goes_on_to_the_next_and_the_block_stays_justified() {
     let d = dir("replace-justified-spill");
     let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
     let long = "Justified text spreads the free width of every line but the last over its spaces, so both edges line up.";
     let change = BlockChange { text: Some(long.into()), align: Some(Align::Justify), width: Some(160.0), ..Default::default() };
     edit(&eng, id, rev(&eng, id), 0, 1, &change, EditSource::User).unwrap();
-    let n = blocks(&eng, id, 0).unwrap().blocks[1].lines.len();
+    let check = |eng: &Engine| {
+        let b = blocks(eng, id, 0).unwrap().blocks[1].clone();
+        let n = b.lines.len();
+        assert_eq!(b.align, Align::Justify, "{:?}", b.lines);
+        let right = b.lines[0][2];
+        assert!(b.lines[..n - 1].iter().all(|l| (l[2] - right).abs() < 0.6), "{:?}", b.lines);
+        assert!(b.lines[n - 1][2] < right - 5.0, "the last line is not stretched");
+        n
+    };
+    let n = check(&eng);
     do_replace(&eng, id, &req("spreads", "spreads very far and wide", SearchOpts::default())).unwrap();
-    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
-    assert!(b.lines.len() > n, "{:?}", page_lines(&eng, id));
-    let right = b.lines[0][2];
-    // The line the spill-over is on is as short as it is, and the lines after it are still justified.
-    let narrow = b.lines.iter().position(|l| l[2] < right - 5.0).expect("a short line");
-    assert!(narrow < b.lines.len() - 1, "{:?}", b.lines);
-    assert!(b.lines[narrow + 1..b.lines.len() - 1].iter().all(|l| (l[2] - right).abs() < 0.6), "{:?}", b.lines);
+    assert!(check(&eng) >= n);
+    // Another word replaced later: the block is still read, and set again, as justified.
+    do_replace(&eng, id, &req("edges", "sides", SearchOpts::default())).unwrap();
+    check(&eng);
+    assert!(blocks(&eng, id, 0).unwrap().blocks[1].text.contains("very far and wide"));
 }

@@ -1423,8 +1423,10 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
     if !change.line_ends.is_empty() && items.iter().map(|i| i.text.chars().count()).sum::<usize>() == shown {
         let mut at = 0;
         for it in &mut items {
-            if matches!(it.kind, Kind::Space(_)) && change.line_ends.contains(&at) {
-                (it.kind, it.w, it.kern) = (Kind::Line, 0.0, 0.0);
+            if let Kind::Space(code) = &it.kind {
+                if change.line_ends.contains(&at) {
+                    it.kind = Kind::Line(code.clone());
+                }
             }
             at += it.text.chars().count();
         }

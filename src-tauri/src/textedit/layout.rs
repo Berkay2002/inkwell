@@ -154,8 +154,9 @@ pub(crate) enum Kind {
     /// A hard line break.
     Break,
     /// A line end the text keeps inside its paragraph (Find & Replace leaves the lines of a block as they
-    /// are): unlike `Break` it does not end the paragraph, so a justified line stays justified.
-    Line,
+    /// are): unlike `Break` it does not end the paragraph, so a justified line stays justified. It is the
+    /// space it replaced (its code, as in `Space`), which comes back when words are carried over it.
+    Line(Option<Vec<u8>>),
 }
 
 /// One glyph, space or break to set.
@@ -599,7 +600,7 @@ impl Measure<'_> {
     pub fn width(&self, it: &Item) -> f64 {
         let size = self.styles[it.style].size;
         let glyph = match it.kind {
-            Kind::Break | Kind::Line => return 0.0,
+            Kind::Break | Kind::Line(_) => return 0.0,
             Kind::Space(None) => it.w / 1000.0 * size,
             _ => it.w / 1000.0 * size + self.cs,
         };
@@ -616,24 +617,29 @@ fn is_space(it: &Item) -> bool {
 }
 
 /// Wraps items into lines of at most `width` (text space). Breaks go at spaces (which end the
-/// line and are dropped), between CJK characters, and at hard breaks.
+/// line and are dropped), between CJK characters, and at hard breaks. A `Line` end keeps its line unless
+/// the line grew past the width: the words that no longer fit go on at the start of the next line, which
+/// takes them in as it would any text (and passes its own on in turn when it is full).
 pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
+    type Words = Vec<(Vec<Item>, Vec<Item>)>;
     let mut out = Vec::new();
-    // Each paragraph, and whether its last line ends it (a `Line` end does not).
-    let mut paras: Vec<(Vec<Item>, bool)> = vec![(Vec::new(), true)];
+    // Each paragraph, and the space a `Line` end stood for (none: a hard break or the end).
+    let mut paras: Vec<(Vec<Item>, Option<Item>)> = vec![(Vec::new(), None)];
     for it in items {
         match it.kind {
-            Kind::Break => paras.push((Vec::new(), true)),
-            Kind::Line => {
-                paras.last_mut().expect("one").1 = false;
-                paras.push((Vec::new(), true));
+            Kind::Break => paras.push((Vec::new(), None)),
+            Kind::Line(code) => {
+                paras.last_mut().expect("one").1 = Some(Item { kind: Kind::Space(code), ..it });
+                paras.push((Vec::new(), None));
             }
             _ => paras.last_mut().expect("one").0.push(it),
         }
     }
-    for (para, ends) in paras {
+    // Words that did not fit their line and the space that joins them to what follows.
+    let (mut carry, mut joint): (Words, Option<Item>) = (Vec::new(), None);
+    for (para, ending) in paras {
         // Words: (spaces before, word).
-        let mut words: Vec<(Vec<Item>, Vec<Item>)> = Vec::new();
+        let mut words: Words = Vec::new();
         let mut spaces = Vec::new();
         let mut word: Vec<Item> = Vec::new();
         for it in para {
@@ -656,22 +662,29 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
         if !word.is_empty() {
             words.push((spaces, word));
         }
+        if !carry.is_empty() {
+            if let (Some(f), Some(j)) = (words.first_mut(), joint.take()) {
+                f.0 = vec![j];
+            }
+            carry.append(&mut words);
+            words = std::mem::take(&mut carry);
+        }
         // A line end that left nothing before it (its text was replaced by nothing) is not a blank line.
-        if words.is_empty() && !ends {
+        if words.is_empty() && ending.is_some() {
             continue;
         }
         let first = out.len();
-        let mut line: Vec<Item> = Vec::new();
+        let (mut line, mut from): (Vec<Item>, usize) = (Vec::new(), 0);
         let mut w = 0.0;
-        for (sp, mut wd) in words {
-            let sw = m.line(&sp);
-            let ww = m.line(&wd);
+        for (i, (sp, wd)) in words.iter().enumerate() {
+            let (sw, ww) = (m.line(sp), m.line(wd));
             if !line.is_empty() && w + sw + ww > width {
                 out.push(LineOut { items: std::mem::take(&mut line), ends_para: false });
-                w = 0.0;
+                (w, from) = (0.0, i);
             }
             if line.is_empty() {
                 // A line starts with its first glyph: no spaces, no kerning against what came before.
+                let mut wd = wd.clone();
                 if let Some(first) = wd.first_mut() {
                     first.kern = 0.0;
                 }
@@ -679,12 +692,18 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
                 line.extend(wd);
             } else {
                 w += sw + ww;
-                line.extend(sp);
-                line.extend(wd);
+                line.extend(sp.iter().cloned());
+                line.extend(wd.iter().cloned());
             }
         }
-        // What spills over from a line that grew ends the paragraph's text there: not stretched to the width.
-        out.push(LineOut { items: line, ends_para: ends || out.len() > first });
+        match ending {
+            // The line grew: its last words go on to the next line.
+            Some(space) if out.len() > first => {
+                carry = words.split_off(from);
+                joint = Some(space);
+            }
+            e => out.push(LineOut { items: line, ends_para: e.is_none() }),
+        }
     }
     out
 }
@@ -835,7 +854,7 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
                     flush(&mut arr, &mut text);
                     arr.push(num(-it.w));
                 }
-                Kind::Break | Kind::Line => {}
+                Kind::Break | Kind::Line(_) => {}
             }
             if is_space(it) && extra != 0.0 {
                 flush(&mut arr, &mut text);

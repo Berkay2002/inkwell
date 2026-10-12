@@ -228,8 +228,9 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   one `rewrite_block` per block, however many matches it holds. Runs a match does not touch keep their glyphs and
   kerning; a match across runs puts the replacement in the style of the run it starts in. The block's lines stay
   as they were (each line end is kept as a line end that does not end the paragraph, so a justified block stays
-  justified): only a line whose width changed reflows, and what no longer fits wraps onto a line of its own, to the
-  block's width. A match across a line end drops that one break. Edit text itself re-wraps the whole block to its
+  justified): only a line whose width changed reflows, and the words of it that no longer fit go on at the start of
+  the next line, which passes its own on in turn only when it is full (so a justified block stays one). A match
+  across a line end drops that one break. Edit text itself re-wraps the whole block to its
   widest line when its text is committed (its draft is one paragraph), so short lines can join. Nothing is searched again
   after a replacement, so a replacement that contains the find text is set once and never loops. The whole run is
   one undo step ("Replace "cat" with "dog""), saved like any text edit (a full rewrite; incremental when signed).
