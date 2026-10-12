@@ -850,6 +850,20 @@ fn a_certified_or_signed_document_gets_no_index_written_updated_or_removed() {
 }
 
 #[test]
+fn a_certification_that_cannot_be_read_blocks_the_index_as_certified() {
+    // More fields than the check will walk: `certified` errs, which is a certification, not "not certified".
+    let base = dir("catalog-guard-unreadable");
+    let p = write(&base, "a.pdf", with_catalog(&format!("/AcroForm << /Fields [{}] >>", "0 ".repeat(20_001))));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&p.to_string_lossy()).unwrap().doc;
+    let e = embed::embedded(&eng, id).unwrap();
+    assert!(e.blocked.as_deref().is_some_and(|w| w.contains("certified")), "{e:?}");
+    let err = embed::embed(&eng, id, EditSource::User).unwrap_err().to_string();
+    assert!(err.contains("certified"), "{err}");
+    assert!(eng.edit_state(id).unwrap().undo.is_none(), "a refusal is not an undo step");
+}
+
+#[test]
 fn a_saved_redaction_is_gone_from_the_catalog_and_its_results() {
     use crate::redact::app::{apply, find, mark_hits, ApplyOutcome, FindQuery};
     use crate::redact::Sanitize;
