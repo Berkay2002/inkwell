@@ -78,7 +78,7 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
   images up to 16 megapixels (Flate and DCT as stored, ICC profiles replaced by their device space). Actions, `/AA`,
   `/OC`, metadata, patterns, shadings, inline images, soft masks of a graphics state, Type 3 and composite fonts are
   not carried; an appearance that needs one of them is refused as a whole. Every name its content uses must resolve in
-  the form's own `/Resources`. Streams are decoded under a cap (4 MB per appearance), so a bomb stops there. Per file
+  the form's own `/Resources`. Streams are decoded under a cap (4 MB per appearance; an image is stored compressed and checked up to its own pixel size, 16 megapixels at most), so a bomb stops there. Per file
   there is also an allowance of 256 MB of decoding (what a cap stopped counts, so one bomb shared by thousands of comments
   is not inflated again for each) and 64 MB for what appearances hold in memory (a font many comments share is a copy
   each); past either, the rest get Inkwell's own drawing and are counted.

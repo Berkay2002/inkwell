@@ -391,8 +391,10 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
         Ok(n)
     };
     let grow = |stack: &mut Vec<Node>, s: &str| -> Result<()> {
+        let in_annots = stack.iter().any(|n| n.name == "annots");
         if let Some(top) = stack.last_mut() {
-            let blob = matches!(top.name.as_str(), "data" | "appearance");
+            // Only a comment's file or appearance may be longer than MAX_STR: not a form field that has this name.
+            let blob = matches!(top.name.as_str(), "data" | "appearance") && in_annots;
             if top.over {
                 return Ok(());
             }
@@ -545,6 +547,17 @@ pub fn with_fdf<R>(bytes: &[u8], f: impl FnOnce(&mupdf::pdf::PdfObject) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_comment_may_hold_a_long_data_or_appearance_element() {
+        let big = "0".repeat(2 << 20);
+        let ok = format!("<xfdf><annots><fileattachment><data>{big}</data></fileattachment></annots></xfdf>");
+        assert_eq!(parse_xml(ok.as_bytes()).unwrap().child("annots").unwrap().kids[0].child("data").unwrap().text.len(), 2 << 20);
+        for tag in ["data", "appearance"] {
+            let form = format!("<xfdf><fields><field name=\"a\"><{tag}>{big}</{tag}></field></fields></xfdf>");
+            assert!(parse_xml(form.as_bytes()).is_err(), "{tag} outside <annots> keeps the 1 MB limit");
+        }
+    }
 
     #[test]
     fn xml_reads_text_entities_and_namespaces() {
