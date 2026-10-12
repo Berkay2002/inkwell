@@ -801,3 +801,38 @@ fn unlocking_for_combine_refuses_a_document_that_is_not_waiting_for_a_password()
     assert!(matches!(eng.unlock_pending(wait, "not-it"), Err(crate::engine::EngineError::BadPassword)));
     assert_eq!(eng.unlock_pending(wait, "secret-pw").unwrap().page_count, 2);
 }
+
+#[test]
+fn a_signature_field_of_a_source_arrives_empty_and_the_plan_says_so() {
+    use crate::outline::tests::{open_bytes, raw_pdf};
+    // object 5: a signature that is its own widget; 6 and 7: a signature field that holds the value and a
+    // widget kid that does not
+    let value = "/V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] /Contents <00> >>";
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /SigFlags 3 /Fields [5 0 R 6 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 7 0 R] >>".into(),
+        "<< >>".into(),
+        format!("<< /Type /Annot /Subtype /Widget /FT /Sig /T (First) /Rect [10 10 100 50] /P 3 0 R /AP << /N 4 0 R >> {value} >>"),
+        format!("<< /FT /Sig /T (Second) /Kids [7 0 R] {value} >>"),
+        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 60 100 100] /P 3 0 R >>".into(),
+    ];
+    let d = dir("combine-signed");
+    let (eng, id, path) = open_bytes(&d, "s.pdf", &raw_pdf(&objs));
+    assert!(eng.read_custom(id, |d| Ok(crate::outline::signed(d))).unwrap(), "the fixture is signed");
+    let a = write(&d, "a.pdf", 1, 0);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let specs = [src(&a, ""), src(&path, "")];
+    let plan = combine::inspect(&specs, opt).unwrap();
+    assert_eq!(plan.files[0].note, None);
+    assert_eq!(plan.files[1].note.as_deref(), Some("s.pdf's signature is not carried over"));
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    assert_eq!(combine::run(&eng, &specs, opt, &out).unwrap().plan, plan);
+
+    let (e2, i2) = open(&out);
+    assert!(!e2.read_custom(i2, |d| Ok(crate::outline::signed(d))).unwrap(), "no signed document comes out");
+    assert_eq!(crate::forms::list_all(&e2, i2).unwrap().fields.len(), 2, "the signature fields are still there");
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("adbe.pkcs7.detached"), "no signature value in the file");
+}
+

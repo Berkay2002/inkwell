@@ -86,6 +86,8 @@ pub struct FilePlan {
     pub used: u32,
     pub has_outline: bool,
     pub has_fields: bool,
+    /// Something the person should know about what this file brings, none when there is nothing.
+    pub note: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -206,6 +208,8 @@ struct Facts {
     pages: u32,
     has_outline: bool,
     has_fields: bool,
+    /// The file carries a digital signature (its signature fields arrive empty).
+    signed: bool,
     /// Bookmarks the file's own outline holds.
     outline_nodes: u32,
     /// The first page's size in points.
@@ -217,7 +221,7 @@ struct Facts {
 
 /// A file that is left out for what it is (password, no copying, no pages).
 fn left_out(state: FileState, message: String) -> Facts {
-    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
+    Facts { state, message: Some(message), pages: 0, has_outline: false, has_fields: false, signed: false, outline_nodes: 0, first_size: [0.0, 0.0], stable: true }
 }
 
 /// A file that could not be read: left out now, asked again next time.
@@ -251,7 +255,8 @@ fn read_facts(src: &PdfDocument) -> Result<Option<Facts>> {
     let has_outline = src.catalog()?.get_dict("Outlines")?.is_some_and(|o| !o.is_null().unwrap_or(true) && o.get_dict("First").ok().flatten().is_some());
     let has_fields = src.catalog()?.get_dict("AcroForm")?.and_then(|f| f.get_dict("Fields").ok().flatten()).is_some_and(|f| f.len().unwrap_or(0) > 0);
     let first_size = page_size(src, 0)?;
-    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, outline_nodes: count_nodes(&outline), first_size, stable: true }))
+    let signed = crate::outline::signed(src);
+    Ok(Some(Facts { state: FileState::Ready, message: None, pages: count, has_outline, has_fields, signed, outline_nodes: count_nodes(&outline), first_size, stable: true }))
 }
 
 /// Opens `path`, reads what planning needs and lets the document go again. A file that cannot be read
@@ -333,6 +338,7 @@ fn plan_from(specs: &[SourceSpec], opt: CombineOptions, facts: &[Facts]) -> Resu
             used: 0,
             has_outline: f.has_outline,
             has_fields: f.has_fields,
+            note: (f.signed && f.state == FileState::Ready).then(|| format!("{name}'s signature is not carried over")),
         };
         if f.state != FileState::Ready {
             files.push(plan);

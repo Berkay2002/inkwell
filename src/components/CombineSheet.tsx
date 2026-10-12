@@ -162,7 +162,7 @@ function Row({
   const sub = plan
     ? plan.pages === 0
       ? ""
-      : `${plan.pages} ${plan.pages === 1 ? "page" : "pages"}${plan.hasOutline ? ", has bookmarks" : ""}${plan.hasFields ? ", has form fields" : ""}`
+      : `${plan.pages} ${plan.pages === 1 ? "page" : "pages"}${plan.hasOutline ? ", has bookmarks" : ""}${plan.hasFields ? ", has form fields" : ""}${plan.note ? `. ${plan.note}` : ""}`
     : pages != null
       ? `${pages} ${pages === 1 ? "page" : "pages"}`
       : "";

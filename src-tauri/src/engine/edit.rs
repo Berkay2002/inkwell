@@ -733,6 +733,18 @@ pub(crate) fn graft_pages_ex(dst: &mut PdfDocument, src: &PdfDocument, pages: &[
     Ok(Grafted { pages: made.iter().map(|(_, p)| p.clone()).collect(), outline })
 }
 
+/// A signature field arrives empty: its value (and the appearance that shows it) would never verify in a
+/// file that is not the one that was signed, and a signature that cannot verify looks like tampering.
+/// `field` is the source object (its /FT may be inherited), `copy` the dictionary about to be grafted.
+fn drop_signature(field: &PdfObject, copy: &mut PdfObject) -> Result<()> {
+    let sig = name_of(field.get_dict_inheritable("FT")?) == b"Sig";
+    if sig && copy.get_dict("V")?.is_some() {
+        copy.dict_delete("V")?;
+        copy.dict_delete("AP")?;
+    }
+    Ok(())
+}
+
 /// State of one [`graft_pages`] call's annotation pass.
 struct Graft<'a> {
     src: &'a PdfDocument,
@@ -807,6 +819,9 @@ impl Graft<'_> {
                 c.dict_delete(k)?;
             }
             c.dict_delete("Dest")?;
+            if sub == b"Widget" {
+                drop_signature(&a, &mut c)?;
+            }
             let mut copy = map.graft_object(&c)?;
             if let Some(d) = dest {
                 copy.dict_put("Dest", d)?;
@@ -887,6 +902,7 @@ impl Graft<'_> {
         for k in BACK_REFS {
             c.dict_delete(k)?;
         }
+        drop_signature(&f, &mut c)?;
         let mut copy = map.graft_object(&c)?;
         copy.dict_put("Kids", dst.new_array()?)?;
         let r = dst.add_object(&copy)?;

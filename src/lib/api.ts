@@ -1333,6 +1333,8 @@ export interface CombineFilePlan {
   used: number;
   hasOutline: boolean;
   hasFields: boolean;
+  /** Worth knowing about what the file brings ("x.pdf's signature is not carried over"); null when nothing. */
+  note: string | null;
 }
 
 export interface CombinePlan {

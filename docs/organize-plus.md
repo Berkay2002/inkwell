@@ -114,8 +114,9 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   a font the same, the first one's is kept.
 - A file opened with a password is not remembered between looks (the cache key holds no password), so such a
   file is read again on every look. Combining never writes a source, so signed or certified sources need no
-  special handling. A signature field of a source comes along with its value, as every form field does; it no
-  longer verifies (the bytes are not the file that was signed), and the result counts as a signed document.
+  special handling. A signature field of a source arrives empty (its value and appearance are dropped, the
+  field stays), so the result is never a signed document that fails to verify. The row says "x.pdf's signature
+  is not carried over". Insert pages from file does the same.
 - Labels are carried page by page: a source's section that is cut by a page range or reordered becomes several
   sections in the result, each with the number the page had in its source.
 - The attachments list does not show portfolio (collection) structure; a PDF Portfolio opens in its own file list (docs/portfolios.md).
