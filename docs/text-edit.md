@@ -263,7 +263,10 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   did and its spaces take up its width, which is what its word spacing did); a line that holds one is set at
   the start (or middle, or end, by the block's alignment) of the line it was, with that line's own baseline, so
   nothing moves with a first-line indent or uneven leading; in a justified block it is stretched to the end that
-  line had, unless it is the last (a line's own leading and trailing spaces don't count in its width). The text
+  line had, unless it is the last (a line's own leading and trailing spaces don't count in its width). A line
+  whose own spaces were stretched in the source (wider than its glyphs by a tenth of its size at each space) is
+  judged the same way in a block too short or too indented to be read as justified: it ends where it did, unless it is the last line; a ragged line is not stretched. The spread is
+  written as `TJ` adjustments at the spaces, so it works in any font (`Tw` would not in a two-byte one). The text
   of a run with a match is kept as it is (double and no-break spaces); only a space the replacement would double
   at its edge goes. A line, a single-line block (heading, table cell) included, never grows past the width its
   block had: nothing tells what is beside it, so a replacement that does not fit is not wrapped or pushed down

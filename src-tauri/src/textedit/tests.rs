@@ -2444,6 +2444,29 @@ fn a_justified_line_that_outgrows_its_place_is_skipped_and_the_block_stays_justi
 }
 
 #[test]
+fn a_changed_line_justified_in_the_source_is_stretched_to_its_end_again() {
+    let d = dir("replace-justified-tw");
+    // Two lines, the first spread to 100 pt with Tw (as a word processor writes it): too few lines to be read as a
+    // justified block, so each line is judged by its own spaces. The second is the paragraph's last.
+    let page = "BT /F1 12 Tf 14 TL 72 700 Td 17.648 Tw (aaa bbb ccc) Tj 0 Tw T* (ddd eee fff) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let before = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!((before.align, before.lines.len()), (Align::Left, 2), "{before:?}");
+    assert!((before.lines[0][2] - 172.0).abs() < 0.6 && before.lines[1][2] < 160.0, "{:?}", before.lines);
+    // A shorter word on the justified line: it still ends where it did.
+    let r = do_replace(&eng, id, &req("bbb", "b", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let after = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(after.text, "aaa b ccc ddd eee fff");
+    assert!((after.lines[0][0] - before.lines[0][0]).abs() < 0.1 && (after.lines[0][2] - before.lines[0][2]).abs() < 0.5, "{:?} vs {:?}", after.lines, before.lines);
+    assert!(same_box(&after.lines[1], &before.lines[1]), "{:?} vs {:?}", after.lines, before.lines);
+    // The paragraph's last line is not stretched: it ends where its words do.
+    do_replace(&eng, id, &req("eee", "e", SearchOpts::default())).unwrap();
+    let last = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert!(last.lines[1][2] < before.lines[1][2] - 5.0, "{:?} vs {:?}", last.lines, before.lines);
+}
+
+#[test]
 fn a_style_or_a_move_leaves_the_lines_of_a_block_as_they_are() {
     let d = dir("edit-format-keeps-lines");
     let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));

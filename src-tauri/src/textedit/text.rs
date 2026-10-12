@@ -1026,6 +1026,21 @@ fn edge_spaces(l: &Line) -> (f64, f64) {
     (lead, trail)
 }
 
+/// Whether a line's spaces were stretched to fill it (justified): the line, `width` wide in text space, is wider
+/// than its glyphs by more than a tenth of its size at each of its spaces. Kerning and the odd Tc are far below that.
+fn stretched(l: &Line, width: f64) -> bool {
+    let st = &l.origin.state;
+    let (mut natural, mut spaces, mut size) = (0.0, 0usize, 0.0f64);
+    for r in &l.runs {
+        for g in &r.glyphs {
+            natural += (g.w / 1000.0 * r.tsize + if g.bytes.is_empty() { 0.0 } else { st.char_spacing }) * st.scale;
+            spaces += usize::from(g.space);
+            size = size.max(r.tsize);
+        }
+    }
+    spaces > 0 && width - natural > 0.1 * size * st.scale * spaces as f64
+}
+
 /// A line's start and end along the text direction of `first` (text space x of `first`).
 fn span_in(first: &Line, l: &Line) -> (f64, f64, f64) {
     let Some(inv) = first.origin.tm.then(&first.origin.ctm).invert() else {
@@ -1554,6 +1569,7 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
     let m = Measure { styles: &setter.styles, cs: st.char_spacing, scale: st.scale };
     // The block's extent along its first line, in that line's text space.
     let mut spans: Vec<(f64, f64, f64)> = members.iter().map(|l| span_in(first, l)).collect();
+    let full: Vec<bool> = if change.keep.is_some() { members.iter().zip(&spans).map(|(l, sp)| stretched(l, sp.1 - sp.0)).collect() } else { Vec::new() };
     if change.keep.is_some() {
         // Where each line's words are, not its blanks: a line may begin or end with spaces that the text drops.
         for (sp, l) in spans.iter_mut().zip(&members) {
@@ -1598,7 +1614,7 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
             return Err(invalid("there is no text to set"));
         }
         let grow = change.keep.as_ref().is_some_and(|k| k.wrap).then_some(lead);
-        let (lines, at) = keep_lines(groups, &spans, align, (left, right), 0.5 / k, &m, grow)
+        let (lines, at) = keep_lines(groups, &spans, &full, align, (left, right), 0.5 / k, &m, grow)
             .ok_or_else(|| invalid("the replacement does not fit on its line"))?;
         line_at = at;
         lines
