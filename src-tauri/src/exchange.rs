@@ -58,6 +58,9 @@ pub const MAX_STR: usize = 1 << 20;
 /// Bytes one file may copy out of PDF objects in all. Objects can be shared (one string many entries refer
 /// to), so counts of items do not bound what is copied; this does.
 pub const MAX_COPIED: usize = 32 << 20;
+/// The same bound for an export: the document is the person's own, so real comments may hold more than a
+/// file we read, but a damaged one still must not multiply one shared string or array without end.
+pub const MAX_EXPORT_COPIED: usize = 256 << 20;
 
 /// What is left of [`MAX_COPIED`] for one read of a file or of a document's comments.
 pub struct Budget {
@@ -70,7 +73,11 @@ pub struct Budget {
 
 impl Budget {
     pub fn new() -> Budget {
-        Budget { left: Cell::new(MAX_COPIED), gone: Cell::new(false), strings: RefCell::default(), numbers: RefCell::default() }
+        Budget::with_limit(MAX_COPIED)
+    }
+
+    pub fn with_limit(bytes: usize) -> Budget {
+        Budget { left: Cell::new(bytes), gone: Cell::new(false), strings: RefCell::default(), numbers: RefCell::default() }
     }
 
     /// Charges `n` bytes. When they are not there the budget is gone for good and this says false: the

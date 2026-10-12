@@ -495,3 +495,27 @@ fn an_fdf_with_more_entries_than_the_walk_allows_is_refused_not_cut_short() {
     let f = fdf_sharing(10_000, |i| format!("<< /Subtype /Ink /Page 0 /Rect [0 0 50 50] /NM (e{i}) /InkList 5 0 R >>"), &objs);
     assert!(parse(&f).is_err());
 }
+
+#[test]
+fn an_export_is_not_held_to_the_import_text_budget_but_still_has_a_bound() {
+    // 40 comments share one 900 kB text: 36 MB, over the 32 MB an import file may copy.
+    let n = 40;
+    let annots: String = (0..n).map(|i| format!("{} 0 R ", 5 + i)).collect();
+    let big = format!("({})", "x".repeat(900_000));
+    let mut objs = vec![big];
+    objs.extend((0..n).map(|i| format!("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n{i}) /Contents 4 0 R /P 3 0 R >>")));
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "export-budget");
+    let (eng, id, _) = open_bytes(&d, "big.pdf", &one_page_pdf("", &format!("/Annots [{annots}]"), &refs));
+    let (bytes, done) = export(&eng, id, Format::Xfdf, "big.pdf").unwrap();
+    assert_eq!(done.count, n);
+    assert!(bytes.len() > 36_000_000);
+
+    // One ink list of 1024 strokes, each the same 65 536 numbers: far over the export bound, refused with
+    // the export message and nothing like 537 MB held.
+    let strokes = "6 0 R ".repeat(1024);
+    let ink = ["<< /Type /Annot /Subtype /Ink /Rect [0 0 50 50] /NM (i) /InkList 5 0 R /P 3 0 R >>".to_string(), format!("[{strokes}]"), format!("[{}]", "1 ".repeat(65_536))];
+    let refs: Vec<&str> = ink.iter().map(String::as_str).collect();
+    let (eng, id, _) = open_bytes(&d, "ink.pdf", &one_page_pdf("", "/Annots [4 0 R]", &refs));
+    assert!(matches!(export(&eng, id, Format::Xfdf, "ink.pdf"), Err(EngineError::Invalid(m)) if m.contains("export") && !m.contains("does not read")));
+}

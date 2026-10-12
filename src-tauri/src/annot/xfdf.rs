@@ -14,7 +14,7 @@
 use super::{Kind, NewAnnot, Style, add, bad, each, find, meta, parent_of, put_str, rgb};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
-use crate::exchange::{self, Budget, Format, MAX_DEPTH, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
+use crate::exchange::{self, Budget, Format, MAX_DEPTH, MAX_EXPORT_COPIED, MAX_ITEMS, MAX_NODES, MAX_STR, esc, pdf_name, pdf_text};
 use crate::forms::{decode_text, get, parse_da, text};
 use mupdf::pdf::{AnnotationFlags, PdfAnnotationType, PdfDocument, PdfObject};
 use mupdf::{Matrix, Point, Quad};
@@ -342,7 +342,7 @@ fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
 /// left out for having another type (carets, attachments, sound, ...). Unnamed comments get a stable
 /// name for this export only; nothing is written to the document.
 fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
-    let budget = Budget::new();
+    let budget = Budget::with_limit(MAX_EXPORT_COPIED);
     let mut left = 0usize;
     // Measurements are left out (their /Measure scale has no place in these files), and so are their replies.
     let mut measured: HashSet<i32> = HashSet::new();
@@ -363,7 +363,9 @@ fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
         c.parent_xref = parent_of(&o);
         Ok(Some(c))
     })?;
-    budget.check()?;
+    if budget.gone() {
+        return Err(bad("The comments of this document hold more than 256 MB, or refer to the same text or numbers so many times, that Inkwell cannot export them to a file."));
+    }
     let mut items: Vec<Comment> = all.into_iter().flatten().collect();
     let kept = items.len();
     items.retain(|c| !c.parent_xref.is_some_and(|p| measured.contains(&p)));
