@@ -2027,3 +2027,19 @@ fn an_unrelated_edit_and_save_leaves_a_signature_fields_appearance_alone() {
         }
     }
 }
+
+#[test]
+fn drawing_and_editing_a_signed_file_with_an_empty_field_writes_no_appearance_for_it() {
+    let (eng, id, _) = open_bytes("signed-empty", &with_empty_field());
+    sign_step(&eng, id, &ids().0, &req(0, [72.0, 600.0, 280.0, 680.0]), "A".into()).unwrap();
+    let signed = eng.current_bytes(id).unwrap();
+    let rev = eng.doc_entry(id).unwrap().generation();
+    eng.page_png(id, rev, 0, 400).unwrap();
+    add_one(&eng, id, 0, &NewAnnot::Note { at: [100.0, 400.0], text: "x".into() }, &Style::default(), "T", EditSource::User).unwrap();
+    let after = eng.current_bytes(id).unwrap();
+    assert!(after.starts_with(&signed) && after.len() > signed.len(), "an increment, the signed bytes untouched");
+    assert!(!has_arrow(&after));
+    let i = infos(&after);
+    let empty = i.iter().find(|s| s.field == "Tenant").unwrap();
+    assert_eq!(empty.status, Status::Unsigned);
+}
