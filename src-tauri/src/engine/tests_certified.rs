@@ -21,7 +21,7 @@ fn pdf(catalog: &str, field: &str) -> Vec<u8> {
         format!("<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(a.txt) 10 0 R] >> >> {catalog} >>"),
         "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R /Annots [7 0 R 9 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R /Annots [7 0 R 9 0 R 12 0 R] >>".to_string(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>".to_string(),
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
         "<< /Type /Annot /Subtype /Text /Rect [100 100 120 120] /Contents (a note) /T (A) >>".to_string(),
@@ -29,6 +29,9 @@ fn pdf(catalog: &str, field: &str) -> Vec<u8> {
         "<< /Type /Annot /Subtype /Redact /Rect [72 690 200 720] /QuadPoints [72 720 200 720 72 690 200 690] /C [1 0 0] >>".to_string(),
         "<< /Type /Filespec /F (a.txt) /UF (a.txt) /EF << /F 11 0 R >> >>".to_string(),
         "<< /Type /EmbeddedFile /Length 5 >>\nstream\nhello\nendstream".to_string(),
+        "<< /Type /Annot /Subtype /Line /Rect [0 0 108 144] /L [0 0 108 144] /IT /LineDimension /C [1 0 0] /Contents (5 in) /F 4 \
+         /Measure << /Type /Measure /Subtype /RL /R (1 in = 1 in) /X [<< /Type /NumberFormat /U (in) /C 1 >>] /D [<< /Type /NumberFormat /U (in) /C 1 >>] >> >>"
+            .to_string(),
     ])
 }
 
@@ -132,7 +135,9 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
         eng, id, 0, crate::measure::Kind::Distance, &[[10.0, 10.0], [100.0, 10.0]], None, "me", user()
     )
     .map(|_| ()));
-    op!("measurement scale", false, |eng, _p, id| crate::measure::scale_set(eng, id, 0, &crate::measure::Scale::default(), user()).map(|_| ()));
+    op!("measurement scale", true, |eng, _p, id| crate::measure::scale_set(eng, id, 0, &crate::measure::Scale::default(), user()).map(|_| ()));
+    op!("rescale a measurement", true, |eng, _p, id| crate::measure::rescale(eng, id, 0, 12, &crate::measure::Scale::default(), user()).map(|_| ()));
+    op!("delete a measurement", true, |eng, _p, id| crate::annot::delete_many(eng, id, &[(0, 12)], user()).map(|_| ()));
     op!("mark an area for redaction", true, |eng, _p, id| crate::redact::app::mark_area(eng, id, 0, [10.0, 10.0, 80.0, 40.0], user()).map(|_| ()));
     op!("mark pages for redaction", true, |eng, _p, id| crate::redact::app::mark_pages(eng, id, &[1], user()).map(|_| ()));
     op!("remove a redaction mark", true, |eng, _p, id| crate::redact::app::unmark(eng, id, &[(0, 9)], user()).map(|_| ()));
