@@ -141,6 +141,8 @@ fn flattening_bakes_the_items_and_keeps_comments() {
     assert_eq!(list_all(&eng, id).unwrap().len(), 6);
 }
 
+// The saved-signature key is protected with DPAPI, which only Windows has (elsewhere the store refuses).
+#[cfg(windows)]
 #[test]
 fn saved_signatures_are_encrypted_bound_and_capped() {
     let d = dir("store");
@@ -201,6 +203,8 @@ fn pictures_are_normalized() {
     assert!(store::decode_png("data:image/png;base64,!!!").is_err());
 }
 
+// The saved-signature key is protected with DPAPI, which only Windows has (elsewhere the store refuses).
+#[cfg(windows)]
 #[test]
 fn two_first_saves_at_once_share_one_key() {
     let png = store::normalize(&drawn_png(), true, false).unwrap();
