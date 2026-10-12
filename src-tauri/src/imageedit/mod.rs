@@ -984,6 +984,18 @@ pub struct ImageClipboard(pub parking_lot::Mutex<Option<std::sync::Arc<Clip>>>);
 /// The most pictures one copy takes.
 const MAX_CLIP_IMAGES: usize = 100;
 
+/// An inline image (`BI … EI` bytes) whose colour space is a device one, a stencil, or an Indexed one over
+/// a device base: nothing in it names the resources of the page it is on.
+fn self_contained(bytes: &[u8]) -> bool {
+    let device = |o: &Obj| matches!(o, Obj::Name(n) if matches!(n.as_slice(), b"G" | b"RGB" | b"CMYK" | b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK"));
+    let d = inline_dict(bytes);
+    match d.iter().find(|(k, _)| k == b"ColorSpace").map(|(_, v)| v) {
+        None => true,
+        Some(Obj::Array(a)) => matches!(a.first(), Some(Obj::Name(n)) if matches!(n.as_slice(), b"I" | b"Indexed")) && a.get(1).is_some_and(device),
+        Some(v) => device(v),
+    }
+}
+
 /// The page's size in page space.
 fn page_size(d: &PdfDocument, page: u32) -> Result<(f64, f64)> {
     let b = d.load_page(page as i32)?.bounds()?;
@@ -1145,8 +1157,7 @@ pub fn move_to_page(eng: &Engine, doc: DocId, rev: u32, from: u32, indices: &[u3
                 return Err(invalid("this image is drawn inside a text object; it can only be deleted"));
             }
             // A page's own colour space can't come along in the picture's operator.
-            let device = matches!(f.color_space.as_str(), "DeviceGray" | "DeviceRGB" | "DeviceCMYK" | "Indexed" | "ImageMask" | "");
-            if f.kind == ImageKind::Inline && !device {
+            if f.kind == ImageKind::Inline && !self_contained(&pf.pieces.data()[pf.ops[f.op].span.clone()]) {
                 return Err(invalid("this inline picture uses a colour space of its page, so it can't be moved to another page"));
             }
             picked.push(f);

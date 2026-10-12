@@ -29,6 +29,11 @@ fn pdf_with(pages: usize, shared: bool, catalog: &str, extra: &[String]) -> Vec<
 
 /// [`pdf_with`] with `attrs(i)` added to page `i`'s dictionary (`/Rotate 90`, a different `/MediaBox`).
 fn pdf_attrs(pages: usize, shared: bool, catalog: &str, extra: &[String], attrs: &dyn Fn(usize) -> String) -> Vec<u8> {
+    pdf_inline(pages, shared, catalog, extra, attrs, "/G")
+}
+
+/// [`pdf_attrs`] with `inline_cs` as the colour space of page 1's inline image (4 data bytes, 2 × 2 pixels).
+fn pdf_inline(pages: usize, shared: bool, catalog: &str, extra: &[String], attrs: &dyn Fn(usize) -> String, inline_cs: &str) -> Vec<u8> {
     let mut objs: Vec<Vec<u8>> = Vec::new();
     let kids: String = (0..pages).map(|i| format!("{} 0 R ", 5 + i * 2)).collect();
     objs.push(format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>").into_bytes());
@@ -53,7 +58,8 @@ fn pdf_attrs(pages: usize, shared: bool, catalog: &str, extra: &[String], attrs:
         );
         let mut c: Vec<u8> = if i == 0 || shared { b"q 200 0 0 100 100 500 cm /Im1 Do Q\n".to_vec() } else { Vec::new() };
         if i == 0 {
-            c.extend_from_slice(b"q 50 0 0 50 400 600 cm BI /W 2 /H 2 /CS /G /BPC 8 ID \x10\x60\xa0\xf0 EI Q\n");
+            c.extend_from_slice(format!("q 50 0 0 50 400 600 cm BI /W 2 /H 2 /CS {inline_cs} /BPC 8 ID ").as_bytes());
+            c.extend_from_slice(b"\x10\x60\xa0\xf0 EI Q\n");
         }
         c.extend_from_slice(format!("BT /F1 12 Tf 72 72 Td (Page {}) Tj ET\n", i + 1).as_bytes());
         let mut s = format!("<< /Length {} >>\nstream\n", c.len()).into_bytes();
@@ -910,15 +916,18 @@ fn copy_and_move_refuse_what_they_can_not_do() {
     assert!(matches!(move_to_page(&eng, id, r + 1, 0, &[0], (1, [0.0, 0.0]), EditSource::User), Err(EngineError::Stale)));
     assert!(move_to_page(&eng, id, r, 0, &[0], (7, [0.0, 0.0]), EditSource::User).is_err());
     assert_eq!(rev(&eng, id), r, "a refused paste or move changes nothing");
-    // An inline picture in a colour space the page defines can't leave the page.
-    let mut odd = pdf(2, false);
-    let at = odd.windows(6).position(|w| w == b"/CS /G").unwrap();
-    odd[at..at + 6].copy_from_slice(b"/CS /X");
-    let (eng, id, _) = open(&dir("paste-refusals-cs"), &odd);
-    let r = rev(&eng, id);
-    let e = move_to_page(&eng, id, r, 0, &[1], (1, [0.0, 0.0]), EditSource::User);
-    assert!(matches!(&e, Err(EngineError::Invalid(m)) if m.contains("colour space")), "{e:?}");
-    assert!(move_to_page(&eng, id, r, 0, &[0], (1, [0.0, 0.0]), EditSource::User).is_ok());
+    // An inline picture in a colour space the page defines can't leave the page, whether it is named
+    // outright or is an Indexed one over such a base; device ones, and an Indexed one over a device base, go.
+    for (cs, moves) in [("/X", false), ("[/I /CS0 1 <00FF>]", false), ("[/Indexed /X 1 <00FF>]", false), ("[/I /RGB 1 <000000FFFFFF>]", true), ("/RGB", true), ("/G", true)] {
+        let odd = pdf_inline(2, false, "", &[], &|_| String::new(), cs);
+        let (eng, id, _) = open(&dir("paste-refusals-cs"), &odd);
+        let r = move_to_page(&eng, id, rev(&eng, id), 0, &[1], (1, [0.0, 0.0]), EditSource::User);
+        match (moves, &r) {
+            (true, Ok(_)) => {}
+            (false, Err(EngineError::Invalid(m))) if m.contains("colour space") => {}
+            _ => panic!("{cs}: {r:?}"),
+        }
+    }
 }
 
 #[test]
