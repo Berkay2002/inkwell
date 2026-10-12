@@ -30,6 +30,8 @@ export function MeasureBar({ doc }: { doc: DocState }) {
   const snaps = useMeasure((s) => s.snaps);
   const d = useMeasure((s) => s.docs[doc.id]);
   const locked = useMeasure((s) => s.locks[doc.id]) ?? null;
+  // Off for the page scale alone on a certified file that allows annotations (/P 3): measuring still works.
+  const scaleLocked = useMeasure((s) => s.scaleLocks[doc.id]) ?? null;
   const page = doc.currentPage;
   const ps = d?.scales[page];
   const scale = scaleOf(d, page);
@@ -47,6 +49,10 @@ export function MeasureBar({ doc }: { doc: DocState }) {
   useEffect(() => {
     if (locked && tool !== "select") ms().setTool("select");
   }, [locked, tool]);
+  // A tool armed on another document must not draw a calibration line where the scale cannot be set.
+  useEffect(() => {
+    if (scaleLocked && tool === "calibrate") ms().setTool("distance");
+  }, [scaleLocked, tool]);
   useEffect(() => setEdit(false), [tool, page, open]);
 
   if (!open) return null;
@@ -73,8 +79,8 @@ export function MeasureBar({ doc }: { doc: DocState }) {
           <span className="sep" />
           <button
             className={edit ? "ms-chip on" : "ms-chip"}
-            disabled={!!locked}
-            title={locked ?? (ps?.defined === false ? "This page has no scale yet: it measures in inches. Click to set one." : "The scale of this page. Click to change it.")}
+            disabled={!!scaleLocked}
+            title={scaleLocked ?? (ps?.defined === false ? "This page has no scale yet: it measures in inches. Click to set one." : "The scale of this page. Click to change it.")}
             aria-expanded={edit}
             onClick={() => setEdit(!edit)}
           >
@@ -83,8 +89,8 @@ export function MeasureBar({ doc }: { doc: DocState }) {
           <select
             className="ms-units"
             value={scale.realUnit}
-            disabled={!!locked}
-            title={locked ?? "Show measurements in"}
+            disabled={!!scaleLocked}
+            title={scaleLocked ?? "Show measurements in"}
             aria-label="Units"
             onChange={(e) => void ms().setPageScale(doc.id, page, inUnit(scale, e.target.value as Unit))}
           >
@@ -106,8 +112,8 @@ export function MeasureBar({ doc }: { doc: DocState }) {
           </button>
         </div>
       )}
-      {locked && <p className="ms-error" role="status">{locked}</p>}
-      {edit && !calib && !locked && <ScaleEditor doc={doc.id} page={page} scale={scale} onClose={() => setEdit(false)} />}
+      {scaleLocked && <p className="ms-error" role="status">{scaleLocked}</p>}
+      {edit && !calib && !scaleLocked && <ScaleEditor doc={doc.id} page={page} scale={scale} onClose={() => setEdit(false)} />}
       {d?.error && (
         <p className="ms-error" role="alert">
           {d.error}

@@ -182,6 +182,8 @@ interface A11yStore {
   get: (doc: number) => DocA11y;
   /** Reads (once) whether the document is certified or signed. */
   protection: (doc: number) => Promise<Protection>;
+  /** Reads it again (the document was edited or saved); the newest read wins and a failed one keeps the old value. */
+  refreshProtection: (doc: number) => Promise<Protection>;
   check: (doc: number) => Promise<void>;
   /** One fix, one undo step. */
   fix: (doc: number, fix: Fix) => Promise<boolean>;
@@ -242,25 +244,42 @@ export const useA11y = create<A11yStore>((set, get) => {
   let seq = 0;
   const patchOrder = (doc: number, p: Partial<OrderState>) => patch(doc, { order: { ...get().get(doc).order, ...p } });
   const patchTags = (doc: number, p: Partial<TagsState>) => patch(doc, { tags: { ...get().get(doc).tags, ...p } });
+  /** The newest read of each document's protection, and its sequence number: an older answer is dropped. */
   const reading = new Map<number, Promise<Protection>>();
+  const readSeq = new Map<number, number>();
+  /**
+   * Reads whether the document is certified or signed again (a save or an edit may have changed it). The newest
+   * read wins; a failed read keeps what was known, or says what the check found (the engine refuses a certified
+   * document anyway).
+   */
+  const readProtection = (doc: number): Promise<Protection> => {
+    const n = (readSeq.get(doc) ?? 0) + 1;
+    readSeq.set(doc, n);
+    const p = Promise.resolve()
+      .then(() => a11yApi.protection(doc))
+      .then(
+        (v) => {
+          if (readSeq.get(doc) !== n) return get().get(doc).protection ?? v;
+          patch(doc, { protection: v });
+          return v;
+        },
+        (): Protection => {
+          const d = get().get(doc);
+          const v = d.protection ?? { certified: !!d.report?.certified, signed: !!d.report?.signed };
+          patch(doc, { protection: v });
+          return v;
+        },
+      )
+      .finally(() => {
+        if (reading.get(doc) === p) reading.delete(doc);
+      });
+    reading.set(doc, p);
+    return p;
+  };
   /** A certified document takes no edit (the engine refuses them too); the rail says why. */
   const protection = (doc: number): Promise<Protection> => {
     const have = get().get(doc).protection;
-    if (have) return Promise.resolve(have);
-    let p = reading.get(doc);
-    if (!p) {
-      p = Promise.resolve()
-        .then(() => a11yApi.protection(doc))
-        // Unreadable: what the check says, if it has run (the engine refuses a certified document anyway).
-        .catch((): Protection => ({ certified: !!get().get(doc).report?.certified, signed: !!get().get(doc).report?.signed }))
-        .then((v) => {
-          reading.delete(doc);
-          patch(doc, { protection: v });
-          return v;
-        });
-      reading.set(doc, p);
-    }
-    return p;
+    return have ? Promise.resolve(have) : (reading.get(doc) ?? readProtection(doc));
   };
   const busyPhase = (doc: number) => {
     const ph = get().get(doc).phase;
@@ -361,6 +380,7 @@ export const useA11y = create<A11yStore>((set, get) => {
     docs: {},
     get: (doc) => get().docs[doc] ?? fresh(),
     protection,
+    refreshProtection: readProtection,
 
     check: async (doc) => {
       const d = st().docs[doc];
@@ -486,6 +506,7 @@ export const useA11y = create<A11yStore>((set, get) => {
         latestOrder.delete(doc);
         latestTags.delete(doc);
         reading.delete(doc);
+        readSeq.delete(doc);
         return { docs: rest };
       }),
 
@@ -634,8 +655,14 @@ export function openA11y(view?: View) {
   useA11y.getState().setOpen(true);
 }
 
-// A closed document takes its report with it.
+// A closed document takes its report with it; an edit or a save (where a document gets signed or certified) reads
+// its protection again, so the controls and the edit guards never go by what it was.
 useStore.subscribe((s, prev) => {
   if (s.docs === prev.docs) return;
-  for (const id of Object.keys(useA11y.getState().docs)) if (!s.docs[Number(id)]) useA11y.getState().forget(Number(id));
+  for (const [key, d] of Object.entries(useA11y.getState().docs)) {
+    const id = Number(key);
+    const now = s.docs[id];
+    if (!now) useA11y.getState().forget(id);
+    else if (d.protection && (now.rev !== prev.docs[id]?.rev || now.dirty !== prev.docs[id]?.dirty)) void useA11y.getState().refreshProtection(id);
+  }
 });
