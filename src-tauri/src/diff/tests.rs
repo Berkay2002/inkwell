@@ -33,6 +33,8 @@ struct DocSpec {
     attach: Vec<(String, Vec<u8>)>,
     /// (field name, value, page index)
     fields: Vec<(String, String, usize)>,
+    /// Names of the fields that are password fields.
+    secret_fields: Vec<String>,
 }
 
 fn esc(s: &str) -> String {
@@ -84,7 +86,8 @@ fn build(d: &DocSpec) -> Vec<u8> {
     for (name, value, pg) in &d.fields {
         let w = alloc(&mut objs);
         objs[w - 1] = format!(
-            "<< /Type /Annot /Subtype /Widget /FT /Tx /T ({}) /V ({}) /Rect [50 {} 250 {}] /F 4 /P {} 0 R >>",
+            "<< /Type /Annot /Subtype /Widget /FT /Tx{} /T ({}) /V ({}) /Rect [50 {} 250 {}] /F 4 /P {} 0 R >>",
+            if d.secret_fields.contains(name) { " /Ff 8192" } else { "" },
             esc(name),
             esc(value),
             600 - 30 * widget_ids.len(),
@@ -429,6 +432,25 @@ fn form_field_value_changed() {
     assert_eq!(kinds(&c), vec![ChangeKind::FormFieldChanged]);
     assert_eq!(c.changes[0].label, "Form field 'Name' changed on p. 1: (empty) -> 'A. Novak'");
     assert_eq!(c.changes[0].detail, Detail::FormField { name: "Name".into(), old: Some("".into()), new: Some("A. Novak".into()) });
+}
+
+#[test]
+fn a_password_field_change_is_reported_without_its_values() {
+    let mut a = base(1);
+    a.fields = vec![("PIN".into(), "1234".into(), 0), ("City".into(), "Lund".into(), 0)];
+    a.secret_fields = vec!["PIN".into()];
+    let mut b = a.clone();
+    b.fields[0].1 = "9876".into();
+    b.fields[1].1 = "Malmo".into();
+    let c = cmp(&a, &b);
+    assert_eq!(kinds(&c), vec![ChangeKind::FormFieldChanged, ChangeKind::FormFieldChanged]);
+    let pin = c.changes.iter().find(|x| x.label.contains("PIN")).unwrap();
+    assert_eq!(pin.label, "Form field 'PIN' (password field) changed on p. 1");
+    assert_eq!(pin.detail, Detail::FormField { name: "PIN".into(), old: Some("(password field)".into()), new: Some("(password field)".into()) });
+    let all = format!("{:?} {:?}", c.changes.iter().map(|x| &x.label).collect::<Vec<_>>(), c.changes.iter().map(|x| &x.detail).collect::<Vec<_>>());
+    assert!(!all.contains("1234") && !all.contains("9876"), "{all}");
+    // the other field still shows its values
+    assert!(c.changes.iter().any(|x| x.label == "Form field 'City' changed on p. 1: 'Lund' -> 'Malmo'"));
 }
 
 // ---- text, images, ocr, redaction -------------------------------------------------------------

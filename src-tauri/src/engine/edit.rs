@@ -1364,7 +1364,7 @@ impl Engine {
         redaction: bool,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, redaction, false, None, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, redaction, false, false, None, |d| Ok((f(d)?, None)))
     }
 
     /// [`Engine::apply_custom`] for an edit that may turn out to change nothing: `f` returns the pages
@@ -1379,7 +1379,7 @@ impl Engine {
         f: impl FnOnce(&mut PdfDocument) -> Result<Option<Vec<u32>>>,
     ) -> Result<EditState> {
         let unchanged = std::cell::Cell::new(false);
-        self.custom(id, label, source, false, removes, Some(&unchanged), |d| match f(d)? {
+        self.custom(id, label, source, false, removes, false, Some(&unchanged), |d| match f(d)? {
             Some(pages) => Ok((pages, None)),
             None => {
                 unchanged.set(true);
@@ -1398,7 +1398,21 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, false, true, None, |d| Ok((f(d)?, None)))
+        self.custom(id, label, source, false, true, false, None, |d| Ok((f(d)?, None)))
+    }
+
+    /// [`Engine::apply_removing`] for an edit that takes document-level information out (the
+    /// metadata, `/Info`, the XMP): the step's snapshot is a full garbage-collected rewrite, since an
+    /// incremental update of the file still shows what the new trailer no longer names. It is not a
+    /// redaction: nothing is verified and the document is not marked redacted.
+    pub fn apply_sanitizing(
+        &self,
+        id: DocId,
+        label: String,
+        source: EditSource,
+        f: impl FnOnce(&mut PdfDocument) -> Result<Vec<u32>>,
+    ) -> Result<EditState> {
+        self.custom(id, label, source, false, true, true, None, |d| Ok((f(d)?, None)))
     }
 
     /// A redaction whose result is a finished file: `f` changes the document and returns the
@@ -1412,7 +1426,7 @@ impl Engine {
         source: EditSource,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Vec<u8>)>,
     ) -> Result<EditState> {
-        self.custom(id, label, source, true, false, None, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
+        self.custom(id, label, source, true, false, false, None, |d| f(d).map(|(pages, bytes)| (pages, Some(bytes))))
     }
 
     /// [`Engine::apply_custom`] and then a save as `to`, under one guard: no other edit, undo or save (an
@@ -1432,7 +1446,7 @@ impl Engine {
         if same_path(to, &entry.path()) {
             return Err(EngineError::Invalid(OWN_FILE.into()));
         }
-        let state = self.custom_locked(&entry, &mut lane, label, source, false, false, None, |d| Ok((f(d)?, None)))?;
+        let state = self.custom_locked(&entry, &mut lane, label, source, false, false, false, None, |d| Ok((f(d)?, None)))?;
         let saved = self.save_locked(id, &entry, &mut lane, Some(to));
         Ok((state, saved))
     }
@@ -1446,6 +1460,15 @@ impl Engine {
             return Err(EngineError::Invalid(OWN_FILE.into()));
         }
         self.save_locked(id, &entry, &mut lane, Some(to))
+    }
+
+    /// Why every edit of this document is refused before anything is written (a signed file that had to be
+    /// repaired on open), if it is: asked before the assistant shows its card.
+    pub fn edit_refusal(&self, id: DocId) -> Result<Option<&'static str>> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        Ok(ed.refuse)
     }
 
     /// Runs `f` on the authoritative document (marks included) without changing it. `f` must not
@@ -1464,12 +1487,13 @@ impl Engine {
         source: EditSource,
         redaction: bool,
         removes: bool,
+        full: bool,
         unchanged: Option<&std::cell::Cell<bool>>,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
     ) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
-        let state = self.custom_locked(&entry, &mut lane, label, source, redaction, removes, unchanged, f)?;
+        let state = self.custom_locked(&entry, &mut lane, label, source, redaction, removes, full, unchanged, f)?;
         drop(lane);
         if redaction {
             if let Some(hook) = REDACTION_HOOK.lock().clone() {
@@ -1489,6 +1513,7 @@ impl Engine {
         source: EditSource,
         redaction: bool,
         removes: bool,
+        full: bool,
         unchanged: Option<&std::cell::Cell<bool>>,
         f: impl FnOnce(&mut PdfDocument) -> Result<(Vec<u32>, Option<Vec<u8>>)>,
     ) -> Result<EditState> {
@@ -1521,7 +1546,7 @@ impl Engine {
             let exact = bytes.is_some();
             let snap = if let Some(b) = bytes {
                 Snap { len: b.len(), bytes: Arc::new(b) }
-            } else if redaction {
+            } else if redaction || full {
                 let out = write_doc(&ed.doc.doc, rewrite_opts(), len)?;
                 Snap { len: out.len(), bytes: Arc::new(out) }
             } else {

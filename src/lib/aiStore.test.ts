@@ -46,9 +46,14 @@ vi.mock("./ai", () => ({
 }));
 
 vi.mock("./history", () => ({ historyCheckpoint: vi.fn(() => Promise.resolve(null)) }));
+vi.mock("./edit", () => ({ applyState: vi.fn() }));
+vi.mock("./aiOpenTool", () => ({ openAppTool: vi.fn(() => Promise.resolve(true)) }));
 
 import * as ai from "./ai";
+import { openAppTool } from "./aiOpenTool";
+import { applyState } from "./edit";
 import { historyCheckpoint } from "./history";
+import { useRedact } from "./redact";
 import { providerOf, useAi } from "./aiStore";
 import { useStore } from "../store";
 
@@ -89,10 +94,9 @@ describe("assistant store", () => {
     expect(bot.state).toBe("streaming");
 
     const citations = [{ n: 1, page: 4, rects: [[1, 2, 3, 4]], quote: "q", chunk: "p5.1", exact: true }] as never;
-    emit({ kind: "done", answer: "Hello [1]", citations, followups: ["more?"], firstTokenMs: 10, totalMs: 20, prepMs: 1, chunksSent: 1, chunksTotal: 1 });
+    emit({ kind: "done", answer: "Hello [1]", citations, firstTokenMs: 10, totalMs: 20, prepMs: 1, chunksSent: 1, chunksTotal: 1 });
     const done = useAi.getState().chats[1].messages[1];
     expect(done.state).toBe("done");
-    expect(done.followups).toEqual(["more?"]);
   });
 
   it("jumps to a citation, marks it, and toggles the mark off on a second click", () => {
@@ -189,6 +193,39 @@ describe("assistant store", () => {
     expect(ai.aiSetPermissions).not.toHaveBeenCalled();
   });
 
+  describe("changes the assistant made", () => {
+    const state = { rev: 3, pageCount: 4, sizes: [], path: "a.pdf", dirty: true, undo: "Redact 2 items", redo: null, redacted: true };
+    const report = { marks: 2, sanitize: { metadata: 1 }, verify: { leaks: [] } };
+    const start = () => {
+      useAi.getState().setSettings({ consent: true });
+      useAi.getState().ask(1, { kind: "ask", question: "redact my name" });
+    };
+
+    it("adopts the new generation like any edit and does not move the view", () => {
+      start();
+      emit({ kind: "ui", action: { type: "edited", state, redacted: null } } as ChatEvent);
+      expect(applyState).toHaveBeenCalledWith(1, state);
+      expect(goTo).not.toHaveBeenCalled();
+      expect(useAi.getState().mark).toBeNull();
+    });
+
+    it("shows an applied redaction in the Redact rail, unless the assistant is docked there", () => {
+      useRedact.setState({ open: false, docs: {} });
+      start();
+      useAi.setState({ settings: { ...useAi.getState().settings, mode: "docked" } });
+      emit({ kind: "ui", action: { type: "edited", state, redacted: report } } as ChatEvent);
+      expect(useRedact.getState().docs[1]).toMatchObject({
+        phase: "report",
+        outcome: { status: "applied", marks: 2, savedTo: null },
+      });
+      expect(useRedact.getState().open).toBe(false);
+
+      useAi.setState({ settings: { ...useAi.getState().settings, mode: "floating" } });
+      emit({ kind: "ui", action: { type: "edited", state, redacted: report } } as ChatEvent);
+      expect(useRedact.getState().open).toBe(true);
+    });
+  });
+
   describe("tool activity", () => {
     const act = (state: string, id = "c1") =>
       ({ kind: "activity", id, tool: "rotate_page", class: "edit", label: "Rotate page 4", state, detail: null }) as ChatEvent;
@@ -237,6 +274,26 @@ describe("assistant store", () => {
       emit({ kind: "ui", action: { type: "show", page: 3, rects: [[10, 300, 50, 320]], quote: "q" } });
       expect(goTo).toHaveBeenLastCalledWith(1, 3, 210);
       expect(useAi.getState().mark).toMatchObject({ doc: 1, page: 3, n: 0 });
+    });
+
+    it("offers a file the assistant made once, and moves nothing", () => {
+      start();
+      const file = { type: "file", name: "a (compressed).pdf", path: "C:/x/a (compressed).pdf", token: "t1" };
+      emit({ kind: "ui", action: file } as ChatEvent);
+      emit({ kind: "ui", action: { ...file, token: "t2" } } as ChatEvent);
+      emit({ kind: "ui", action: { type: "file", name: "a.txt", path: "C:/x/a.txt", token: "t3" } } as ChatEvent);
+      expect(bot().files).toEqual([
+        { name: "a (compressed).pdf", path: "C:/x/a (compressed).pdf", token: "t1" },
+        { name: "a.txt", path: "C:/x/a.txt", token: "t3" },
+      ]);
+      expect(goTo).not.toHaveBeenCalled();
+    });
+
+    it("opens the tool the assistant asks for with the document it is working on", () => {
+      start();
+      emit({ kind: "ui", action: { type: "openTool", tool: "protect" } } as ChatEvent);
+      expect(openAppTool).toHaveBeenCalledWith("protect", expect.objectContaining({ id: 1, name: "a.pdf" }));
+      expect(goTo).not.toHaveBeenCalled();
     });
   });
 

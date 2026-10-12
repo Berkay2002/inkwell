@@ -235,6 +235,30 @@ pub fn run_compress(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(compress::Progress),
 ) -> Result<compress::Report, ToolError> {
+    let replace = output.is_some();
+    compress_to(eng, req, output, replace, cancel, progress)
+}
+
+/// [`run_compress`] into `output`, a name that must not exist: a file that appears there while the job runs makes
+/// it fail with `output-exists` instead of being replaced (the assistant picks names itself, nobody confirmed one).
+pub fn run_compress_new(
+    eng: &Engine,
+    req: &CompressRequest,
+    output: PathBuf,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(compress::Progress),
+) -> Result<compress::Report, ToolError> {
+    compress_to(eng, req, Some(output), false, cancel, progress)
+}
+
+fn compress_to(
+    eng: &Engine,
+    req: &CompressRequest,
+    output: Option<PathBuf>,
+    replace: bool,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(compress::Progress),
+) -> Result<compress::Report, ToolError> {
     let input = PathBuf::from(eng.doc_entry(req.doc)?.path());
     let mut opts = match &req.custom {
         Some(c) => Options { preset: Preset::Custom, ..c.clone() },
@@ -242,7 +266,7 @@ pub fn run_compress(
     };
     // A name only gets here from a save token, where the user confirmed replacing a file. The
     // input is still never replaced (the engine checks).
-    opts.replace_output = output.is_some();
+    opts.replace_output = replace;
     opts.output = output;
     // The file on disk is what compress reads: its password, which Save may have just changed.
     opts.password = eng.file_password(req.doc)?.map(|p| p.to_string());
@@ -443,6 +467,19 @@ pub fn run_ocr(
     progress: &(dyn Fn(ocr::Progress) + Sync),
     cancel: &AtomicBool,
 ) -> Result<OcrOutcome, ToolError> {
+    run_ocr_as(eng, req, save_as, backend, progress, cancel, EditSource::User)
+}
+
+/// [`run_ocr`] with the edit made under `source` (the assistant's turn, so it undoes with it).
+pub fn run_ocr_as(
+    eng: &Engine,
+    req: &OcrRequest,
+    save_as: Option<&Path>,
+    backend: &dyn Recognizer,
+    progress: &(dyn Fn(ocr::Progress) + Sync),
+    cancel: &AtomicBool,
+    source: EditSource,
+) -> Result<OcrOutcome, ToolError> {
     let opts = options_for(eng, req)?;
     // A certified document takes no change; a signed one no picture change. Nothing is read or changed.
     eng.read_custom(req.doc, |d| Ok(ocr::check_signatures(d, opts.style)))??;
@@ -453,7 +490,7 @@ pub fn run_ocr(
             progress(p);
         }
     };
-    let (rev, source) = eng.doc_source(req.doc)?;
+    let (rev, doc_source) = eng.doc_source(req.doc)?;
 
     if let Some(out) = save_as {
         // The dialog may confirm replacing a file, but never the document's own (the source may be
@@ -462,7 +499,7 @@ pub fn run_ocr(
             return Err(OcrError::Io("output must be a different file than the input".into()).into());
         }
         // A new file is made from what the document shows now: pending edits included.
-        return Ok(match &source {
+        return Ok(match &doc_source {
             DocSource::Path(p) => ocr_to_file(Path::new(p), out, backend, &opts, &mono, cancel)?,
             DocSource::Bytes(b, n) => {
                 let tmp = std::env::temp_dir().join(format!("inkwell-ocr-src-{}-{}.pdf", std::process::id(), req.doc));
@@ -474,7 +511,7 @@ pub fn run_ocr(
         });
     }
 
-    let rec = match &source {
+    let rec = match &doc_source {
         DocSource::Path(p) => ocr::recognize(&Input::Path(Path::new(p)), backend, &opts, &mono, cancel)?,
         DocSource::Bytes(b, n) => ocr::recognize(&Input::Bytes(&b[..*n]), backend, &opts, &mono, cancel)?,
     };
@@ -514,10 +551,10 @@ pub fn run_ocr(
             Ok(rec.pages.iter().filter(|p| p.status == ocr::PageStatus::Recognized).map(|p| p.page).collect())
         };
         if opts.style == ocr::Style::Searchable {
-            eng.apply_custom(req.doc, label, EditSource::User, false, work)?
+            eng.apply_custom(req.doc, label, source, false, work)?
         } else {
             // Pictures were replaced: a save writes the file without the old ones.
-            eng.apply_removing(req.doc, label, EditSource::User, work)?
+            eng.apply_removing(req.doc, label, source, work)?
         }
     };
     Ok(OcrOutcome { report: ocr::build_report(&rec, &applied, warnings), state: Some(state), output: None })

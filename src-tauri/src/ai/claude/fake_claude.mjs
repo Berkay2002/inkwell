@@ -206,12 +206,11 @@ async function runTurn(prompt) {
     text = JSON.stringify({
       answer: `Fake answer about it [1].\nSecond "quoted" line, café 😀 and a \\ backslash [1].`,
       citations: first ? [{ n: 1, chunks: [first[1]], quote }] : [],
-      followups: ["What else?", "Why so?", "Who wrote it?"],
     });
   } else {
     text = "Plain **markdown** reply.\n\n- one\n- two";
   }
-  if (mode === "slow" || mode === "deaf") text = JSON.stringify({ answer: "word ".repeat(400), citations: [], followups: [] });
+  if (mode === "slow" || mode === "deaf") text = JSON.stringify({ answer: "word ".repeat(400), citations: [] });
 
   const step = mode === "slow" || mode === "deaf" ? 8 : 7;
   const gap = mode === "slow" || mode === "deaf" ? 40 : 3;

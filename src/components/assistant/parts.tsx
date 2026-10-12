@@ -596,21 +596,7 @@ function PageSketch({ doc, c }: { doc: DocState; c: Citation }) {
   );
 }
 
-function Followups({ doc, m, variant }: { doc: DocState; m: Msg; variant: Variant }) {
-  const ask = useAi.getState().ask;
-  return (
-    <div className={`ax-followups ${variant}`}>
-      {m.followups.map((f) => (
-        <button key={f} className="ax-chip" onClick={() => ask(doc.id, { kind: "ask", question: f })}>
-          <span>{f}</span>
-          {variant === "floating" && <Glyph name="chev" size={14} />}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocState; m: Msg; variant: Variant; isLast: boolean; plain?: boolean }) {
+export function Answer({ doc, m, variant, isLast }: { doc: DocState; m: Msg; variant: Variant; isLast: boolean }) {
   const mark = useAi((s) => s.mark);
   const hide = useAi((s) => s.settings.hideSources);
   const cites = useMemo(() => new Map(m.citations.filter(isVerified).map((c) => [c.n, c])), [m.citations]);
@@ -662,7 +648,6 @@ export function Answer({ doc, m, variant, isLast, plain = false }: { doc: DocSta
               )}
             </div>
           )}
-          {isLast && !plain && variant !== "bar" && m.followups.length > 0 && <Followups doc={doc} m={m} variant={variant} />}
         </>
       )}
     </div>
