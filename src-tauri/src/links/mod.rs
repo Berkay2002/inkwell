@@ -353,7 +353,10 @@ fn target_of(doc: &PdfDocument, a: &PdfObject, spaces: &mut HashMap<u32, Option<
         }
     }
     let Some(d) = dest else { return Target::Other { what: String::new() } };
-    match dest_array(doc, names, &d).and_then(|arr| page_dest(doc, spaces, &arr)) {
+    let Some(found) = dest_array(doc, names, &d) else {
+        return Target::Other { what: "a named destination that cannot be checked".into() };
+    };
+    match found.and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Target::Page { page, at },
         None => Target::Broken { what: broken_reason(&d) },
     }

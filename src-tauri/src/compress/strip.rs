@@ -277,7 +277,7 @@ fn sweep(doc: &PdfDocument, s: &Strip, r: &mut StripReport) -> Result<(), Error>
 
 /// Named destinations of the document: the catalog's `/Dests` dictionary (PDF 1.1) and the `/Names`
 /// tree. Loaded once per run.
-struct Dests {
+pub(crate) struct Dests {
     old: Option<PdfObject>,
     tree: Option<PdfObject>,
     /// The `/Dests` entries whose key is not UTF-8, by the key's bytes (a name object cannot be built from them).
@@ -286,7 +286,7 @@ struct Dests {
 
 impl Dests {
     /// None when the `/Names` tree is there but cannot be read.
-    fn load(doc: &PdfDocument) -> Result<Option<Self>, Error> {
+    pub(crate) fn load(doc: &PdfDocument) -> Result<Option<Self>, Error> {
         let catalog = doc.catalog()?;
         let old = catalog.get_dict("Dests")?.filter(|d| d.is_dict().unwrap_or(false));
         let has_tree = catalog.get_dict("Names")?.and_then(|n| n.get_dict("Dests").ok().flatten()).is_some();
@@ -314,7 +314,7 @@ impl Dests {
 
     /// The destination a name or string stands for. `Some(None)`: the document does not define it. `None`: the key
     /// could not be put in a form to look up (not UTF-8, a NUL, a lossy decode), so it is not judged.
-    fn lookup(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
+    pub(crate) fn lookup(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         // A name goes in as the object itself: its bytes need not be UTF-8 (`/caf#E9`) and MuPDF compares bytes.
         // Resolved first: a dictionary lookup by a reference finds nothing.
         let key = key.resolve().ok().flatten().unwrap_or_else(|| key.share());

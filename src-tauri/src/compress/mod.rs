@@ -42,6 +42,7 @@ pub use audit::{Audit, AuditItem, Category, CategoryUsage};
 pub use flatten::{FlattenReport, Transparency};
 pub use fonts::{FontUsage, Unembedded};
 pub use strip::{Strip, StripReport};
+pub(crate) use strip::Dests;
 pub use visual::{PageDiff, VisualCheck};
 
 // ---------------------------------------------------------------- options

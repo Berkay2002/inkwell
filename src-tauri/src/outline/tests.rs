@@ -351,6 +351,50 @@ fn text_decoding_follows_the_pdf_encodings() {
     assert_eq!(decode_text(&[0x80, 0xA0, 0xE9]), "•€é");
 }
 
+/// The panel judges a named destination the way the compressor does: MuPDF's decode of the string, the `/Names`
+/// tree as well as `/Dests`, and a string it cannot decode faithfully is not called broken.
+#[test]
+fn a_named_destination_is_judged_by_the_compressors_lookup() {
+    let d = dir("outline", "named_lookup");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 7, chapter_every: 1, ..Default::default() });
+    // (what the bookmark names, what the panel shows)
+    let page = |d: &Dest| matches!(d, Dest::Page { page: 0, .. });
+    let broken = |d: &Dest| matches!(d, Dest::Broken { .. });
+    let other = |d: &Dest| matches!(d, Dest::Other { .. });
+    let cases: [(&str, &dyn Fn(&Dest) -> bool); 7] = [
+        ("/chap", &page),           // a name object, found in the /Names tree (the old code looked in /Dests only)
+        ("<FEFF00E900E9>", &page),  // UTF-16BE, the key's own form
+        ("<C3A9C3A9>", &page),      // UTF-8 with no mark: the tree's UTF-16 key is the same text
+        ("<E9E9>", &page),          // PDFDocEncoding
+        ("(gone)", &broken),        // cleanly missing
+        ("<41E97F>", &other),       // not UTF-8, and PDFDocEncoding has nothing at 0x7F: not judged
+        ("<C0AF>", &other),         // overlong: MuPDF takes it as UTF-8, Rust does not: not judged
+    ];
+    let ids: Vec<i32> = list(&eng, id).unwrap().items.iter().map(|b| b.id).collect();
+    assert_eq!(ids.len(), cases.len());
+    eng.apply_custom(id, "Name destinations".into(), EditSource::User, false, |d| {
+        let mut arr = d.new_array()?;
+        for key in ["(chap)", "<FEFF00E900E9>"] {
+            arr.array_push(d.new_object_from_str(key)?)?;
+            arr.array_push(dest_object(d, 0, None)?)?;
+        }
+        let mut tree = d.new_dict()?;
+        tree.dict_put("Names", arr)?;
+        let mut names = d.new_dict()?;
+        names.dict_put("Dests", tree)?;
+        d.catalog()?.dict_put("Names", names)?;
+        let sh = walked(d)?.1;
+        for (item, (name, _)) in ids.iter().zip(cases) {
+            sh.obj(*item)?.dict_put("Dest", d.new_object_from_str(name)?)?;
+        }
+        Ok(Vec::new())
+    })
+    .unwrap();
+    for (b, (name, expect)) in list(&eng, id).unwrap().items.iter().zip(cases) {
+        assert!(expect(&b.dest), "{name}: {:?}", b.dest);
+    }
+}
+
 #[test]
 fn a_bookmark_to_a_missing_named_destination_is_broken() {
     let d = dir("outline", "broken");

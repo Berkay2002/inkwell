@@ -15,6 +15,7 @@ pub(crate) mod tests;
 
 pub use headings::{HeadingPreview, HeadingRow};
 
+use crate::compress::Dests;
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
 use crate::textedit::{Matrix, page_space};
@@ -179,48 +180,41 @@ fn number(o: &Option<PdfObject>) -> Option<f32> {
 
 // ---- destinations ----
 
-/// The document's named destinations, loaded once for as many lookups as a read needs (MuPDF builds
-/// the whole table each time it is asked).
+/// The document's named destinations (the `/Names` tree and the old `/Dests` dictionary), loaded once for as
+/// many lookups as a read needs (MuPDF builds the whole table each time it is asked). The lookup is the one
+/// the compressor judges bookmarks and links by.
 #[derive(Default)]
 pub(crate) struct Names {
-    tree: Option<Option<PdfObject>>,
+    /// None inside: the tree is there but cannot be read, so no name is judged.
+    dests: Option<Option<Dests>>,
 }
 
 impl Names {
-    fn tree(&mut self, doc: &PdfDocument) -> Option<&PdfObject> {
-        self.tree
-            .get_or_insert_with(|| {
-                let t = doc.load_name_tree(PdfObject::new_name("Dests").ok()?).ok()?;
-                t.is_dict().ok()?.then_some(t)
-            })
-            .as_ref()
+    fn dests(&mut self, doc: &PdfDocument) -> Option<&Dests> {
+        self.dests.get_or_insert_with(|| Dests::load(doc).ok().flatten()).as_ref()
     }
 }
 
 /// The explicit destination array behind `target` (itself, a name or string looked up in the
-/// document's names, or a `<< /D … >>` dictionary), when it can be found.
-pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObject) -> Option<PdfObject> {
+/// document's names, or a `<< /D … >>` dictionary). `Some(None)`: there is none to be found. `None`: a name
+/// could not be looked up faithfully (see `Dests::lookup`), so the destination is not judged.
+pub(crate) fn dest_array(doc: &PdfDocument, names: &mut Names, target: &PdfObject) -> Option<Option<PdfObject>> {
     let mut t = target.resolve().ok().flatten();
     for _ in 0..4 {
-        let cur = t?;
-        if cur.is_array().ok()? {
-            return Some(cur);
+        let Some(cur) = t else { break };
+        if cur.is_array().unwrap_or(false) {
+            return Some(Some(cur));
         }
-        t = if cur.is_dict().ok()? {
+        t = if cur.is_dict().unwrap_or(false) {
             cur.get_dict("D").ok().flatten()
-        } else if cur.is_name().ok()? {
-            let name = String::from_utf8_lossy(&cur.as_name().ok()?).into_owned();
-            let dests = doc.catalog().ok()?.get_dict("Dests").ok().flatten();
-            dests.and_then(|d| d.get_dict(name.as_str()).ok().flatten())
-        } else if cur.is_string().ok()? {
-            // MuPDF flattens /Root /Names /Dests into a dict keyed by name.
-            names.tree(doc)?.get_dict(cur.as_string().ok()?.as_str()).ok().flatten()
+        } else if cur.is_name().unwrap_or(false) || cur.is_string().unwrap_or(false) {
+            names.dests(doc)?.lookup(&cur)?
         } else {
             None
         };
         t = t.and_then(|v| v.resolve().ok().flatten());
     }
-    None
+    Some(None)
 }
 
 /// A destination array's page (0-based) and the point it shows at the top left, in page space.
@@ -263,7 +257,10 @@ fn dest_of(doc: &PdfDocument, item: &PdfObject, spaces: &mut HashMap<u32, Option
         }
     }
     let Some(t) = target else { return Dest::None };
-    match dest_array(doc, names, &t).and_then(|arr| page_dest(doc, spaces, &arr)) {
+    let Some(found) = dest_array(doc, names, &t) else {
+        return Dest::Other { what: "a named destination that cannot be checked".into() };
+    };
+    match found.and_then(|arr| page_dest(doc, spaces, &arr)) {
         Some((page, at)) => Dest::Page { page, at },
         None => Dest::Broken { what: broken_reason(&t) },
     }
