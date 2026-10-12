@@ -19,13 +19,9 @@ pub fn bad(m: impl Into<String>) -> EngineError {
     EngineError::Invalid(m.into())
 }
 
-/// What a certification (DocMDP `/P`, ISO 32000-2 12.8.2.2) leaves to an import: 1 nothing, 2 filling in form
-/// fields (and signing), 3 also annotations. `None` is not certified. A certification that cannot be read is
-/// refused by the callers (`certified(d)?`), never treated as none.
-pub fn comments_allowed(level: Option<i32>) -> bool {
-    level.is_none_or(|p| p >= 3)
-}
-
+/// What a certification (DocMDP `/P`, ISO 32000-2 12.8.2.2) leaves to a form data import: 1 nothing, 2 and 3 filling
+/// in form fields. `None` is not certified. A certification that cannot be read is refused by the caller
+/// (`certified(d)?`), never treated as none. Comments go through `outline::refuse_unless_annotating_allowed`.
 pub fn forms_allowed(level: Option<i32>) -> bool {
     level.is_none_or(|p| p >= 2)
 }
@@ -43,10 +39,8 @@ pub fn gates(eng: &Engine, doc: DocId) -> Result<Gates> {
     eng.read_custom(doc, |d| {
         let signed = crate::outline::signed(d);
         // Unreadable: neither is offered (the import itself refuses it too).
-        Ok(match crate::outline::certified(d) {
-            Ok(p) => Gates { comments: comments_allowed(p), forms: forms_allowed(p), signed },
-            Err(_) => Gates { comments: false, forms: false, signed },
-        })
+        let forms = crate::outline::certified(d).is_ok_and(forms_allowed);
+        Ok(Gates { comments: crate::outline::refuse_unless_annotating_allowed(d, "").is_ok(), forms, signed })
     })
 }
 

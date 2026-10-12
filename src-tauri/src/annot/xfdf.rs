@@ -1158,10 +1158,7 @@ pub fn import_one(eng: &Engine, doc: DocId, parsed: &Parsed, source: EditSource)
     let signed = eng.read_custom(doc, |d| Ok(crate::outline::signed(d)))?;
     let mut summary = Summary::default();
     let state = eng.apply_custom_unless_noop(doc, "Import comments".into(), source, false, |d| {
-        // Only a certification that allows annotations (`/P` 3) takes comments; one that cannot be read does not.
-        if !exchange::comments_allowed(crate::outline::certified(d)?) {
-            return Err(bad("This document is certified, and its certification does not allow comments. Importing them would void it, so Inkwell leaves the document as it is."));
-        }
+        crate::outline::refuse_unless_annotating_allowed(d, "Importing comments")?;
         let (s, pages) = import(d, parsed)?;
         let changed = s.added + s.updated > 0;
         summary = s;
