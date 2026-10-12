@@ -972,6 +972,14 @@ fn more_signatures_than_inkwell_checks_are_refused() {
     // Signing again reads every signature's locks from its revision: refused past the same bound.
     let e = pdf::sign(&b, &ids().1, &unseen()).unwrap_err();
     assert!(e.to_string().contains("more than 64 signatures"), "{e}");
+    // The app's list still gives the certification level then, so the UI can say why signing is refused.
+    let certified = append(&b, |d| {
+        let perms = d.new_object_from_str("<</DocMDP<</Reference[<</TransformMethod/DocMDP/TransformParams<</P 1>>>>]>>>>").unwrap();
+        d.catalog().unwrap().dict_put("Perms", perms).unwrap();
+    });
+    let (eng, id, _) = open_bytes("too-many-certified", &certified);
+    let l = list(&eng, id).unwrap();
+    assert_eq!((l.certify, l.signatures.len()), (Some(1), 0));
 }
 
 #[test]

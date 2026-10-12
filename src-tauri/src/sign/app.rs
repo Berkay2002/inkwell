@@ -284,7 +284,8 @@ pub fn list(eng: &Engine, doc: DocId) -> Result<SignList> {
     }
     let bytes = eng.current_bytes(doc)?;
     let d = mupdf::pdf::PdfDocument::from_bytes(&bytes).map_err(EngineError::from)?;
-    pdf::list(&d, &bytes, &system_trust).map_err(err)
+    // Signatures that can't be checked (too many) still leave the level signing refuses by, for the UI to say why.
+    Ok(pdf::list(&d, &bytes, &system_trust).unwrap_or(SignList { certify, signatures: Vec::new() }))
 }
 
 /// Windows' chain engine and trusted roots, at the current time.
