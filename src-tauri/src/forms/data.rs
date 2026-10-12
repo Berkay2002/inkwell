@@ -306,9 +306,9 @@ pub fn parse_xfdf(bytes: &[u8]) -> Result<Parsed> {
                 return;
             }
             let Some(part) = f.attr("name") else { continue };
-            if prefix.len() + part.len() + 1 > MAX_STR {
+            if prefix.len() + part.len() + usize::from(!prefix.is_empty()) > MAX_STR {
                 // The field and what is under it (their names are longer still) are left out.
-                let shown: String = prefix.chars().chain(['.']).chain(part.chars()).take(60).collect();
+                let shown: String = if prefix.is_empty() { part.chars().take(60).collect() } else { prefix.chars().chain(['.']).chain(part.chars()).take(60).collect() };
                 out.leave_out(&shown, "the field name is longer than 1 MB");
                 continue;
             }
