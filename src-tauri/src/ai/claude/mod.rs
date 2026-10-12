@@ -716,20 +716,18 @@ impl ClaudeProvider {
         };
 
         let sent = session.state.lock().unwrap().sent.clone();
-        let (answer, citations, followups): (String, Vec<Citation>, Vec<String>) =
+        let (answer, citations): (String, Vec<Citation>) =
             match text::parse_reply(&streamed.text).filter(|_| turn.req.task.cited()) {
                 Some(r) => {
                     let mut cs: Vec<Citation> = r.citations.iter().map(|c| text::resolve(c, &text, &sent)).collect();
                     cs.sort_by_key(|c| c.n);
-                    let f = r.followups.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).take(4).collect();
-                    (r.answer, cs, f)
+                    (r.answer, cs)
                 }
-                None => (streamed.text, Vec::new(), Vec::new()),
+                None => (streamed.text, Vec::new()),
             };
         Ok(ChatEvent::Done {
             answer,
             citations,
-            followups,
             first_token_ms: streamed.first_ms,
             total_ms: t0.elapsed().as_millis() as u64,
             prep_ms,

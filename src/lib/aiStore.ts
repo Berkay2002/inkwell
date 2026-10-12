@@ -1,6 +1,10 @@
 import { create } from "zustand";
+import { addOffer } from "./activity";
 import * as ai from "./ai";
+import { openAppTool } from "./aiOpenTool";
+import { applyState } from "./edit";
 import { historyCheckpoint } from "./history";
+import { useRedact } from "./redact";
 import {
   MODES,
   type Activity,
@@ -22,7 +26,6 @@ export interface Msg {
   kind?: Task["kind"];
   text: string;
   citations: Citation[];
-  followups: string[];
   /** The tool calls of this turn (searches, page reads, changes), in order. */
   activity: Activity[];
   state: "streaming" | "done" | "error" | "cancelled";
@@ -30,6 +33,8 @@ export interface Msg {
   error?: string;
   hint?: string | null;
   timing?: { firstTokenMs: number | null; totalMs: number; prepMs: number };
+  /** Files the assistant made this turn (compress, export, convert, create): the message offers to open each. */
+  files?: ai.FileOffer[];
   /** When the message was made (ms since the epoch). */
   at?: number;
 }
@@ -191,8 +196,8 @@ export const useAi = create<AiStore>((set, get) => {
     const chat = st.chats[doc] ?? EMPTY_CHAT;
     if (chat.messages.some((m) => m.state === "streaming")) return;
     const at = Date.now();
-    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], followups: [], activity: [], state: "done", at };
-    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], followups: [], activity: [], state: "streaming", phase: "reading", at };
+    const user: Msg = { id: ++msgId, role: "user", kind: task.kind, text: label, citations: [], activity: [], state: "done", at };
+    const bot: Msg = { id: ++msgId, role: "assistant", text: "", citations: [], activity: [], state: "streaming", phase: "reading", at };
     patchChat(doc, (c) => ({ ...c, messages: [...c.messages, user, bot] }), true);
     held = null;
     set({ mark: null, sheet: true });
@@ -248,7 +253,10 @@ export const useAi = create<AiStore>((set, get) => {
             }
             case "ui": {
               const a = e.action;
-              reveal(doc, a.page, a.type === "show" ? a.rects : [], 0);
+              if (a.type === "edited") adopt(doc, a);
+              else if (a.type === "file") patchMsg(doc, bot.id, (m) => ({ ...m, files: addOffer(m.files, { name: a.name, path: a.path, token: a.token }) }));
+              else if (a.type === "openTool") void openAppTool(a.tool, useStore.getState().docs[doc] ?? null);
+              else reveal(doc, a.page, a.type === "show" ? a.rects : [], 0);
               break;
             }
             case "done":
@@ -256,7 +264,6 @@ export const useAi = create<AiStore>((set, get) => {
                 ...m,
                 text: e.answer,
                 citations: e.citations,
-                followups: e.followups,
                 activity: settle(m.activity),
                 state: "done",
                 timing: { firstTokenMs: e.firstTokenMs, totalMs: e.totalMs, prepMs: e.prepMs },
@@ -279,6 +286,28 @@ export const useAi = create<AiStore>((set, get) => {
     (gate ? gate.then(start) : start()).catch((err) =>
       patchMsg(doc, bot.id, (m) => ({ ...m, activity: settle(m.activity), state: "error", error: String(err), hint: null })),
     );
+  };
+
+  /** The assistant changed the document: its new generation becomes the document's, as after any edit,
+   *  and a redaction it applied is shown in the Redact rail (a docked assistant keeps its place: the
+   *  message has a Review in Redact button instead). */
+  const adopt = (doc: number, a: Extract<ai.UiAction, { type: "edited" }>) => {
+    applyState(doc, a.state);
+    // not imported at load: forms.ts reaches the tools store, which subscribes to this store as it loads
+    void import("./forms").then(({ useForms }) => {
+      if (useForms.getState().docs[doc]) void useForms.getState().refresh(doc);
+    });
+    const r = a.redacted;
+    if (!r) return;
+    useRedact.getState().showApplied(doc, {
+      status: "applied",
+      state: a.state,
+      marks: r.marks,
+      sanitize: r.sanitize,
+      verify: r.verify,
+      savedTo: null,
+    });
+    if (get().settings.mode !== "docked") useRedact.getState().setOpen(true);
   };
 
   /** The provider of the document in front (or the last one picked, with no document open). */

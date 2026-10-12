@@ -1,10 +1,19 @@
 import { useState } from "react";
-import { trailSummary, waiting } from "../../lib/activity";
+import { touchedRedaction, trailSummary, waiting } from "../../lib/activity";
 import type { Msg } from "../../lib/aiStore";
+import { useRedact } from "../../lib/redact";
+import { useStore } from "../../store";
 import { ApprovalCard } from "./ApprovalCard";
 import "./activity.css";
 
 const STATE_WORD: Record<string, string> = { running: "running", failed: "failed", rejected: "rejected" };
+
+/** Opens the Redact rail on the document: its marks, or the verification of a redaction just applied. */
+function reviewInRedact(doc: number) {
+  const r = useRedact.getState();
+  void r.refreshMarks(doc);
+  r.setOpen(true);
+}
 
 /** What the assistant did to answer, as one quiet line that opens into the full list, plus a card
  *  for every change that waits for the user. Nothing is drawn for a turn with no tool calls. */
@@ -34,6 +43,27 @@ export function ActivityTrail({ doc, m, worked = false }: { doc: number; m: Msg;
               ))}
             </ul>
           )}
+        </div>
+      )}
+      {touchedRedaction(m.activity) && (
+        <div className="ax-row">
+          <button className="ax-btn" onClick={() => reviewInRedact(doc)}>
+            Review in Redact
+          </button>
+        </div>
+      )}
+      {(m.files?.length ?? 0) > 0 && (
+        <div className="ax-row ax-files">
+          {m.files?.map((f) => (
+            <button
+              key={f.path}
+              className="ax-btn ax-file"
+              title={`Open ${f.name}`}
+              onClick={() => void useStore.getState().openPath(f.path, f.token)}
+            >
+              Open {f.name}
+            </button>
+          ))}
         </div>
       )}
       {cards.map((a) => (

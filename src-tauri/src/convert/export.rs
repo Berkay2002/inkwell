@@ -165,7 +165,21 @@ pub fn export(
 ) -> Result<ExportOutput, Error> {
     validate(&req.kind)?;
     let (doc, stem) = open_source(eng, req.doc)?;
-    export_document(&doc, &stem, &req.kind, req.pages.as_deref(), target, cancel, progress)
+    export_into(&doc, &stem, &req.kind, req.pages.as_deref(), target, true, cancel, progress)
+}
+
+/// [`export`] that never replaces a file: a name that is taken by the time the files are moved into place fails
+/// with `output-exists` and leaves what was there. For callers that chose the names themselves (the assistant).
+pub fn export_new(
+    eng: &Engine,
+    req: &ExportRequest,
+    target: Target,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<ExportOutput, Error> {
+    validate(&req.kind)?;
+    let (doc, stem) = open_source(eng, req.doc)?;
+    export_into(&doc, &stem, &req.kind, req.pages.as_deref(), target, false, cancel, progress)
 }
 
 /// [`export`] over a document the caller opened (the batch runner exports files that no tab has open).
@@ -176,6 +190,21 @@ pub fn export_document(
     kind: &ExportKind,
     pages: Option<&str>,
     target: Target,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<ExportOutput, Error> {
+    export_into(doc, stem, kind, pages, target, true, cancel, progress)
+}
+
+/// `replace`: whether a file at a final name may be replaced when the files are moved into place.
+#[allow(clippy::too_many_arguments)]
+fn export_into(
+    doc: &Document,
+    stem: &str,
+    kind: &ExportKind,
+    pages: Option<&str>,
+    target: Target,
+    replace: bool,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<ExportOutput, Error> {
@@ -218,7 +247,7 @@ pub fn export_document(
             (files, dir)
         }
     };
-    staging.publish(&finals)?;
+    if replace { staging.publish(&finals)? } else { staging.publish_new(&finals)? }
     let bytes = finals.iter().filter_map(|(_, p)| fs::metadata(p).ok()).map(|m| m.len()).sum();
     run.step(run.total);
     (run.progress)(Progress { done: run.total, total: run.total, fraction: 1.0 });

@@ -53,7 +53,7 @@ beforeEach(() => {
 });
 
 const ask = (q: string) => useAi.getState().ask(1, { kind: "ask", question: q });
-const finish = () => emit({ kind: "done", answer: "a", citations: [], followups: [], firstTokenMs: 1, totalMs: 2, prepMs: 0, chunksSent: 0, chunksTotal: 0 });
+const finish = () => emit({ kind: "done", answer: "a", citations: [], firstTokenMs: 1, totalMs: 2, prepMs: 0, chunksSent: 0, chunksTotal: 0 });
 
 describe("a document's chats (command bar)", () => {
   it("stamps each message with the time it was asked", () => {
