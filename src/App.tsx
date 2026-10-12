@@ -17,6 +17,8 @@ import { EditPanel } from "./components/edit/EditPanel";
 import { FormTools, FormsBanner, FormsPanel } from "./components/forms/FormsPanel";
 import { ScriptPrompts } from "./components/forms/ScriptPrompts";
 import { RedactPanel } from "./components/redact/RedactPanel";
+import { SignRail } from "./components/sign/SignRail";
+import { SignBanner, SignCreator, SignStrip } from "./components/sign/SignTools";
 import { SearchDriver, SearchPanel } from "./components/search/SearchPanel";
 import { wireCommentRail } from "./lib/commentRail";
 import { wirePrepressRail } from "./lib/prepressRail";
@@ -183,6 +185,8 @@ export default function App() {
                 <HistoryBanner doc={doc} />
                 <SecurityNotice doc={doc} />
                 <CommentTools doc={doc} />
+                <SignStrip doc={doc} />
+                {!viewing && <SignBanner doc={doc} />}
                 <MeasureBar doc={doc} />
                 <FormTools />
                 <ThreadHost doc={doc} />
@@ -199,6 +203,7 @@ export default function App() {
               <PreflightPanel doc={doc} />
               <PrepressPanel doc={doc} />
               <CommentsPanel doc={doc} />
+              <SignRail doc={doc} />
               <MeasurePanel doc={doc} />
               <EditPanel doc={doc} />
               <FormsPanel doc={doc} />
@@ -227,6 +232,7 @@ export default function App() {
       <Presentation />
       {paletteOpen && <CommandPalette />}
       {hasPassword && <PasswordDialog />}
+      <SignCreator />
       <ScriptPrompts />
       <Toast />
     </div>

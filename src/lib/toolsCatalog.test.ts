@@ -34,6 +34,9 @@ const items: ToolItem[] = [
   mk("background", "Background", "marks", "Put a colour or image behind page content", "colour color image paper behind"),
   mk("bates", "Bates numbering", "marks", "Number pages for legal filings", "legal numbers page numbers court prefix"),
   mk("protect", "Protect with a password", "protect", "Require a password to open the file", "encrypt lock secure password open"),
+  mk("fill-sign", "Fill & Sign", "sign", "Type on the page, tick boxes and add your signature", "fill sign signature initials type text checkmark checkbox tick date form handwritten esign"),
+  mk("sign-digital", "Sign with a digital ID", "sign", "Add a certificate signature that shows any later change", "digital signature certificate id certify pades pfx p12 secure esign"),
+  mk("signatures", "Check signatures", "sign", "See who signed and whether the file changed since", "signatures validate verify signed signer certificate trust valid"),
   mk("doc-javascript", "Document JavaScript", "scripts", "See, edit or remove the scripts in this file", "javascript script code action open save print launch url acrobat macro"),
   mk("export", "Export", "convert", "Save as Word, images, text and more", "save as word docx image jpg png text html convert"),
   mk("create-portfolio", "Create PDF Portfolio", "convert", "Bundle files of any kind into one PDF", "portfolio bundle package collection attach combine files folder"),
@@ -69,6 +72,12 @@ describe("searchTools", () => {
     // the name beats a synonym: "number" starts Bates numbering's name
     expect(searchTools(items, "numbering")[0].id).toBe("bates");
   });
+  it("finds the signing tools for the words people use", () => {
+    expect(ids(searchTools(items, "initials"))[0]).toBe("fill-sign");
+    expect(ids(searchTools(items, "certificate"))[0]).toBe("sign-digital");
+    expect(ids(searchTools(items, "verify"))[0]).toBe("signatures");
+    expect(ids(searchTools(items, "sign"))).toEqual(expect.arrayContaining(["fill-sign", "sign-digital", "signatures"]));
+  });
   it("needs every word, and a name match outranks a description match", () => {
     expect(searchTools(items, "password zzz")).toEqual([]);
     // "text" is in Recognize text's name but only a keyword or description elsewhere
@@ -95,7 +104,7 @@ describe("groupTools / filterTools", () => {
     expect(sec.map((s) => s.title)).toEqual(["Optimize", "forms"]);
   });
   it("shows the groups for an empty box and one ranked Results section for a query", () => {
-    expect(filterTools(items, "").map((s) => s.id)).toEqual(["optimize", "marks", "protect", "scripts", "convert", "check"]);
+    expect(filterTools(items, "").map((s) => s.id)).toEqual(["optimize", "marks", "protect", "sign", "scripts", "convert", "check"]);
     const r = filterTools(items, "smaller");
     expect(r).toHaveLength(1);
     expect(r[0].id).toBe(RESULTS);

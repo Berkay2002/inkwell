@@ -187,7 +187,7 @@ fn sync_dir(dir: &Path) {
 }
 
 /// temp in the same dir, fsync, rename. The directory is synced by the caller where it matters.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().expect("store paths have a parent");
     fs::create_dir_all(dir)?;
     let name = path.file_name().expect("file name").to_string_lossy();

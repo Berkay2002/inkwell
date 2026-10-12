@@ -9,6 +9,7 @@ import { useMeasure } from "./measure";
 import { useNav } from "./nav";
 import { useCombine } from "./combineStore";
 import { useRedact } from "./redact";
+import { useSign } from "./sign";
 import { dropCached } from "./tiles";
 
 /**
@@ -42,6 +43,8 @@ export function applyState(id: number, s: EditState) {
   if (revChanged && useRedact.getState().docs[id]) void useRedact.getState().refreshMarks(id);
   // ... and comments: undo, redo and restoring a version change them too.
   if (revChanged && useAnnot.getState().docs[id]) void useAnnot.getState().refresh(id);
+  // ... and Fill & Sign items.
+  if (revChanged && useSign.getState().docs[id]) void useSign.getState().refresh(id);
   // ... and measurements and the scales of pages.
   if (revChanged && useMeasure.getState().docs[id]) useMeasure.getState().onRev(id);
   // ... and bookmarks and links.

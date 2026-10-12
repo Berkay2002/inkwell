@@ -1,6 +1,7 @@
 pub mod a11y;
 pub mod ai;
 pub mod annot;
+pub mod fillsign;
 pub mod batch;
 pub mod forms;
 pub mod compress;
@@ -25,6 +26,7 @@ pub mod print;
 pub mod protect;
 pub mod recents;
 pub mod redact;
+pub mod sign;
 pub mod search;
 pub mod textedit;
 pub mod tools;
@@ -89,12 +91,13 @@ enum SaveKind {
     Any,
 }
 
-/// What an open dialog for Create filters for.
+/// What an open dialog for Create (or a digital ID) filters for.
 #[derive(serde::Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 enum SourceKind {
     Images,
     Text,
+    DigitalId,
     /// An exported batch action.
     Json,
     /// A picture or a PDF for a custom stamp.
@@ -183,6 +186,7 @@ async fn pick_source(window: Window, kind: SourceKind, multiple: bool) -> Result
         let d = match kind {
             SourceKind::Images => d.set_title("Choose images").add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif"]),
             SourceKind::Text => d.set_title("Choose a text file").add_filter("Text", &["txt", "text", "md", "log", "csv"]),
+            SourceKind::DigitalId => d.set_title("Choose a digital ID").add_filter("Digital ID", &["pfx", "p12"]),
             SourceKind::Json => d.set_title("Choose an action file").add_filter("Inkwell action", &["json"]),
             SourceKind::Stamp => d.set_title("Choose a picture or PDF for the stamp").add_filter("Pictures and PDFs", &["png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "pdf"]),
         };
@@ -474,12 +478,15 @@ async fn save_document(
 ) -> Result<EditState, EngineError> {
     let to = to.map(|t| reg.take_save(window.label(), &t)).transpose()?;
     let (eng, hist) = (eng.inner().clone(), hist.inner().clone());
-    blocking(move || {
-        let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
-        after_save(&window, &app, &hist, doc, to.as_deref(), &state, saved);
-        Ok(state)
-    })
-    .await
+    blocking(move || save_and_record(&window, app, &eng, &hist, doc, to)).await
+}
+
+/// Save (to `to`, a path from a spent save token, or over the file) and record the version.
+/// Blocking.
+pub(crate) fn save_and_record(window: &Window, app: tauri::AppHandle, eng: &Engine, hist: &Arc<History>, doc: DocId, to: Option<String>) -> Result<EditState, EngineError> {
+    let (state, saved) = eng.save_recorded(doc, to.as_deref())?;
+    after_save(window, &app, hist, doc, to.as_deref(), &state, saved);
+    Ok(state)
 }
 
 /// What follows a save: the folder is remembered, and the version history records what was written.
@@ -1008,6 +1015,7 @@ pub fn run() {
         .manage(Arc::new(search::files::FolderSearches::default()))
         .manage(Arc::new(search::catalog::app::Jobs::default()))
         .manage(hist)
+        .manage(sign::app::Ids::default())
         .manage(prepress)
         .manage(media)
         .on_window_event(|window, event| {
@@ -1204,6 +1212,18 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            fillsign::app::fillsign_list,
+            fillsign::app::fillsign_add,
+            fillsign::app::fillsign_flatten,
+            fillsign::app::fillsign_saved_list,
+            fillsign::app::fillsign_saved_add,
+            fillsign::app::fillsign_saved_add_file,
+            fillsign::app::fillsign_saved_remove,
+            sign::app::sign_identities,
+            sign::app::sign_open_id_file,
+            sign::app::sign_create_test_id,
+            sign::app::sign_document,
+            sign::app::sign_list,
             annot::app::stamp_list,
             annot::app::stamp_create,
             annot::app::stamp_update,

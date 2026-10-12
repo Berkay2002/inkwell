@@ -8,13 +8,16 @@ import { useHistory } from "./historyStore";
 import { usePreflight } from "./preflight";
 import { useProtect } from "./protectStore";
 import { useRedact } from "./redact";
+import { useSign } from "./sign";
 import { useSearch } from "./searchStore";
 import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
 /**
  * One right-side rail at a time: opening Comments closes the others (a running tool keeps the
- * side to itself), and opening any of them closes Comments. Called once by App.
+ * side to itself), and opening any of them closes Comments. The same holds for the Signatures
+ * rail, and the Comment and Fill & Sign strips (same place on the page) exclude each other.
+ * Called once by App.
  */
 let wired = false;
 export function wireCommentRail() {
@@ -29,6 +32,19 @@ export function wireCommentRail() {
     useRedact.getState().setOpen(false);
     useSearch.getState().setOpen(false);
     useTools.setState({ sheet: null });
+    useSign.getState().setOpen(false);
+    useSign.getState().setRail(null);
+    const ai = useAi.getState();
+    if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
+  });
+  useSign.subscribe((s, prev) => {
+    if (s.open && !prev.open) close();
+    if (!s.rail || prev.rail) return;
+    if (useTools.getState().sheet?.phase === "running") return void useSign.setState({ rail: null });
+    close();
+    useHistory.getState().setOpen(false);
+    useRedact.getState().setOpen(false);
+    useTools.setState({ sheet: null });
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
   });
@@ -37,6 +53,8 @@ export function wireCommentRail() {
     if (!s.open || prev.open) return;
     if (useTools.getState().sheet?.phase === "running") return void useForms.setState({ open: false });
     useAnnot.getState().setOpen(false);
+    useSign.getState().setOpen(false);
+    useSign.getState().setRail(null);
     useHistory.getState().setOpen(false);
     useRedact.getState().setOpen(false);
     useTextEdit.getState().setOpen(false);
@@ -61,6 +79,8 @@ export function wireCommentRail() {
     useRedact.getState().setOpen(false);
     useSearch.getState().setOpen(false);
     useTools.setState({ sheet: null });
+    useSign.getState().setOpen(false);
+    useSign.getState().setRail(null);
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
   });
@@ -76,13 +96,22 @@ export function wireCommentRail() {
     useA11y.getState().setOpen(false);
     usePreflight.getState().setOpen(false);
     useTools.setState({ sheet: null });
+    useSign.getState().setOpen(false);
+    useSign.getState().setRail(null);
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
   });
-  useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && close());
-  useHistory.subscribe((s, prev) => s.open && !prev.open && close());
-  useRedact.subscribe((s, prev) => s.open && !prev.open && close());
-  useTools.subscribe((s, prev) => s.sheet && !prev.sheet && close());
+  const closeSign = () => {
+    if (useSign.getState().rail) useSign.getState().setRail(null);
+  };
+  const both = () => {
+    close();
+    closeSign();
+  };
+  useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && both());
+  useHistory.subscribe((s, prev) => s.open && !prev.open && both());
+  useRedact.subscribe((s, prev) => s.open && !prev.open && both());
+  useTools.subscribe((s, prev) => s.sheet && !prev.sheet && both());
 
   // The accessibility rail docks like the others: opening it closes the rest (a running tool keeps the
   // side to itself), and any of them opening closes it.
@@ -104,6 +133,7 @@ export function wireCommentRail() {
     usePreflight.getState().setOpen(false);
     useTools.setState({ sheet: null });
     useConvert.setState({ sheet: null });
+    useSign.getState().setRail(null);
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
   });
@@ -128,6 +158,7 @@ export function wireCommentRail() {
     useRedact.getState().setOpen(false);
     useTools.setState({ sheet: null });
     useConvert.setState({ sheet: null });
+    useSign.getState().setRail(null);
     const ai = useAi.getState();
     if (ai.open && ai.settings.mode === "docked") ai.setOpen(false);
   });
@@ -145,6 +176,7 @@ export function wireCommentRail() {
   useTools.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
   useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
   useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closeA11y());
+  useSign.subscribe((s, prev) => s.rail && !prev.rail && closeA11y());
   useAi.subscribe((s, prev) => s.open && !prev.open && s.settings.mode === "docked" && closePreflight());
   useHistory.subscribe((s, prev) => s.open && !prev.open && closePreflight());
   useRedact.subscribe((s, prev) => s.open && !prev.open && closePreflight());
@@ -155,6 +187,7 @@ export function wireCommentRail() {
   useTools.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
   useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
   useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closePreflight());
+  useSign.subscribe((s, prev) => s.rail && !prev.rail && closePreflight());
 
   // Measure is a rail of the same kind: it takes the side (its bar and drawing layer go with it), and any of them
   // opening closes it.
@@ -174,6 +207,7 @@ export function wireCommentRail() {
     useRedact.getState().setOpen(false);
     useA11y.getState().setOpen(false);
     usePreflight.getState().setOpen(false);
+    useSign.getState().setRail(null);
     useTools.setState({ sheet: null });
     useConvert.setState({ sheet: null });
     const ai = useAi.getState();
@@ -194,4 +228,5 @@ export function wireCommentRail() {
   useTools.subscribe((s, prev) => s.sheet && !prev.sheet && closeMeasure());
   useConvert.subscribe((s, prev) => s.sheet && !prev.sheet && closeMeasure());
   useProtect.subscribe((s, prev) => s.sheet && !prev.sheet && closeMeasure());
+  useSign.subscribe((s, prev) => s.rail && !prev.rail && closeMeasure());
 }

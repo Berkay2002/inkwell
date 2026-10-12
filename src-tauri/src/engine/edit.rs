@@ -186,6 +186,9 @@ struct Step {
     /// The snapshot is the file exactly as a save must write it (the redaction engine's verified
     /// bytes): saving this step writes them as they are, not a rewrite of them.
     exact: bool,
+    /// The bytes hold a digital signature: later saves append to them (a page deletion no longer
+    /// forces a rewrite, which would break every signature).
+    signed: bool,
     sizes: Arc<Vec<[f32; 2]>>,
 }
 
@@ -232,6 +235,16 @@ static REDACTION_HOOK: parking_lot::Mutex<Option<RedactionHook>> = parking_lot::
 /// store can purge what it kept from before it.
 pub fn set_redaction_hook(hook: impl Fn(DocId) + Send + Sync + 'static) {
     *REDACTION_HOOK.lock() = Some(Arc::new(hook));
+}
+
+/// Why a damaged signed file can't be changed.
+pub const DAMAGED_SIGNED: &str =
+    "this signed file is damaged, and changing it would break its signatures, so Inkwell leaves it as it is";
+
+/// SigFlags' SignaturesExist, a certification, or a signature field with a value: the form's field
+/// tree only, so a document with many annotations is not loaded page by page to answer.
+fn has_signatures(doc: &PdfDocument) -> bool {
+    crate::outline::signed(doc)
 }
 
 fn now_ms() -> u64 {
@@ -297,11 +310,16 @@ fn check_pages(pages: &[u32], count: usize) -> Result<Vec<u32>> {
 
 impl Editor {
     fn open(entry: &DocEntry) -> Result<Editor> {
-        let bytes = std::fs::read(entry.path()).map_err(io)?;
+        Self::from_bytes(entry, std::fs::read(entry.path()).map_err(io)?)
+    }
+
+    fn from_bytes(entry: &DocEntry, bytes: Vec<u8>) -> Result<Editor> {
         let mut snap = Snap { len: bytes.len(), bytes: Arc::new(bytes) };
         let mut doc = open_snap(&snap, entry)?;
         let mut refuse = None;
         // A file MuPDF had to repair takes no incremental updates: start from a clean copy of it.
+        // Not a signed one (or one whose signatures can't be read): it is held as it is, so its signatures are
+        // checked against the bytes on disk, and edits are refused (see `refuse` and `snapshot`).
         if !doc.doc.can_be_saved_incrementally() {
             refuse = match crate::outline::signed_inner(&doc.doc) {
                 Ok(true) => Some("This signed file was damaged and had to be repaired; save a copy to edit it."),
@@ -309,11 +327,14 @@ impl Editor {
                 // Fails closed, as `signed` does, but says what is unknown.
                 Err(_) => Some("This file was damaged and had to be repaired, and whether it is signed could not be read; save a copy to edit it."),
             };
-            let out = write_doc(&doc.doc, PdfWriteOptions::default(), snap.len)?;
-            snap = Snap { len: out.len(), bytes: Arc::new(out) };
-            doc = open_snap(&snap, entry)?;
+            if refuse.is_none() {
+                let out = write_doc(&doc.doc, PdfWriteOptions::default(), snap.len)?;
+                snap = Snap { len: out.len(), bytes: Arc::new(out) };
+                doc = open_snap(&snap, entry)?;
+            }
         }
         let sizes = Arc::new(page_sizes(&doc.doc)?);
+        let signed = has_signatures(&doc.doc);
         let base = Step {
             snap,
             label: "Opened".into(),
@@ -324,6 +345,7 @@ impl Editor {
             redacts: false,
             security: None,
             exact: false,
+            signed,
             sizes,
         };
         Ok(Editor { doc, steps: vec![base], cur: 0, saved: Some(0), refuse })
@@ -346,6 +368,9 @@ impl Editor {
 
     /// The edited document as an incremental update of the current step.
     fn snapshot(&self) -> Result<Snap> {
+        if !self.doc.doc.can_be_saved_incrementally() {
+            return Err(invalid(DAMAGED_SIGNED));
+        }
         let mut opts = PdfWriteOptions::default();
         opts.set_incremental(true);
         let out = write_doc(&self.doc.doc, opts, self.step().snap.len + (64 << 10))?;
@@ -1340,6 +1365,7 @@ impl Engine {
                     redacts: false,
                     security: None,
                     exact: false,
+                    signed: false,
                     sizes: Arc::new(after),
                 };
                 Ok(Some((step, doc)))
@@ -1507,6 +1533,16 @@ impl Engine {
         catch_unwind(AssertUnwindSafe(|| f(&ed.doc.doc))).unwrap_or(Err(EngineError::Panic))
     }
 
+    /// [`Engine::read_custom`] with the bytes of the current state as well (what Save would
+    /// write, unless a rewrite is due): signature validation reads both.
+    pub fn read_with_bytes<R>(&self, id: DocId, f: impl FnOnce(&PdfDocument, &[u8]) -> Result<R>) -> Result<R> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        let bytes = ed.bytes();
+        catch_unwind(AssertUnwindSafe(|| f(&ed.doc.doc, bytes))).unwrap_or(Err(EngineError::Panic))
+    }
+
     fn custom(
         &self,
         id: DocId,
@@ -1584,7 +1620,7 @@ impl Engine {
             // Content taken out makes the save a full rewrite, which would void a signature: a signed document's
             // stays incremental (the removed objects stay in the file, unused, as in outline and links).
             let drops = (removes || sizes.len() < ed.step().sizes.len()) && !signed;
-            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, sizes }, doc))
+            Ok((Step { snap, label, source, at_ms: now_ms(), pages, drops, redacts: redaction, security: None, exact, signed: false, sizes }, doc))
         });
         match changed {
             Ok((step, doc)) => {
@@ -1597,6 +1633,51 @@ impl Engine {
                 Err(e)
             }
         }
+    }
+
+    /// A digital signature: `f` gets the bytes Save would write now and returns them with a
+    /// signed incremental update appended. That file becomes one undo step that a save writes
+    /// exactly (earlier signatures stay valid). Refused while an unsaved step would make Save
+    /// rewrite the file (deleted pages, redactions): those must be saved first.
+    pub fn apply_signature(&self, id: DocId, label: String, f: impl FnOnce(&[u8]) -> Result<Vec<u8>>) -> Result<EditState> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        let ed = self.lane(&entry, &mut lane)?;
+        // A file that was repaired on open is held as it is on disk, but MuPDF reads a repaired copy: signing would write that copy (and break
+        // any signature the original had). Save a copy first.
+        ed.refuse_if_repaired_signed()?;
+        if !ed.doc.doc.can_be_saved_incrementally() {
+            return Err(invalid(DAMAGED_SIGNED));
+        }
+        // Security is written by a full rewrite (which would drop the signature), and an update
+        // appended to an encrypted file would need its strings encrypted too.
+        if ed.security_info(&entry)?.encrypted {
+            return Err(invalid("Inkwell can't sign a password-protected file yet. Remove its security, save, and reopen it first."));
+        }
+        if ed.security().is_some() {
+            return Err(invalid("The security of this document changed in this session. Save it, then close and reopen it before signing."));
+        }
+        let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
+        let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
+        // Signs exactly what Save would write: with removed pages or redactions pending, the
+        // rewritten file, so nothing they took out survives in the signed bytes.
+        let full;
+        let base: &[u8] = if !ed.step().exact && ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed)) {
+            full = write_doc(&open_snap(&ed.step().snap, &entry)?.doc, rewrite_opts(), ed.step().snap.len)?;
+            &full
+        } else {
+            ed.bytes()
+        };
+        let out = catch_unwind(AssertUnwindSafe(|| f(base))).unwrap_or(Err(EngineError::Panic))?;
+        if out.len() <= base.len() || out[..base.len()] != *base {
+            return Err(invalid("the signed file does not extend the document"));
+        }
+        let snap = Snap { len: out.len(), bytes: Arc::new(out) };
+        let doc = open_snap(&snap, &entry)?;
+        let sizes = Arc::new(page_sizes(&doc.doc)?);
+        ed.push(Step { snap, label, source: EditSource::User, at_ms: now_ms(), pages: vec![], drops: false, redacts: false, security: None, exact: true, signed: true, sizes });
+        ed.doc = doc;
+        Ok(self.publish(&entry, ed))
     }
 
     /// Drops every history entry before the current one (e.g. the versions from before a
@@ -1703,6 +1784,14 @@ impl Engine {
         Ok(lane.as_ref().map_or_else(|| clean_state(&entry), |ed| ed.state(&entry)))
     }
 
+    /// The file as Save would write it now, with every step applied (signatures are validated
+    /// against these bytes). A rewrite pending from deleted pages or redactions is not applied.
+    pub fn current_bytes(&self, id: DocId) -> Result<Vec<u8>> {
+        let entry = self.entry(id)?;
+        let mut lane = entry.editor.lock();
+        Ok(self.lane(&entry, &mut lane)?.bytes().to_vec())
+    }
+
     /// What Save would write for the current content, `None` when there are no unsaved edits
     /// (for the version history's autosave before a restore discards them).
     pub fn unsaved_bytes(&self, id: DocId) -> Result<Option<Vec<u8>>> {
@@ -1773,11 +1862,19 @@ impl Engine {
         }
         let ed = self.lane(entry, lane)?;
         let secured = ed.security().is_some();
-        let rewrite = secured || ed.steps[..=ed.cur].iter().any(|s| s.drops || s.redacts);
+        // An exact step's bytes already hold everything before it; once signed, only a redaction
+        // or new security rewrites (and so invalidates the signatures).
+        let after = ed.steps[..=ed.cur].iter().rposition(|s| s.exact).map_or(0, |i| i + 1);
+        let signed = ed.steps[..=ed.cur].iter().any(|s| s.signed);
+        let rewrite = secured || ed.steps[after..=ed.cur].iter().any(|s| s.redacts || (s.drops && !signed));
         let full;
         // Security wins over a redaction's exact bytes: they could not carry the new encryption, and
         // a rewrite of verified-clean content only ever drops objects, it adds none.
-        let bytes: &[u8] = if ed.step().exact && !secured {
+        let bytes: &[u8] = if ed.refuse.is_some() && !same {
+            // A copy of a repaired file that is held as it is (signed): the repaired file, from a throwaway copy.
+            full = write_doc(&open_snap(&ed.step().snap, entry)?.doc, PdfWriteOptions::default(), ed.step().snap.len)?;
+            &full
+        } else if ed.step().exact && !secured {
             // The redaction engine's verified file: any other write of it is unverified.
             ed.bytes()
         } else if rewrite {
@@ -1814,7 +1911,10 @@ impl Engine {
         if !same {
             *entry.path.write() = target;
             // The copy is the document now: it is edited like any file (the original's signatures are not its own).
-            ed.refuse = None;
+            // It starts again from the clean copy, which takes incremental updates (if it didn't, it stays refused).
+            if ed.refuse.is_some() {
+                *ed = Editor::from_bytes(entry, saved.bytes.clone())?;
+            }
         }
         ed.saved = Some(ed.cur);
         *entry.file_password.lock() = match ed.security() {

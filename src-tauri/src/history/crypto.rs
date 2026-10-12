@@ -17,6 +17,9 @@ pub enum Obj {
     Chunk = b'c' as isize,
     Manifest = b'v' as isize,
     Names = b'n' as isize,
+    /// Saved Fill & Sign records (`fillsign::store`), bound to their kind the same way.
+    Signature = b's' as isize,
+    Initials = b'i' as isize,
 }
 
 /// Everything derived from one document's random key. Wiped on drop (the AEAD wipes its own key).
