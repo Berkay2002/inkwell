@@ -176,16 +176,48 @@ fn the_caps_hold() {
     std::fs::File::create(&big).unwrap().set_len(MAX_SOURCE + 1).unwrap();
     assert!(err(create(&lib, &Source { path: &big.to_string_lossy(), page: None }, "big", "")).contains("20 MB"));
 
-    // Too many pixels (a 1-bit 9000 x 9000 PNG is a few kilobytes) are refused before decoding.
-    let bomb = {
-        use image::{ExtendedColorType, ImageEncoder};
-        let mut out = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut out).write_image(&vec![0u8; 9000 * 9000 / 8], 9000, 9000, ExtendedColorType::L1).ok();
-        out
-    };
-    if !bomb.is_empty() {
-        assert!(err(create(&lib, &Source { path: &write(&d, "bomb.png", &bomb), page: None }, "bomb", "")).contains("megapixels"));
+    // Too many pixels are refused before anything is decoded: a tiny PNG whose header says 9000 x 9000 (81
+    // megapixels, under the decoder's own allocation limit, so it is our cap that answers), and the same in a TIFF.
+    let mut bomb = half_red(4, 4);
+    bomb[16..20].copy_from_slice(&9000u32.to_be_bytes());
+    bomb[20..24].copy_from_slice(&9000u32.to_be_bytes());
+    let crc = crc32(&bomb[12..29]);
+    bomb[29..33].copy_from_slice(&crc.to_be_bytes());
+    assert!(err(create(&lib, &Source { path: &write(&d, "bomb.png", &bomb), page: None }, "bomb", "")).contains("megapixels"));
+
+    let mut tif = Vec::new();
+    {
+        use tiff::encoder::{TiffEncoder, colortype};
+        TiffEncoder::new(Cursor::new(&mut tif)).unwrap().write_image::<colortype::RGB8>(30, 10, &vec![40u8; 30 * 10 * 3]).unwrap();
     }
+    assert_eq!(&tif[..4], b"II*\0", "little endian");
+    let ifd = u32::from_le_bytes(tif[4..8].try_into().unwrap()) as usize;
+    let entries = u16::from_le_bytes(tif[ifd..ifd + 2].try_into().unwrap()) as usize;
+    let mut patched = 0;
+    for e in 0..entries {
+        let at = ifd + 2 + e * 12;
+        let (tag, kind) = (u16::from_le_bytes(tif[at..at + 2].try_into().unwrap()), u16::from_le_bytes(tif[at + 2..at + 4].try_into().unwrap()));
+        if tag == 256 || tag == 257 {
+            match kind {
+                3 => tif[at + 8..at + 10].copy_from_slice(&9000u16.to_le_bytes()),
+                4 => tif[at + 8..at + 12].copy_from_slice(&9000u32.to_le_bytes()),
+                k => panic!("unexpected tiff type {k}"),
+            }
+            patched += 1;
+        }
+    }
+    assert_eq!(patched, 2);
+    assert!(err(create(&lib, &Source { path: &write(&d, "bomb.tif", &tif), page: None }, "bomb", "")).contains("megapixels"));
+
+    // A page of 14400 pt (the largest a viewer takes) is drawn at a scale that keeps it within 4096 px.
+    let big = raw_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 14400 14400] /Contents 4 0 R >>".to_string(),
+        "<< /Length 31 >>\nstream\n0 0 0 rg 100 100 9000 3000 re f\nendstream".to_string(),
+    ]);
+    let s = create(&lib, &Source { path: &write(&d, "huge.pdf", &big), page: None }, "huge", "").unwrap();
+    assert!(s.width.max(s.height) <= MAX_SIDE && s.width > 1000, "{s:?}");
 
     // A long picture is scaled down to 4096 on its longest side.
     let wide = write(&d, "wide.png", &half_red(6000, 300));
