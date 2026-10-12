@@ -1730,3 +1730,21 @@ fn a_new_signature_box_takes_no_form_name_and_no_locked_one() {
     let e = pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err();
     assert_eq!(e.to_string(), "New fields are locked by Maple Property Test's signature.");
 }
+
+#[test]
+fn a_signature_whose_signed_revision_cannot_be_read_locks_every_field() {
+    let b = lock_sign(&lease(), "Tenant", "<</Action/Include/Fields[(Witness)]>>", "");
+    // A later update points the signature's byte range at bytes that are no revision at all.
+    let broken = append(&b, |d| {
+        let t = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+        let mut v = t.get_dict("V").unwrap().unwrap();
+        v.dict_put("ByteRange", d.new_object_from_str("[0 10 20 30]").unwrap()).unwrap();
+    });
+    assert_eq!(locked_fields(&broken), ["Witness", "Other"]);
+    // No byte range at all: the same.
+    let none = append(&b, |d| {
+        let t = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+        t.get_dict("V").unwrap().unwrap().dict_delete("ByteRange").unwrap();
+    });
+    assert_eq!(locked_fields(&none), ["Witness", "Other"]);
+}

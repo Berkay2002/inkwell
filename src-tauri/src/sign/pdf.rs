@@ -591,18 +591,23 @@ fn locks_of(fields: &[SigField], bytes: &[u8]) -> Locks {
 }
 
 /// The locks the signature in `g` carried in the revision it signs (the field holding the same signature
-/// dictionary there, whatever it is called now: renaming it later must not drop its locks). None when it covers the whole file (the current ones are those) or that revision can't be read
-/// (the current ones still count).
+/// dictionary there, whatever it is called now: renaming it later must not drop its locks). None when it covers the
+/// whole file (the current ones are those). A revision that can't be read, or that has no field holding this
+/// signature, locks everything: what it locked is unknown.
 fn signed_locks(g: &SigField, bytes: &[u8]) -> Vec<crate::forms::scripts::Lock> {
-    let Some((v, vn)) = g.value.as_ref().and_then(|v| Some((v, ind(v)?))) else { return Vec::new() };
-    let Some(end) = out_covered(v).filter(|&e| e <= bytes.len() && !bytes[e..].iter().all(u8::is_ascii_whitespace)) else { return Vec::new() };
-    let Ok(then) = PdfDocument::from_bytes(&bytes[..end]) else { return Vec::new() };
-    let Ok(fields) = sig_fields(&then) else { return Vec::new() };
-    fields
-        .iter()
-        .find(|h| h.value.as_ref().and_then(ind) == Some(vn))
-        .map(|h| crate::forms::scripts::signature_locks(&h.field, &h.widget))
-        .unwrap_or_default()
+    use crate::forms::scripts::{Lock, signature_locks};
+    let Some(v) = g.value.as_ref() else { return Vec::new() };
+    let end = out_covered(v);
+    if end.is_some_and(|e| e <= bytes.len() && bytes[e..].iter().all(u8::is_ascii_whitespace)) {
+        return Vec::new();
+    }
+    let then = |e: usize| -> Option<Vec<Lock>> {
+        let vn = ind(v)?;
+        let then = PdfDocument::from_bytes(bytes.get(..e)?).ok()?;
+        let h = sig_fields(&then).ok()?.into_iter().find(|h| h.value.as_ref().and_then(ind) == Some(vn))?;
+        Some(signature_locks(&h.field, &h.widget))
+    };
+    end.and_then(then).unwrap_or_else(|| vec![Lock::All])
 }
 
 /// The signer of the first signature whose lock covers the field named `name`.
