@@ -216,12 +216,7 @@ const AREAS = [
   { key: "edit", what: "Edit text & images", doc: "edit-source", open: async () => ev(`${W}.useTextEdit.getState().setOpen(true)`) },
   { key: "links", what: "Links tool", doc: "bookmarks-links", open: () => tool("links") },
   { key: "bookmarks", what: "Bookmarks tool", doc: "bookmarks-links", open: () => tool("bookmarks") },
-  { key: "articles", what: "Article threads", doc: "edit-source", open: async () => {
-    await tool("articles");
-    await sleep(1500);
-    // lead for the blank page seen with the Article tool on: are the tiles there and visible?
-    console.log("articles dom", await ev(`JSON.stringify([...document.querySelectorAll(".page")].slice(0,1).map((p) => ({ cls: p.className, tiles: p.querySelectorAll("canvas.tile").length, kids: [...p.children].map((c) => c.tagName + "." + c.className + " " + Math.round(c.getBoundingClientRect().width) + "x" + Math.round(c.getBoundingClientRect().height) + " op=" + getComputedStyle(c).opacity + " bg=" + getComputedStyle(c).backgroundColor) })))`));
-  } },
+  { key: "articles", what: "Article threads", doc: "edit-source", open: () => tool("articles") },
   { key: "comment", what: "Comments panel", doc: "edit-source", open: async () => ev(`${W}.useAnnot.getState().setOpen(true)`) },
   { key: "measure", what: "Measure", doc: "edit-source", open: () => tool("measure") },
   { key: "forms", what: "Forms panel on a form", doc: "form-source", open: async () => ev(`${W}.useForms.getState().setOpen(true)`) },
