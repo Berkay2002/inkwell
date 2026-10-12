@@ -927,7 +927,9 @@ fn bound(f: &SigField, doc: &PdfDocument, bytes: &[u8]) -> std::result::Result<(
     }
     let perms = then.catalog().ok().and_then(|c| c.get_dict("Perms").ok().flatten()).and_then(|p| p.get_dict("DocMDP").ok().flatten());
     let certify = if perms.as_ref().and_then(ind) == Some(vn) { Some(docmdp_of(v).unwrap_or(2)) } else { None };
-    let touched = fields.iter().find(|g| same(g)).map(|g| locked_changes(g, then, doc)).unwrap_or_default();
+    // Nothing after it: nothing it locks can have changed.
+    let after = bytes.get(end..).is_some_and(|b| !b.iter().all(u8::is_ascii_whitespace));
+    let touched = if after { fields.iter().find(|g| same(g)).map(|g| locked_changes(g, then, doc)).unwrap_or_default() } else { Vec::new() };
     Ok((certify, fields.iter().filter(|g| g.value.is_some()).filter_map(|g| ind(&g.widget)).collect(), touched))
 }
 

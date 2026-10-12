@@ -1646,3 +1646,16 @@ fn a_later_change_to_a_locked_field_is_flagged_on_the_signature_that_locks_it() 
     let s = field(&infos(&honest), "Tenant").clone();
     assert!(!codes(&s).contains(&WarningCode::LockedChanged), "{s:?}");
 }
+
+#[test]
+fn a_locked_form_too_large_to_compare_reads_as_changed() {
+    // Note's value alone is past the 100 000 nodes one revision's locked fields may cost.
+    let huge = format!("/FT/Tx/T(Note)/V[{}]", "0 ".repeat(100_001));
+    let b = form(&["/FT/Sig/T(Tenant)", &huge], |_, _| {});
+    let b = lock_sign(&b, "Tenant", "<</Action/Include/Fields[(Note)]>>", "");
+    // Nothing after the signature: nothing to compare, nothing flagged.
+    assert!(!codes(field(&infos(&b), "Tenant")).contains(&WarningCode::LockedChanged));
+    // A later comment, Note untouched: the comparison runs out, which reads as changed.
+    let s = field(&infos(&with_comment(&b)), "Tenant").clone();
+    assert!(s.warnings.iter().any(|w| w.code == WarningCode::LockedChanged && w.text == "After this signature, a field it locks changed: the form."), "{s:?}");
+}
