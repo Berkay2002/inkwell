@@ -1239,12 +1239,26 @@ fn remove_all(doc: &mut PdfDocument, mut budget: usize) -> Result<Option<Done>> 
     Ok(Some(Done { id: None, count, pages, name: None }))
 }
 
+/// The link's `/Dest`, or the `/D` of its GoTo action, is an explicit array (not a name or string).
+fn stored_dest_is_array(a: &PdfObject) -> bool {
+    let dest = a.get_dict("Dest").ok().flatten().or_else(|| {
+        let act = a.get_dict("A").ok().flatten()?;
+        if name_of(act.get_dict("S").ok().flatten()) != "GoTo" {
+            return None;
+        }
+        act.get_dict("D").ok().flatten()
+    });
+    dest.is_some_and(|d| d.is_array().unwrap_or(false))
+}
+
 /// `target` is what the link `a` already goes to.
 fn same_target(doc: &PdfDocument, doc_path: &str, a: &PdfObject, target: &NewTarget) -> Result<bool> {
     let now = target_of(doc, a, &mut HashMap::new(), &mut Names::default());
     Ok(match (target, now) {
         (NewTarget::Page { page, at }, Target::Page { page: p, at: q }) => {
-            *page == p
+            // a named destination is never "already the same": MuPDF and Acrobat may send it elsewhere than the tree does
+            stored_dest_is_array(a)
+                && *page == p
                 && match (at, q) {
                     (None, None) => true,
                     (Some(x), Some(y)) => near(x[0], y[0]) && near(x[1], y[1]),

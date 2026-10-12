@@ -1871,6 +1871,29 @@ fn a_certified_file_is_refused_and_a_signed_one_warns_like_any_compress() {
     assert!(outline_of(&r.output).items.is_empty());
 }
 
+/// MuPDF reads `/Dests` alone when the catalog has one, but another viewer may read the tree: a name either has stays.
+#[test]
+fn a_bookmark_whose_name_is_only_in_the_tree_is_kept_next_to_a_dests_dictionary() {
+    let s = Scratch::new();
+    let input = s.path("both-sources.pdf");
+    let catalog = "/Dests << /old [5 0 R /Fit] >> /Names << /Dests << /Names [(treeonly) [5 0 R /Fit]] >> >>";
+    bookmark_pdf(
+        &input,
+        catalog,
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        &[
+            "<< /Title (A) /Parent 4 0 R /Dest (treeonly) /Next 8 0 R >>",
+            "<< /Title (B) /Parent 4 0 R /Dest (gone) /Prev 7 0 R /Next 9 0 R >>",
+            "<< /Title (C) /Parent 4 0 R /Dest /old /Prev 8 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "A, C");
+}
+
 #[test]
 fn dropping_all_bookmarks_leaves_nothing_for_the_invalid_option_to_count() {
     let s = Scratch::new();
@@ -1906,7 +1929,8 @@ fn the_invalid_bookmarks_option_leaves_links_and_everything_else_alone() {
 fn a_destination_name_that_is_not_utf8_is_looked_up_by_its_bytes() {
     let s = Scratch::new();
     let input = s.path("latin1.pdf");
-    // /Dests keeps a key with the byte E9; the bookmark names it, another names a key that is not there
+    // /Dests keeps a key with the byte E9; the bookmark names it, another names a key that is not there: a name that
+    // is not UTF-8 may be read lossily by another viewer through the tree, so it is not judged and stays
     bookmark_pdf(
         &input,
         "/Dests << /caf#E9 [5 0 R /Fit] >>",
@@ -1919,8 +1943,8 @@ fn a_destination_name_that_is_not_utf8_is_looked_up_by_its_bytes() {
     let mut o = invalid_bookmarks_only();
     o.output = Some(s.path("out.pdf"));
     let r = run(&input, &o).unwrap();
-    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
-    assert_eq!(outline_text(&outline_of(&r.output).items), "Cafe");
+    assert_eq!(r.stripped.invalid_bookmarks, 0, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "Cafe, Other");
 }
 
 #[test]
@@ -1949,6 +1973,52 @@ fn a_goto_without_a_destination_and_a_destination_dictionary_are_judged_like_the
     let r = run(&input, &o).unwrap();
     assert_eq!(r.stripped.invalid_bookmarks, 3, "{:?}", r.stripped);
     assert_eq!(outline_text(&outline_of(&r.output).items), "A, B, D");
+}
+
+/// MuPDF's viewer re-encodes a string destination before it looks it up in `/Dests` (`pdf_new_text_string`): a
+/// UTF-16BE string for a key that is plain ASCII, or whose PDFDocEncoding bytes are the key, still leads there.
+#[test]
+fn a_utf16_string_destination_is_found_in_the_old_dests_dictionary_by_its_text() {
+    let s = Scratch::new();
+    let input = s.path("utf16.pdf");
+    // /Dests keys: c and caf\351; the strings are UTF-16BE "c", "caf\351", and "gone" (defined nowhere)
+    bookmark_pdf(
+        &input,
+        "/Dests << /c [5 0 R /Fit] /caf#E9 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 10 0 R /Count 4 >>",
+        &[
+            "<< /Title (C) /Parent 4 0 R /Dest <FEFF0063> /Next 8 0 R >>",
+            "<< /Title (Cafe) /Parent 4 0 R /Dest <FEFF00630061006600E9> /Prev 7 0 R /Next 9 0 R >>",
+            "<< /Title (Gone) /Parent 4 0 R /Dest <FEFF0067006F006E0065> /Prev 8 0 R /Next 10 0 R >>",
+            "<< /Title (Action) /Parent 4 0 R /A << /S /GoTo /D <FEFF0063> >> /Prev 9 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "C, Cafe, Action");
+
+    let links = s.path("links.pdf");
+    let link = |rest: &str| format!("<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] {rest} >>");
+    let objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Dests << /c [4 0 R /Fit] /caf#E9 [4 0 R /Fit] >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R 8 0 R] >>".to_string(),
+        link("/Dest <FEFF0063>"),
+        link("/A << /S /GoTo /D <FEFF00630061006600E9> >>"),
+        link("/Dest <FEFF0067006F006E0065>"),
+        link("/Dest << /D <FEFF0063> >>"),
+    ];
+    fs::write(&links, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let mut o = Options::preset(Preset::Custom);
+    o.strip.invalid_links = true;
+    o.output = Some(s.path("links-out.pdf"));
+    let r = run(&links, &o).unwrap();
+    assert_eq!(r.stripped.invalid_links, 1, "{:?}", r.stripped);
+    let doc = open_pdf(&r.output, None).unwrap();
+    assert_eq!(doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 3);
 }
 
 #[test]

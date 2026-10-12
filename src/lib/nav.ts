@@ -161,13 +161,13 @@ export function countProblems(items: Bookmark[]): number {
   return items.reduce((n, b) => n + (isProblem(bookmarkState(b)) ? 1 : 0) + countProblems(b.children), 0);
 }
 
-/** A short line for a link's target, for lists. */
 /** The `what` the backend gives a destination it cannot check (`UNCHECKED_DEST` in outline/mod.rs). */
 export const UNCHECKED_DEST = "a named destination that cannot be checked";
 
 /** A link whose named destination could not be checked: kept as it is, but a new target may replace it. */
 export const isUnchecked = (t: api.LinkTarget): boolean => t.kind === "other" && t.what === UNCHECKED_DEST;
 
+/** A short line for a link's target, for lists. */
 export function targetLabel(t: api.LinkTarget): string {
   switch (t.kind) {
     case "page":
