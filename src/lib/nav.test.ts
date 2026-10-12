@@ -13,10 +13,11 @@ vi.hoisted(() => {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn(), message: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({}) }));
-vi.mock("./edit", () => ({ editBookmarks: vi.fn(), editLinks: vi.fn(), applyState: vi.fn() }));
+vi.mock("./edit", () => ({ editBookmarks: vi.fn(), editDests: vi.fn(), editLinks: vi.fn(), applyState: vi.fn() }));
 vi.mock("./api", () => ({
   bookmarksList: vi.fn(),
   bookmarksHeadings: vi.fn(),
+  destsList: vi.fn(),
   linksList: vi.fn(),
   linksAudit: vi.fn(),
   linksUrls: vi.fn(),
@@ -29,13 +30,15 @@ vi.mock("./api", () => ({
 import { message } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { useStore } from "../store";
-import type { Bookmark, Bookmarks } from "./api";
-import { editBookmarks, editLinks } from "./edit";
+import type { Bookmark, Bookmarks, DestEntry, DestList } from "./api";
+import { editBookmarks, editDests, editLinks } from "./edit";
 import { dropViewPos, setViewPos } from "./viewPos";
 import {
   bookmarkState,
   confirmOpen,
   countProblems,
+  destNotice,
+  destState,
   dragRect,
   findBookmark,
   fileLinkNote,
@@ -497,5 +500,84 @@ describe("set to current view", () => {
 
   it("names where a file link looks", () => {
     expect(fileLinkNote("../a.pdf")).toBe("This link looks for ../a.pdf relative to the document.");
+  });
+});
+
+describe("named destinations", () => {
+  const entry = (name: string, over: Partial<DestEntry> = {}): DestEntry => ({
+    name,
+    dest: { kind: "page", page: 2, at: null },
+    inDests: false,
+    inTree: true,
+    shadowed: false,
+    twice: false,
+    refs: 0,
+    usedBy: [],
+    maybe: null,
+    ...over,
+  });
+  const dests = (items: DestEntry[], over: Partial<DestList> = {}): DestList => ({
+    rev: 0,
+    items,
+    both: false,
+    truncated: false,
+    frozen: null,
+    locked: null,
+    signed: false,
+    unchecked: false,
+    ...over,
+  });
+  const done = (count = 1, kept: string[] = []) => ({ state: {} as never, count, kept });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useNav.setState({ docs: {}, linkTool: "select" });
+    vi.mocked(api.destsList).mockResolvedValue(dests([entry("alpha", { refs: 2 }), entry("beta")]));
+  });
+
+  it("shows broken and web destinations apart from the ones that go to a page", () => {
+    expect(destState({ kind: "page", page: 0, at: null })).toBe("ok");
+    expect(destState({ kind: "broken", what: "missing" })).toBe("broken");
+    expect(destState({ kind: "uri", uri: "https://example.com" })).toBe("external");
+  });
+
+  it("lists once per generation", async () => {
+    await useNav.getState().loadDests(1);
+    await useNav.getState().loadDests(1);
+    expect(api.destsList).toHaveBeenCalledTimes(1);
+    expect(useNav.getState().docs[1].dests?.items.map((e) => e.name)).toEqual(["alpha", "beta"]);
+  });
+
+  it("sends the change at the generation it listed and says what happened", async () => {
+    vi.mocked(editDests).mockResolvedValue(ok(done()));
+    const n = await useNav.getState().destOp(1, { op: "rename", name: "alpha", to: " omega " });
+    expect(editDests).toHaveBeenCalledWith(1, 0, { op: "rename", name: "alpha", to: " omega " });
+    expect(n).toBe('Renamed "alpha" to "omega". Every bookmark and link that used it follows.');
+    expect(useNav.getState().docs[1].notice).toBe(n);
+  });
+
+  it("shows the engine's refusal as the notice and keeps the list", async () => {
+    vi.mocked(editDests).mockResolvedValue({ kind: "error", message: 'A script mentions "alpha", so it is left as it is' });
+    const n = await useNav.getState().destOp(1, { op: "rename", name: "alpha", to: "omega" });
+    expect(n).toContain("A script mentions");
+    expect(useNav.getState().docs[1].dests?.items).toHaveLength(2);
+  });
+
+  it("lists again and asks for a retry when the document moved on", async () => {
+    vi.mocked(editDests).mockResolvedValue({ kind: "stale" });
+    await useNav.getState().destOp(1, { op: "delete", name: "beta" });
+    expect(api.destsList).toHaveBeenCalledTimes(2);
+    expect(useNav.getState().docs[1].notice).toBe("The document changed while you were editing. Try that again.");
+  });
+
+  it("words the notices of delete, set view and remove unused", () => {
+    const l = dests([entry("alpha", { refs: 2 })]);
+    expect(destNotice({ op: "delete", name: "alpha" }, done(), l)).toBe('Deleted "alpha". 2 bookmarks, links or actions that used it now go nowhere.');
+    expect(destNotice({ op: "delete", name: "zeta" }, done(), l)).toBe('Deleted "zeta".');
+    expect(destNotice({ op: "setView", name: "alpha", page: 4, at: null, zoom: null }, done(0), l)).toBe('"alpha" already goes there.');
+    expect(destNotice({ op: "removeUnused" }, done(3, ['"x": a script mentions it']), l)).toBe(
+      'Removed 3 destinations nothing uses. Kept in doubt: "x": a script mentions it.',
+    );
+    expect(destNotice({ op: "removeUnused" }, done(0), l)).toBe("No destination was unused.");
   });
 });

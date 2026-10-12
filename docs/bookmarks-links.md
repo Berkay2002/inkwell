@@ -21,6 +21,8 @@ change.
 |---|---|---|
 | `bookmarks_list` | `doc` | `{ rev, items: Bookmark[], count, truncated }` |
 | `bookmarks_apply` | `doc, rev, op` | `{ state: EditState, id, count }` |
+| `dests_list` | `doc` | `{ rev, items: DestEntry[], both, truncated, frozen, locked, signed, unchecked }`: every named destination, sorted by name |
+| `dests_apply` | `doc, rev, op` | `{ state: EditState, count, kept }` |
 | `bookmarks_headings` | `doc` | `{ count, levels, rows (first 40) }`: the prediction, nothing is changed |
 | `links_list` | `doc, page` | `{ rev, links: PageLink[] }` |
 | `links_apply` | `doc, rev, op` | `{ state, id, count }` |
@@ -37,6 +39,8 @@ change.
 - `BookmarkOp`: `add{parent,index,title,page,at}`, `rename`, `delete{ids}`, `move{id,parent,index}`,
   `setDest{id,page,at}`, `setOpen{id,open}`, `setStyle{id,bold,italic,color,resetColor}`, `fromHeadings{replace}`.
 - `LinkOp`: `add{page,rect,target,border}`, `setTarget`, `setRect`, `setBorder`, `delete{page,ids}`, `fromUrls`.
+- `DestOp`: `rename{name,to}`, `setView{name,page,at,zoom}`, `delete{name}`, `add{name,page,at,zoom}`, `removeUnused`. A
+  destination is named by its text as `dests_list` shows it, not by an id.
 - Every op is one edit-core step (`Engine::apply_custom`): one undo step, kept by Save, recorded in history. "From
   headings" and "from URLs" make all their items in one step.
 
@@ -179,9 +183,57 @@ change.
   links ("Page 6 · the named destination "x" is not in the document", click goes there and selects it) with the
   counts of all links and web links.
 
+## Named destinations
+
+Code: `src-tauri/src/outline/dests.rs`; UI: `Destinations` in the Bookmarks section of the Edit rail ("Manage named
+destinations", listed when opened, since finding what uses a name walks the document).
+
+- **Sources**: the catalog's `/Dests` dictionary (names as keys) and the `/Names /Dests` name tree (strings as keys),
+  read by an own bounded walk, not by `Names`, which flattens the tree and does not see a mis-sorted one or wrong
+  `/Limits`. A destination is its text: MuPDF's decoding of the key (`mupdf_text` in `compress/strip.rs`, the viewer's rules), else the bytes
+  spelled out as `\xNN`, so a name that can't be decoded is still listed. The same text in both sources is one
+  destination and every change reaches both places. The list shows the page (or Broken), sorted by name, and says
+  where the name lives only when the file has both sources.
+- **Which source is read**: MuPDF reads `/Dests` alone when the catalog has one, and the tree only when it does not.
+  A name that is only in the tree of such a file is listed and marked "a viewer that reads /Dests alone does not find
+  it" (`shadowed`); its bookmarks and links resolve to Broken, and the list says so rather than hiding it.
+- **Rename** follows every reference it can see: bookmarks and links (`/Dest`, `/A` GoTo `/D`), `/OpenAction`, form
+  fields, pages and the document's actions, and a destination whose value is another name. A reference spelled in another way (a UTF-16
+  string for a `/Dests` name that MuPDF's lookup forms differently), JavaScript that mentions the name, or a result
+  that would change where any bookmark or link goes **refuses the rename and names the one it can't rewrite**: the
+  document is not changed. A name that already exists in either source is refused; so is a non-ASCII name in
+  `/Dests` (the viewer never forms such a key), which only the name tree takes.
+- **Set to current view**: `/XYZ` at the top left of the view (page space, rotation undone) and the viewer's zoom
+  (1 is 100 %); a value written as `<< /D … >>` keeps its dictionary. Setting the same view again changes nothing.
+- **Add** (from the current view): a file whose only source is `/Dests` keeps it there (ASCII name); otherwise the
+  name goes into the name tree (made when there is none). `/Dests` is never created or deleted: its presence flips
+  MuPDF to `/Dests` alone, so adding one would hide every name in the tree.
+- **Delete** takes the name out of its source(s); what used it reads as Broken, and the notice says how many.
+- **Remove unused** takes out every name nothing uses: no bookmark, link, GoTo in a form field, page or document
+  action, `/OpenAction`, or chained destination. Names kept in doubt are reported with why (at most 20): a script
+  mentions the name (any JavaScript text that contains it), or its own name can't be read as text. When the document
+  has too many objects or too much JavaScript to check, nothing is removed.
+- **The name tree comes out valid**: leaves of 32 pairs and inner nodes of 32 kids, keys sorted by their bytes
+  with no duplicates, `/Limits` on every node but the root, kids indirect; the root object is reused, so the
+  catalog's reference stays. A node nobody else reaches is dropped; an emptied tree is a root with `/Names []`.
+- **Caps** (past any of them the list is partial, `truncated`, and nothing is edited): 20,000 entries in each
+  source, 4,096 name tree nodes, 12 levels; looking for uses reads at most 1,000,000 objects, 100,000 pages and
+  128 KiB of JavaScript. A tree of a shape this does not write (a node reached twice, a cycle, a kid that is not an
+  indirect node, `/Kids` with `/Names`, an odd `/Names`, a key that is not a string) is listed and left as it is:
+  `frozen` says why.
+- **Certified** (`/P` of any value, as for bookmarks) refuses every change; `dests_list` returns `locked` and the
+  panel turns each button off with the reason as its title. **Signed** documents are saved incrementally and the
+  panel shows the note; Delete and Remove unused in a signed document leave the old objects in the file.
+- Each op is one undo step. After a change the panel lists the bookmarks and links again, since their state dots
+  depend on it.
+- A rename compares where every bookmark, link and action resolved before and after, and refuses (the document is
+  restored) when one differs; the tests hold set view, add, delete of another name and remove unused to the same
+  rule.
+
 ## Not done
 
-- Named destinations are followed and judged (a name the document does not have reads as broken), but the name tree and `/Dests` are not editable; JavaScript and named actions are listed as "other" and kept as they are.
+- JavaScript and named actions are listed as "other" and kept as they are; a script that mentions a destination keeps it
+  from "Remove unused" and refuses its rename rather than being rewritten.
 
 ## Tests
 
@@ -189,6 +241,15 @@ Highlight, inline links and Remove all links: `links::tests` (`the_highlight_sty
 `an_inline_link_is_edited_in_place_*`, `deleting_inline_and_indirect_*`, `remove_all_links_*`, `a_certified_document_takes_neither_*`,
 `remove_all_links_of_a_signed_document_*`, `a_hostile_annots_array_*`), the two ops in `engine/tests_certified.rs`, and
 `nav.test.ts` ("link actions").
+
+Named destinations: `outline::dests_tests` (list from both sources and from a tree in the wrong order; rename in the
+tree, in `/Dests` and in both with bookmarks, links, GoTo and `/OpenAction` followed and undone in one step; rename
+refused for a script mention, a reference spelled another way and a name that exists; set view with zoom and a
+dictionary value; add into the source the file uses; delete; remove unused keeps what is referenced or in doubt;
+the name tree walked node by node for byte order, `/Limits` and indirect kids after inserts and deletes, on a
+1,100-entry tree and a given two-level tree; certified refuses every op; a signed document saves incrementally;
+unreadable shapes and caps refuse; every bookmark and link resolves the same before and after each op),
+`Destinations.test.tsx` and `nav.test.ts` ("named destinations").
 
 `cargo test --lib outline -- --test-threads=1`, `cargo test --lib links -- --test-threads=1`, `src/lib/nav.test.ts` (including following links).
 

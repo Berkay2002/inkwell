@@ -4,6 +4,7 @@ import { findBookmark, hexToRgb, rgbToHex, stateLabel, bookmarkState, useNav, UN
 import { type DocState } from "../../store";
 import { Icon } from "../Icons";
 import { BookmarkBar, BookmarkTree } from "./BookmarkTree";
+import { Destinations } from "./Destinations";
 
 const nav = () => useNav.getState();
 
@@ -16,6 +17,7 @@ export function BookmarksPanel({ doc }: { doc: DocState }) {
   const items = d?.bookmarks?.items ?? [];
   const sel = d?.selectedBm != null ? findBookmark(items, d.selectedBm) : null;
   const [heads, setHeads] = useState(false);
+  const [named, setNamed] = useState(false);
 
   return (
     <div className="bm">
@@ -38,6 +40,15 @@ export function BookmarksPanel({ doc }: { doc: DocState }) {
           Bookmarks from headings
         </button>
         {heads && <Headings doc={id} existing={items.length > 0} />}
+      </section>
+
+      <section className="te-sec">
+        <h3 className="te-h3">Named destinations</h3>
+        <button className={named ? "te-btn on" : "te-btn"} aria-expanded={named} onClick={() => setNamed(!named)}>
+          <Icon name="pin" size={16} />
+          Manage named destinations
+        </button>
+        {named && <Destinations doc={id} />}
       </section>
       {d?.notice && (
         <p className="te-note" role="status">

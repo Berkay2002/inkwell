@@ -187,6 +187,15 @@ export function editBookmarks(id: number, rev: number, op: api.BookmarkOp) {
   });
 }
 
+/** Changes the named destinations (src-tauri/src/outline/dests.rs). `rev`: the generation they were listed at. */
+export function editDests(id: number, rev: number, op: api.DestOp) {
+  return textResult(id, async () => {
+    const r = await api.destsApply(id, rev, op);
+    applyState(id, r.state);
+    return r;
+  });
+}
+
 /** Changes the links (src-tauri/src/links). `rev`: the generation they were listed at. */
 export function editLinks(id: number, rev: number, op: api.LinkOp) {
   return textResult(id, async () => {
