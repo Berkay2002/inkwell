@@ -1413,6 +1413,8 @@ fn deleting_and_replacing_in_a_shared_form_changes_only_this_page() {
     let doc = saved(&eng, id, &path);
     assert_eq!(image_objects(&path).len(), 1);
     assert!(text_of(&doc, entry(&doc, 1, "Fm0")).contains("/Im0 Do"));
+    // Windows cannot replace a file that is still open: close it before the next save.
+    drop(doc);
     eng.undo(id).unwrap();
     assert_eq!(page_images(&eng, id, 0).len(), 1);
 
