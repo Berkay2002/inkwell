@@ -11,6 +11,7 @@ import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 import { MenuButton } from "../Menu";
 import { FieldProps } from "./FieldProps";
+import { sigFieldView, useSign } from "../../lib/sign";
 import { LAYOUT_GROUPS, useCertified, useSigned } from "./layoutTools";
 import "./forms.css";
 
@@ -326,15 +327,17 @@ function Row({ doc, f, all, active, follow, onOpen }: { doc: number; f: Field; a
     if (active && follow) ref.current?.scrollIntoView({ block: "nearest" });
   }, [active, follow]);
   const authoring = useForms((s) => s.authoring);
+  const sig = useSign((s) => s.docs[doc]?.sigs)?.find((x) => f.kind === "signature" && x.field === f.name);
+  const refused = f.kind === "signature" ? sigFieldView(f.tooltip || f.name, sig) : null;
   if (renaming) return <RenameRow doc={doc} f={f} all={all} />;
   const val = summary(f, all);
   return (
     <button
       ref={ref}
-      className={`fm-row${active ? " on" : ""}`}
+      className={`fm-row${active ? " on" : ""}${refused?.state === "locked" ? " locked" : ""}`}
       onClick={(e) => (authoring && (e.metaKey || e.shiftKey || e.ctrlKey) ? fm().toggle(doc, { page: f.page, xref: f.xref }) : onOpen())}
       onDoubleClick={() => authoring && fm().setRenaming(doc, { page: f.page, xref: f.xref })}
-      title={authoring ? `${KIND_LABEL[f.kind]}. Double-click or F2 to rename.` : KIND_LABEL[f.kind]}
+      title={refused?.state === "locked" ? refused.title : authoring ? `${KIND_LABEL[f.kind]}. Double-click or F2 to rename.` : KIND_LABEL[f.kind]}
     >
       <Icon name={FIELD_ICON[f.kind]} size={15} />
       <span className="name">

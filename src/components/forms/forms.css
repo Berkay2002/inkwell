@@ -68,6 +68,11 @@ button.fm-w.k-signature {
 .fm-w.k-signature[aria-disabled="true"] {
   cursor: not-allowed;
 }
+/* a refused signature field: dimmed like .sg-field[aria-disabled] in Fill and Sign */
+.fm-w.k-signature.locked {
+  background: color-mix(in srgb, var(--text-2) 12%, transparent);
+  box-shadow: none;
+}
 .fm-w.ro {
   cursor: default;
 }
@@ -298,6 +303,10 @@ button.fm-w.k-signature {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-2);
+}
+.fm-row.locked {
+  color: var(--text-2);
+  opacity: 0.6;
 }
 .fm-row .req {
   color: var(--danger);
