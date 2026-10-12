@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "./Icons";
 
@@ -8,7 +8,7 @@ export interface MenuItem {
   checked?: boolean;
   danger?: boolean;
   hint?: string;
-  /** Why the item cannot be used now: it is shown disabled with this as its tooltip. */
+  /** Why the item cannot be used now: it stays focusable, is announced as unavailable and gives this as its reason. */
   disabled?: string;
 }
 export type MenuEntry = MenuItem | "sep";
@@ -19,11 +19,12 @@ const ITEM_H = 32;
 export function MenuButton({ items, label, className = "icon-btn", children }: { items: MenuEntry[]; label: string; className?: string; children: ReactNode }) {
   const btn = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
+  const uid = useId();
   const [pos, setPos] = useState<{ right: number; top?: number; bottom?: number } | null>(null);
 
   useEffect(() => {
     if (!pos) return;
-    menu.current?.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
+    menu.current?.querySelector<HTMLElement>("button")?.focus();
     const close = () => setPos(null);
     const away = (e: Event) => {
       if (!menu.current?.contains(e.target as Node)) close();
@@ -59,7 +60,7 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-    const all = [...menu.current!.querySelectorAll<HTMLElement>("button:not(:disabled)")];
+    const all = [...menu.current!.querySelectorAll<HTMLElement>("button")];
     const i = all.indexOf(document.activeElement as HTMLElement);
     all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length]?.focus();
     e.preventDefault();
@@ -93,9 +94,11 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
                   key={n}
                   role="menuitem"
                   className={it.danger ? "danger" : undefined}
-                  disabled={!!it.disabled}
+                  aria-disabled={it.disabled ? true : undefined}
+                  aria-describedby={it.disabled ? `${uid}-${n}` : undefined}
                   title={it.disabled}
                   onClick={() => {
+                    if (it.disabled) return;
                     setPos(null);
                     it.onSelect();
                   }}
@@ -103,6 +106,11 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
                   <span className="check">{it.checked && <Icon name="check" size={14} />}</span>
                   <span className="grow">{it.label}</span>
                   {it.hint && <span className="dim">{it.hint}</span>}
+                  {it.disabled && (
+                    <span id={`${uid}-${n}`} className="sr-only" aria-hidden="true">
+                      {it.disabled}
+                    </span>
+                  )}
                 </button>
               ),
             )}

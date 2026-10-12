@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as edits from "../lib/edit";
 import { useSheets } from "../lib/organizePlus";
@@ -45,12 +45,13 @@ export function pageActions(
 /** A menu at the pointer (right click). Closes on any outside click, Escape, scroll or resize. */
 export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuEntry[]; onClose: () => void }) {
   const el = useRef<HTMLDivElement>(null);
+  const uid = useId();
   const [pos, setPos] = useState({ left: x, top: y });
 
   useLayoutEffect(() => {
     const r = el.current!.getBoundingClientRect();
     setPos({ left: Math.min(x, window.innerWidth - r.width - 8), top: Math.min(y, window.innerHeight - r.height - 8) });
-    el.current!.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
+    el.current!.querySelector<HTMLElement>("button")?.focus();
   }, [x, y]);
 
   useEffect(() => {
@@ -60,7 +61,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
         e.stopPropagation();
         onClose();
       } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        const all = [...el.current!.querySelectorAll<HTMLElement>("button:not(:disabled)")];
+        const all = [...el.current!.querySelectorAll<HTMLElement>("button")];
         const i = all.indexOf(document.activeElement as HTMLElement);
         all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length]?.focus();
         e.preventDefault();
@@ -90,9 +91,11 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
             key={n}
             role="menuitem"
             className={it.danger ? "danger" : undefined}
-            disabled={!!it.disabled}
+            aria-disabled={it.disabled ? true : undefined}
+            aria-describedby={it.disabled ? `${uid}-${n}` : undefined}
             title={it.disabled}
             onClick={() => {
+              if (it.disabled) return;
               onClose();
               it.onSelect();
             }}
@@ -100,6 +103,11 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
             <span className="check" />
             <span className="grow">{it.label}</span>
             {it.hint && <span className="dim">{it.hint}</span>}
+            {it.disabled && (
+              <span id={`${uid}-${n}`} className="sr-only" aria-hidden="true">
+                {it.disabled}
+              </span>
+            )}
           </button>
         ),
       )}
