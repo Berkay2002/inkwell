@@ -59,26 +59,43 @@ pub async fn marks_add(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: DocId, m
     .await
 }
 
-/// Removes the marks of `kind` from `pages` (all pages when omitted): one undo step.
+/// Removes the marks of `kind` from `pages` (all pages when omitted): one undo step. `foreign`: the
+/// ones another app made (found by their marked content) instead of the ones this app tagged.
 #[tauri::command]
-pub async fn marks_remove(eng: Eng<'_>, doc: DocId, kind: MarkKind, pages: Option<Vec<u32>>) -> Result<EditState> {
+pub async fn marks_remove(eng: Eng<'_>, doc: DocId, kind: MarkKind, pages: Option<Vec<u32>>, foreign: Option<bool>) -> Result<EditState> {
     let eng = eng.inner().clone();
+    let foreign = foreign.unwrap_or(false);
     blocking(move || {
+        let noun = if foreign { format!("{} from another app", kind.noun()) } else { kind.noun().to_string() };
         let label = match &pages {
-            Some(p) => format!("Remove {} from {}", kind.noun(), page_ranges(p)),
-            None => format!("Remove {}", kind.noun()),
+            Some(p) => format!("Remove {noun} from {}", page_ranges(p)),
+            None => format!("Remove {noun}"),
         };
         eng.apply_removing(doc, label, EditSource::User, move |d| {
             let all: Vec<u32> = (0..d.page_count()?.max(0) as u32).collect();
             let pages = pages.unwrap_or(all);
             // Only the pages that have the mark are listed as touched.
             let before = apply::info(d)?;
-            let on: Vec<u32> = before.kinds.iter().find(|k| k.kind == kind).map(|k| k.pages.clone()).unwrap_or_default();
+            let on: Vec<u32> = if foreign {
+                before.foreign.iter().find(|k| k.kind == kind).map(|k| k.pages.clone()).unwrap_or_default()
+            } else {
+                before.kinds.iter().find(|k| k.kind == kind).map(|k| k.pages.clone()).unwrap_or_default()
+            };
             let hit: Vec<u32> = pages.iter().copied().filter(|p| on.contains(p)).collect();
             if hit.is_empty() {
-                return Err(EngineError::Invalid(format!("There is no {} to remove.", kind.noun())));
+                return Err(EngineError::Invalid(format!("There is no {noun} to remove.")));
             }
-            apply::remove(d, kind, &hit)?;
+            if foreign {
+                let (cut, _left) = super::remove_foreign(d, kind, &hit)?;
+                if cut == 0 {
+                    return Err(EngineError::Invalid(format!(
+                        "The {noun} can't be taken out without changing the rest of the page, so it is left as it is."
+                    )));
+                }
+                // What could not be cut stays listed, with its pages as `stuck`, in the next read of the marks.
+            } else {
+                apply::remove(d, kind, &hit)?;
+            }
             Ok(hit)
         })
     })

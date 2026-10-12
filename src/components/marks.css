@@ -42,6 +42,13 @@
 .mk-has-row .tl-link:disabled {
   opacity: 0.45;
 }
+.mk-has-other {
+  flex-wrap: wrap;
+}
+.mk-has-note {
+  flex-basis: 100%;
+  margin: 0;
+}
 .mk-slots {
   display: flex;
   flex-direction: column;
@@ -227,4 +234,36 @@
 .mk-pic-name {
   fill: var(--ax-accent, #2e4b8f);
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+}
+/* The sheet's controls sit in a fieldset so a certified document can turn them all off at once. */
+.mk-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.mk-form > * {
+  flex: none;
+}
+.mk-form:disabled {
+  cursor: not-allowed;
+}
+.mk-form :disabled,
+.mk-form:disabled label > span {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* The rail's scrollbar (dark theme on Windows) must not narrow the sheet when it appears:
+   keep its gutter reserved, and let the insert selects shrink and ellipsise instead of clipping. */
+.mk .ax-body {
+  scrollbar-gutter: stable;
+}
+.mk select.tl-field {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

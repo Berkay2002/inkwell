@@ -45,6 +45,7 @@ import {
   fromMark,
   type Measure,
   markOf,
+  marksLocked,
   type MarksSheet,
   marksError,
   outcome,
@@ -61,6 +62,7 @@ import { useTextEdit } from "./textEdit";
 import { useTools } from "./toolsStore";
 
 const DATE = { year: 2026, month: 10, day: 11 };
+const NO_MORE = { foreign: [], annotated: [], signed: false, certified: false };
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const state = { rev: 2, pageCount: 12, sizes: [], path: "C:\\d\\Lease agreement.pdf", dirty: true, undo: "x", redo: null, redacted: false };
 
@@ -75,8 +77,8 @@ function open(kind: MarksSheet["kind"] = "headerFooter", p: Partial<MarksSheet> 
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(api.marksInfo).mockResolvedValue({ kinds: [] });
-  useMarks.setState({ sheet: null, info: {} });
+  vi.mocked(api.marksInfo).mockResolvedValue({ ...NO_MORE, kinds: [] });
+  useMarks.setState({ sheet: null, info: {}, more: {} });
   useProtect.setState({ sheet: null, security: {}, dismissed: {} });
   useConvert.setState({ sheet: null });
   useTools.setState({ sheet: null });
@@ -164,6 +166,17 @@ describe("readiness", () => {
   });
 });
 
+describe("marksLocked", () => {
+  it("locks the sheet on a certified document only", () => {
+    expect(marksLocked(false, { certified: true })).toBe(true);
+    expect(marksLocked(false, { certified: false })).toBe(false);
+    expect(marksLocked(false, undefined)).toBe(false);
+  });
+  it("leaves numbering other files open even when this one is certified", () => {
+    expect(marksLocked(true, { certified: true })).toBe(false);
+  });
+});
+
 describe("outcome", () => {
   it("names what is added and where", () => {
     const s = open("headerFooter", { text: ["", "", "Lease agreement", "", "", "Page <<1>> of <<n>>"] });
@@ -201,6 +214,28 @@ describe("markOf", () => {
     const w = open("watermark", { wmText: "X", wmOpacity: 35, wmScale: 60, wmRotation: 30 });
     const wb = fromMark(open("watermark"), markOf(w));
     expect([wb.wmText, wb.wmOpacity, wb.wmScale, wb.wmRotation]).toEqual(["X", 35, 60, 30]);
+  });
+});
+
+describe("shrink", () => {
+  it("is off until it is ticked and goes out with header/footer and Bates", () => {
+    expect(open("headerFooter").shrink).toBe(false);
+    const m = markOf(open("headerFooter", { shrink: true }));
+    expect(m.kind === "headerFooter" && m.shrink).toBe(true);
+    const b = markOf(open("bates", { shrink: true }));
+    expect(b.kind === "bates" && b.shrink).toBe(true);
+  });
+  it("comes back from the file, and a file without it reads as off", () => {
+    const on = fromMark(open("headerFooter"), markOf(open("headerFooter", { shrink: true })));
+    expect(on.shrink).toBe(true);
+    const old = markOf(open("headerFooter"));
+    if (old.kind === "headerFooter") delete old.shrink;
+    expect(fromMark(open("headerFooter", { shrink: true }), old).shrink).toBe(false);
+  });
+  it("is said in the outcome", () => {
+    const s = open("headerFooter", { text: ["", "", "", "", "", "x"], shrink: true });
+    expect(outcome(s, 12, false, DATE)).toMatch(/The page content is scaled down to fit between the margins\.$/);
+    expect(outcome({ ...s, shrink: false }, 12, false, DATE)).not.toMatch(/scaled down/);
   });
 });
 
@@ -286,7 +321,7 @@ describe("the sheet", () => {
   it("starts an Update from the settings the file was made with", async () => {
     const mark = markOf(open("watermark", { wmText: "SECRET", wmOpacity: 25 }));
     const kinds: MarkKindInfo[] = [{ kind: "watermark", pages: [0, 1, 2], mark }];
-    vi.mocked(api.marksInfo).mockResolvedValue({ kinds });
+    vi.mocked(api.marksInfo).mockResolvedValue({ ...NO_MORE, kinds });
     useMarks.setState({ sheet: null });
     useMarks.getState().open("watermark", 1);
     await flush();
@@ -339,6 +374,18 @@ describe("the sheet", () => {
     await useMarks.getState().remove("watermark");
     expect(api.marksRemove).toHaveBeenCalledWith(1, "watermark");
     expect(useMarks.getState().sheet?.done).toBe("Removed the watermark. You can undo it.");
+  });
+
+  it("removes another app's marks with the foreign flag, and keeps what the engine said", async () => {
+    vi.mocked(api.marksRemove).mockResolvedValue(state as never);
+    const foreign = [{ kind: "headerFooter" as const, pages: [0, 1], stuck: [1] }];
+    vi.mocked(api.marksInfo).mockResolvedValue({ ...NO_MORE, kinds: [], foreign, annotated: [2], signed: true });
+    open("headerFooter");
+    await useMarks.getState().refresh(1);
+    expect(useMarks.getState().more[1]).toEqual({ foreign, annotated: [2], signed: true, certified: false });
+    await useMarks.getState().remove("headerFooter", true);
+    expect(api.marksRemove).toHaveBeenCalledWith(1, "headerFooter", undefined, true);
+    expect(useMarks.getState().sheet?.done).toBe("Removed the header and footer from another app. On 1 page (2) it can't be taken out without changing the rest of the page, so it stays. You can undo it.");
   });
 
   it("numbers files into a picked folder and leaves this document alone", async () => {

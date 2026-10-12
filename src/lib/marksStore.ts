@@ -3,7 +3,7 @@ import { useStore } from "../store";
 import { useA11y } from "./a11y";
 import { usePreflight } from "./preflight";
 import * as api from "./api";
-import type { BatesFileResult, FontFamily, MarkDate, MarkKind, MarkKindInfo, MarkPicture, MarkStyle, PageMark, Rgb, SixTexts } from "./api";
+import type { BatesFileResult, FontFamily, ForeignMarkInfo, MarkDate, MarkKind, MarkKindInfo, MarkPicture, MarkStyle, PageMark, Rgb, SixTexts } from "./api";
 import { useAi } from "./aiStore";
 import { useAnnot } from "./annot";
 import { useConvert } from "./convertStore";
@@ -63,6 +63,8 @@ export interface MarksSheet {
   /** Top, bottom, left, right in points. */
   margins: [number, number, number, number];
   startNumber: number;
+  /** Header and footer, and Bates: scale the page's content down to fit between the margins. */
+  shrink: boolean;
   // watermark
   wmSource: "text" | "picture";
   wmText: string;
@@ -101,10 +103,21 @@ export interface MarksSheet {
   btResults: BatesFileResult[] | null;
 }
 
+/** What else the engine says about a document's marks (besides the kinds this app made). */
+export interface MarksMore {
+  /** Other apps' marks: only Remove. */
+  foreign: ForeignMarkInfo[];
+  /** 0-based pages with comments, links or fields. */
+  annotated: number[];
+  signed: boolean;
+  certified: boolean;
+}
+
 interface MarksStore {
   sheet: MarksSheet | null;
   /** The marks each open document has, as the engine last said. */
   info: Record<number, MarkKindInfo[]>;
+  more: Record<number, MarksMore>;
   open: (kind?: MarkKind, doc?: number) => void;
   close: () => void;
   setKind: (kind: MarkKind) => void;
@@ -112,7 +125,8 @@ interface MarksStore {
   refresh: (doc: number) => Promise<void>;
   /** Adds the mark of the open tab, or updates it where the document has one on those pages. */
   apply: () => Promise<void>;
-  remove: (kind: MarkKind) => Promise<void>;
+  /** `foreign`: the marks another app made. */
+  remove: (kind: MarkKind, foreign?: boolean) => Promise<void>;
   pickPicture: (target: "wm" | "bg", kind: "image" | "pdf") => Promise<void>;
   addBatesFiles: () => Promise<void>;
   numberFiles: () => Promise<void>;
@@ -135,6 +149,25 @@ export const KIND_TITLE: Record<MarkKind, string> = {
 };
 export const KINDS: MarkKind[] = ["headerFooter", "watermark", "background", "bates"];
 
+/** The rows for marks another app made. */
+export const FOREIGN_NAME: Record<MarkKind, string> = {
+  headerFooter: "Header/footer from another app",
+  watermark: "Watermark from another app",
+  background: "Background from another app",
+  bates: "Bates numbering from another app",
+};
+
+export const CERTIFIED_MARKS =
+  "This document is certified. Changing its pages would void the certification, so Inkwell leaves the document as it is.";
+/** A certified document is refused every change; numbered copies of other files are not this document. */
+export function marksLocked(numbering: boolean, more: Pick<MarksMore, "certified"> | undefined): boolean {
+  return !numbering && !!more?.certified;
+}
+
+export const SIGNED_MARKS =
+  "This document is signed. A change to its pages is saved after the signature, which will show that the file was changed. Anything removed in the same session stays in the saved file, unused.";
+export const SHRINK_KEEPS_ANNOTATIONS = "Comments and links keep their place.";
+
 /** The six places, in the order of `text`. */
 export const SLOTS = ["top left", "top centre", "top right", "bottom left", "bottom centre", "bottom right"] as const;
 
@@ -153,6 +186,7 @@ const blank = (doc: number, kind: MarkKind): MarksSheet => ({
   style: baseStyle(),
   margins: [36, 36, 72, 72],
   startNumber: 1,
+  shrink: false,
   wmSource: "text",
   wmText: "",
   wmPicture: null,
@@ -278,7 +312,7 @@ const pictureOf = (p: PictureChoice | null): MarkPicture | null => (p ? { file: 
 export function markOf(s: MarksSheet): PageMark {
   switch (s.kind) {
     case "headerFooter":
-      return { kind: "headerFooter", text: s.text, style: s.style, margins: s.margins, startNumber: Math.max(0, Math.floor(s.startNumber)) };
+      return { kind: "headerFooter", text: s.text, style: s.style, margins: s.margins, startNumber: Math.max(0, Math.floor(s.startNumber)), shrink: s.shrink };
     case "bates":
       return {
         kind: "bates",
@@ -289,6 +323,7 @@ export function markOf(s: MarksSheet): PageMark {
         slot: s.btSlot,
         style: s.style,
         margins: s.margins,
+        shrink: s.shrink,
       };
     case "watermark":
       return {
@@ -347,6 +382,8 @@ function sizeProblem(s: MarksSheet): string | null {
   return s.style.size > 0 && s.style.size <= 600 ? null : "The font size has to be between 1 and 600 points.";
 }
 
+const FIT = " The page content is scaled down to fit between the margins.";
+
 const quote = (t: string) => `'${t.replace(/\s+/g, " ").trim()}'`;
 const list = (items: string[]) => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
 
@@ -364,9 +401,10 @@ export function outcome(s: MarksSheet, count: number, existing: boolean, date: M
       const first = Math.max(0, Math.floor(s.startNumber));
       const used = s.text.map((t, i) => ({ t, i })).filter((x) => x.t.trim() !== "");
       if (used.length === 0) return "Nothing to add yet: type the text of a header or footer.";
-      if (used.length > 3) return `${verb} ${used.length} texts to the margins of ${on}.`;
+      const fit = s.shrink ? FIT : "";
+      if (used.length > 3) return `${verb} ${used.length} texts to the margins of ${on}.${fit}`;
       const parts = used.map((x) => `${quote(expand(x.t, first, count, date))} to the ${SLOTS[x.i]}`);
-      return `${verb} ${list(parts)} of ${on}.`;
+      return `${verb} ${list(parts)} of ${on}.${fit}`;
     }
     case "watermark": {
       const what = s.wmSource === "text" ? quote(s.wmText || "…") : s.wmPicture ? `the picture ${s.wmPicture.name}` : "a picture";
@@ -382,11 +420,12 @@ export function outcome(s: MarksSheet, count: number, existing: boolean, date: M
       const place = SLOTS[s.btSlot] ?? "bottom right";
       if (s.btFiles.length > 0) {
         const first = batesText(s.btPrefix, s.btDigits, s.btStart, s.btSuffix);
-        return `Writes a numbered copy of ${s.btFiles.length} ${s.btFiles.length === 1 ? "file" : "files"} to a folder, from ${first}, at the ${place} of each page. The files stay as they are.`;
+        return `Writes a numbered copy of ${s.btFiles.length} ${s.btFiles.length === 1 ? "file" : "files"} to a folder, from ${first}, at the ${place} of each page.${s.shrink ? FIT : ""} The files stay as they are.`;
       }
       const a = batesText(s.btPrefix, s.btDigits, s.btStart, s.btSuffix);
       const b = batesText(s.btPrefix, s.btDigits, s.btStart + pages.length - 1, s.btSuffix);
-      return pages.length === 1 ? `${verb} ${a} at the ${place} of ${on}.` : `${verb} ${a} to ${b} at the ${place} of ${on}.`;
+      const fit = s.shrink ? FIT : "";
+      return pages.length === 1 ? `${verb} ${a} at the ${place} of ${on}.${fit}` : `${verb} ${a} to ${b} at the ${place} of ${on}.${fit}`;
     }
   }
 }
@@ -395,7 +434,7 @@ export function outcome(s: MarksSheet, count: number, existing: boolean, date: M
 export function fromMark(base: MarksSheet, mark: PageMark): MarksSheet {
   switch (mark.kind) {
     case "headerFooter":
-      return { ...base, kind: "headerFooter", text: mark.text, style: mark.style, margins: mark.margins, startNumber: mark.startNumber };
+      return { ...base, kind: "headerFooter", text: mark.text, style: mark.style, margins: mark.margins, startNumber: mark.startNumber, shrink: mark.shrink ?? false };
     case "bates":
       return {
         ...base,
@@ -407,6 +446,7 @@ export function fromMark(base: MarksSheet, mark: PageMark): MarksSheet {
         btSlot: mark.slot,
         style: mark.style,
         margins: mark.margins,
+        shrink: mark.shrink ?? false,
       };
     case "watermark":
       return {
@@ -506,6 +546,7 @@ export const useMarks = create<MarksStore>((set, get) => {
   return {
     sheet: null,
     info: {},
+    more: {},
 
     open: (kind, docId) => {
       const doc = docId ?? st().active;
@@ -536,9 +577,9 @@ export const useMarks = create<MarksStore>((set, get) => {
 
     refresh: async (doc) => {
       try {
-        const { kinds } = await api.marksInfo(doc);
+        const { kinds, foreign = [], annotated = [], signed = false, certified = false } = await api.marksInfo(doc);
         if (!st().docs[doc]) return;
-        set((s) => ({ info: { ...s.info, [doc]: kinds } }));
+        set((s) => ({ info: { ...s.info, [doc]: kinds }, more: { ...s.more, [doc]: { foreign, annotated, signed, certified } } }));
       } catch {
         // A document that is still locked or being replaced has nothing to show yet.
       }
@@ -562,12 +603,15 @@ export const useMarks = create<MarksStore>((set, get) => {
       );
     },
 
-    remove: async (kind) => {
+    remove: async (kind, foreign = false) => {
       const s = get().sheet;
       if (!s) return;
+      // The pages where a section of another app cannot be cut cleanly are left as they are.
+      const stuck = foreign ? (get().more[s.doc]?.foreign.find((f) => f.kind === kind)?.stuck ?? []) : [];
+      const left = stuck.length > 0 ? ` On ${pagesPhrase(stuck, st().docs[s.doc]?.pageCount ?? 0)} it can't be taken out without changing the rest of the page, so it stays.` : "";
       await run(
-        () => api.marksRemove(s.doc, kind),
-        () => `Removed the ${KIND_NAME[kind]}. You can undo it.`,
+        () => (foreign ? api.marksRemove(s.doc, kind, undefined, true) : api.marksRemove(s.doc, kind)),
+        () => `Removed the ${KIND_NAME[kind]}${foreign ? " from another app" : ""}.${left} You can undo it.`,
       );
     },
 
@@ -637,7 +681,9 @@ useStore.subscribe((s, prev) => {
       if (!(id in p.info) && p.sheet?.doc !== id) return p;
       const info = { ...p.info };
       delete info[id];
-      return { info, sheet: p.sheet?.doc === id ? null : p.sheet };
+      const more = { ...p.more };
+      delete more[id];
+      return { info, more, sheet: p.sheet?.doc === id ? null : p.sheet };
     });
   }
 });
