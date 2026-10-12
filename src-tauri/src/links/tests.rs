@@ -1111,6 +1111,38 @@ fn the_count_the_confirm_shows_is_the_count_remove_all_removes() {
 }
 
 #[test]
+fn an_annots_array_reached_by_two_references_is_counted_once() {
+    // Object 5 is the array (one inline link), 6 is a reference to it: page 1 lists 6, page 2 lists 5. An inline link
+    // has no object number of its own, so the array is the only thing that tells the two pages hold the same one.
+    let more = vec![format!("[ {INLINE} ]"), "5 0 R".to_string()];
+    let bytes = two_page_doc("6 0 R", "5 0 R", "", &more);
+    let (eng, id, _, _d) = opened("annots-by-two-refs", &bytes);
+    let a = audit(&eng, id).unwrap();
+    assert_eq!(a.total, 1, "one link, however many references lead to its array");
+    assert_eq!(go(&eng, id, LinkOp::RemoveAll).count, 1);
+    assert_eq!(audit(&eng, id).unwrap().total, 0);
+    assert!(list(&eng, id, 0).unwrap().links.is_empty() && list(&eng, id, 1).unwrap().links.is_empty(), "the array both lead to is emptied");
+}
+
+#[test]
+fn the_audit_refuses_what_remove_all_refuses() {
+    // One page whose `/Annots` is longer than what is read: its links cannot all be counted, or removed.
+    let long = format!("[ {}]", "6 0 R ".repeat(MAX_ANNOTS + 1));
+    let bytes = two_page_doc(&long, "[]", "", &["[]".to_string(), link_annot("/Dest [3 0 R /Fit]")]);
+    let (eng, id, _, _d) = opened("audit-cut", &bytes);
+    let m = match audit(&eng, id) {
+        Err(EngineError::Invalid(m)) => m,
+        other => panic!("{other:?}"),
+    };
+    assert!(m.contains("Page 1 has more annotations than Inkwell reads"), "{m}");
+    let r = eng.apply_custom_unless_noop(id, "Remove all links".into(), EditSource::User, true, |d| Ok(remove_all(d, MAX_WALK)?.map(|done| done.pages)));
+    assert!(matches!(r, Err(EngineError::Invalid(ref m2)) if *m2 == m), "{r:?}");
+    // And a document over the page cap, by the one check both use.
+    assert!(check_pages(MAX_PAGES).is_ok());
+    assert!(matches!(check_pages(MAX_PAGES + 1), Err(EngineError::Invalid(m)) if m.contains("100000 pages")));
+}
+
+#[test]
 fn remove_all_has_one_budget_for_the_whole_document_and_refuses_it_whole() {
     // Three pages' worth of entries: the budget is what the walk reads in all, not what one page holds.
     let (eng, id, _, _d) = opened("budget", &remove_all_fixture());

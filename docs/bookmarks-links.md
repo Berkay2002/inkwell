@@ -60,8 +60,10 @@ change.
   the items of the other. Parent and children come from that walk and never from an item's own `/Parent`, so a
   wrong `/Parent` can't misplace a move or delete, and the work is bounded by the items, not by how the file
   links them. An item not found by the walk is `Stale`.
-- A certified document (a `/DocMDP` signature) is not changed: bookmarks and links refuse with a message, since any
-  change would void the certification. An op that changes nothing (same name, same place) makes no undo step.
+- A certified document (a `/DocMDP` signature) is not changed where the certification does not allow it. Bookmarks
+  change the document's structure, so they refuse at any `/P` (1, 2 or 3). Links are annotations: they refuse at `/P`
+  1 and 2 and are allowed at `/P` 3, which permits annotations. A certification that cannot be read counts as
+  certified, and the message says why. An op that changes nothing (same name, same place) makes no undo step.
 - Write: items are edited in place and relinked (`/First /Last /Prev /Next /Parent`), `/Count` of every ancestor is
   recomputed (sign = open or closed). A destination is `[page /XYZ x y null]` in user space. Titles are written as a
   plain string when ASCII, else UTF-16BE. Add or move into a closed parent opens it. Moving into itself or a

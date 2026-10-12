@@ -50,6 +50,7 @@ describe("summary texts", () => {
 
   it("export texts name the file and what was left out", () => {
     expect(commentsExportText({ count: 1, leftOut: 2 }, "a.xfdf")).toBe("Exported 1 comment to a.xfdf. 2 comments left out: measurements, and kinds the file cannot carry.");
+    expect(commentsExportText({ count: 3, leftOut: 0, longText: 2 }, "a.xfdf")).toBe("Exported 3 comments to a.xfdf. 2 texts longer than 1 MB left empty.");
     expect(formExportText({ count: 4 }, "a.fdf")).toBe("Exported 4 fields to a.fdf.");
     expect(formExportText({ count: 4, leftOut: 1 }, "a.fdf")).toBe("Exported 4 fields to a.fdf. 1 password field left out.");
   });

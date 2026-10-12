@@ -114,19 +114,32 @@ fn field(what: &str, s: &str, max: usize) -> Result<String> {
     Ok(t)
 }
 
+/// Writes `bytes` to a temp file of its own name (two writers, even of two processes, never share one), flushes it to
+/// disk, and renames it over `path` (then flushes the folder on Unix), so a power loss leaves the old file or the new
+/// one and never an empty one.
+// shortcut: no lock between processes: two writers each read the index and the later rename wins. Upgrade: a lock file
+// next to the index, if the manager ever runs twice at once.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(io)?;
-    std::fs::rename(&tmp, path).map_err(|e| {
+    use std::io::Write;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.{}.tmp", new_id()?));
+    let done = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all())).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = done {
         let _ = std::fs::remove_file(&tmp);
-        io(e)
-    })
+        return Err(io(e));
+    }
+    #[cfg(unix)]
+    if let Some(d) = path.parent().and_then(|d| std::fs::File::open(d).ok()) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 // ---- the index -------------------------------------------------------------------------------
 
-/// Reads the index. A file that is not there is an empty library, and a damaged one is set aside as
-/// `stamps.json.bad` and reads as empty. A file that cannot be opened or read is an `Err`: a writer must not take
+/// Reads the index. A file that is not there is an empty library, and a damaged one reads as empty: a writer (not a
+/// reader, which moves nothing) sets it aside first as `stamps.json.<time>.<random>.bad`, a name of its own so an
+/// earlier backup is never overwritten. A file that cannot be opened or read is an `Err`: a writer must not take
 /// that for an empty library and store over it. `check_pictures` drops entries whose PNG is missing (what a reader
 /// shows); a writer keeps them, so a picture that is briefly absent is not forgotten for good.
 fn load(dir: &Path, check_pictures: bool) -> Result<(Vec<Stamp>, Option<String>)> {
@@ -140,7 +153,12 @@ fn load(dir: &Path, check_pictures: bool) -> Result<(Vec<Stamp>, Option<String>)
     file.take(MAX_INDEX + 1).read_to_end(&mut raw).map_err(io)?;
     let parsed = if raw.len() as u64 <= MAX_INDEX { serde_json::from_slice::<IndexFile>(&raw).ok() } else { None };
     let Some(index) = parsed else {
-        let _ = std::fs::rename(&path, dir.join(format!("{INDEX}.bad")));
+        if !check_pictures {
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            if let Ok(id) = new_id() {
+                let _ = std::fs::rename(&path, dir.join(format!("{INDEX}.{secs}.{id}.bad")));
+            }
+        }
         return Ok((Vec::new(), Some("The custom stamps list was damaged, so it starts empty.".into())));
     };
     let total = index.stamps.len();
@@ -166,8 +184,25 @@ fn load(dir: &Path, check_pictures: bool) -> Result<(Vec<Stamp>, Option<String>)
     Ok((stamps, warning))
 }
 
+/// How old a `*.tmp` file in the library is before a writer deletes it (a crash between create and rename leaves one;
+/// a write in progress is far younger).
+const STALE_TMP: Duration = Duration::from_secs(60);
+
+fn sweep_tmp(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        let old = p.extension().is_some_and(|x| x == "tmp")
+            && e.metadata().ok().filter(std::fs::Metadata::is_file).and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STALE_TMP);
+        if old {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 fn store(dir: &Path, stamps: &[Stamp]) -> Result<()> {
     std::fs::create_dir_all(dir).map_err(io)?;
+    sweep_tmp(dir);
     let json = serde_json::json!({ "stamps": stamps });
     write_atomic(&dir.join(INDEX), serde_json::to_vec_pretty(&json).map_err(io)?.as_slice())
 }
@@ -245,6 +280,48 @@ fn decode_picture(bytes: &[u8]) -> Result<image::RgbaImage> {
     from_pixmap(&img.to_pixmap()?)
 }
 
+/// Every image the page names under `/Resources /XObject`, and those of the forms it draws (four levels down), must be
+/// at most [`MAX_SOURCE_PIXELS`] by its own `/Width` x `/Height`: the page is drawn with them decoded, so one huge
+/// scan would take the memory before the time limit could help.
+// shortcut: inline (BI) images, an image's mask, and images in appearance streams (annotations), patterns and Type 3
+// fonts are not walked, and at most 4096 resource entries are looked at. Upgrade: a memory cap on the draw itself, if
+// a page gets past this.
+fn check_images(bytes: &[u8], page: i32) -> Result<()> {
+    let Ok(doc) = PdfDocument::from_bytes(bytes) else { return Ok(()) };
+    let Ok(Some(res)) = doc.find_page(page).and_then(|p| p.get_dict_inheritable("Resources")) else { return Ok(()) };
+    let mut stack = vec![(res, 0u8)];
+    let mut left = 4096u32;
+    while let Some((res, depth)) = stack.pop() {
+        let Ok(Some(xo)) = res.get_dict("XObject") else { continue };
+        for i in 0..xo.dict_len().unwrap_or(0) as i32 {
+            if left == 0 {
+                return Ok(());
+            }
+            left -= 1;
+            let Ok(Some(x)) = xo.get_dict_val(i) else { continue };
+            let subtype = x.get_dict("Subtype").ok().flatten().and_then(|s| s.as_name().ok());
+            match subtype.as_deref() {
+                Some(t) if t == b"Image" => {
+                    // A size that is missing, not an integer, negative or unreadable is a size we cannot bound.
+                    let dim = |k: &str| x.get_dict(k).ok().flatten().filter(|v| v.is_int().unwrap_or(false)).and_then(|v| v.as_int().ok()).and_then(|v| u64::try_from(v).ok());
+                    match (dim("Width"), dim("Height")) {
+                        (Some(w), Some(h)) if w * h <= MAX_SOURCE_PIXELS => {}
+                        (Some(_), Some(_)) => return Err(bad("that page holds a picture with too many pixels (more than 50 megapixels)")),
+                        _ => return Err(bad("that page holds a picture whose size cannot be read")),
+                    }
+                }
+                Some(t) if t == b"Form" && depth < 4 => {
+                    if let Ok(Some(r)) = x.get_dict("Resources") {
+                        stack.push((r, depth + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Page `page` (0-based, the first when None) of a PDF as pixels at [`PDF_DPI`], transparent where the page
 /// paints nothing, cut to the part that has something on it.
 // shortcut: a page with a white background shape keeps it (only an unpainted page is transparent); cropping to
@@ -259,6 +336,7 @@ fn render_pdf(bytes: &[u8], page: Option<u32>, limit: Duration) -> Result<image:
     if count < 1 || p >= count {
         return Err(bad(format!("that PDF has {count} page{}", if count == 1 { "" } else { "s" })));
     }
+    check_images(bytes, p)?;
     let page = doc.load_page(p)?;
     let b = page.bounds()?;
     let longest = (b.x1 - b.x0).max(b.y1 - b.y0).max(1.0);
@@ -352,6 +430,13 @@ fn read_source(path: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A PDF: `%PDF-` in the first 1024 bytes, unless the file starts with a picture format's own signature (a JPEG or PNG
+/// can carry that text in its metadata). WebP is not here: MuPDF does not read it, so it is refused as not a picture.
+fn is_pdf(bytes: &[u8]) -> bool {
+    const PICTURES: [&[u8]; 7] = [b"\x89PNG", b"\xff\xd8\xff", b"II*\0", b"MM\0*", b"GIF87a", b"GIF89a", b"BM"];
+    !PICTURES.iter().any(|m| bytes.starts_with(m)) && bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-")
+}
+
 pub fn create(dir: &Path, src: &Source, name: &str, category: &str) -> Result<Stamp> {
     let name = field("A stamp's name", name, MAX_NAME)?;
     if name.is_empty() {
@@ -361,7 +446,7 @@ pub fn create(dir: &Path, src: &Source, name: &str, category: &str) -> Result<St
     let category = if category.is_empty() { DEFAULT_CATEGORY.to_string() } else { category };
 
     let bytes = read_source(src.path)?;
-    let img = if bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-") { render_pdf(&bytes, src.page, RENDER_LIMIT)? } else { decode_picture(&bytes)? };
+    let img = if is_pdf(&bytes) { render_pdf(&bytes, src.page, RENDER_LIMIT)? } else { decode_picture(&bytes)? };
     let img = fit_side(img, MAX_SIDE);
     let (png, thumb) = (encode_png(&img)?, encode_png(&fit_side(img.clone(), THUMB_SIDE))?);
 

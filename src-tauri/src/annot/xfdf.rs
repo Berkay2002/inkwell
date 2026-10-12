@@ -213,6 +213,11 @@ fn string(o: &PdfObject, k: &str, b: &Budget) -> String {
     }
     let Some(v) = get(o, k) else { return String::new() };
     let object = indirect_number(&v);
+    // A shared text over the limit is dropped by every comment that uses it: not copied, not charged again.
+    if object.and_then(|n| b.string_len_of(n)).is_some_and(|n| n > MAX_STR) {
+        b.note_too_long();
+        return String::new();
+    }
     let s = match object.and_then(|n| b.string_of(n)) {
         Some(s) => Some(s),
         None => {
@@ -222,15 +227,26 @@ fn string(o: &PdfObject, k: &str, b: &Budget) -> String {
                 text(&v)
             };
             if let (Some(n), Some(s)) = (object, &s) {
-                b.keep_string(n, s);
+                // Over the limit it is dropped below, so it is neither kept nor charged (only its length is).
+                if s.len() > MAX_STR {
+                    b.keep_long(n, s.len());
+                } else {
+                    b.keep_string(n, s);
+                }
             }
             s
         }
     };
-    if !b.take(s.as_ref().map_or(0, String::len)) {
+    let n = s.as_ref().map_or(0, String::len);
+    // Over the limit: dropped before it is charged, so it does not use up the export budget.
+    if n > MAX_STR {
+        b.note_too_long();
         return String::new();
     }
-    s.filter(|s| s.len() <= MAX_STR).unwrap_or_default()
+    if !b.take(n) {
+        return String::new();
+    }
+    s.unwrap_or_default()
 }
 
 /// A name entry, as text. Only a PDF name counts, never a string: a string can be large and shared by
@@ -349,14 +365,15 @@ fn read(o: &PdfObject, sub: Sub, b: &Budget) -> Comment {
 }
 
 /// Every comment of the document that has a type files can carry, in page order, and how many were
-/// left out for having another type (carets, attachments, sound, ...). Unnamed comments get a stable
-/// name for this export only; nothing is written to the document.
-fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize)> {
+/// left out for having another type (carets, attachments, sound, ...), and how many text entries were left empty for
+/// being over 1 MB (the importer refuses a file with a longer value, so writing one would make the file unreadable).
+/// Unnamed comments get a stable name for this export only; nothing is written to the document.
+fn collect(doc: &PdfDocument) -> Result<(Vec<Comment>, usize, usize)> {
     collect_within(doc, MAX_EXPORT_COPIED)
 }
 
 /// [`collect`] with the copy bound given (a test uses a small one: a shape that fills the real bound is slow to build).
-fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usize)> {
+fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usize, usize)> {
     let budget = Budget::with_limit(limit);
     let mut left = 0usize;
     // Measurements are left out (their /Measure scale has no place in these files), and so are their replies.
@@ -399,7 +416,7 @@ fn collect_within(doc: &PdfDocument, limit: usize) -> Result<(Vec<Comment>, usiz
             c.parent = names.get(&p).cloned().unwrap_or_default();
         }
     }
-    Ok((items, left))
+    Ok((items, left, budget.too_long()))
 }
 
 // ---- export --------------------------------------------------------------------------------------
@@ -581,16 +598,18 @@ pub struct Exported {
     pub count: usize,
     /// Comments left out: types the files cannot carry (carets, attachments, sound), measurements and their replies.
     pub left_out: usize,
+    /// Text entries left empty for being over 1 MB, which a file Inkwell reads cannot hold.
+    pub long_text: usize,
 }
 
 /// The file bytes for every comment of the open document. Read-only: allowed on a signed or certified one.
 pub fn export(eng: &Engine, doc: DocId, format: Format, file_name: &str) -> Result<(Vec<u8>, Exported)> {
-    let (items, left_out) = eng.read_custom(doc, collect)?;
+    let (items, left_out, long_text) = eng.read_custom(doc, collect)?;
     let bytes = match format {
         Format::Fdf => fdf(&items, file_name),
         _ => xfdf(&items, file_name).into_bytes(),
     };
-    Ok((bytes, Exported { count: items.len(), left_out }))
+    Ok((bytes, Exported { count: items.len(), left_out, long_text }))
 }
 
 // ---- parsing the files ---------------------------------------------------------------------------

@@ -3005,3 +3005,204 @@ fn a_form_too_large_to_check_for_a_certification_refuses_typing_and_says_so() {
     assert!(!err.contains("locked by a signature"), "{err}");
     assert_eq!(field(&eng, id, "A").value, "");
 }
+
+/// Marks `Sig` as signed with a FieldMDP `/Reference` only: no `/Lock`, no DocMDP, so the document is signed and not certified.
+fn sign_fieldmdp(eng: &Engine, id: DocId, action: &str, fields: &[&str]) {
+    eng.apply_custom(id, "Sign".into(), EditSource::User, false, |d| {
+        let entries = scan(d)?;
+        let e = entries.iter().find(|e| e.name == "Sig").expect("a signature field");
+        let mut f = e.field.clone();
+        let mut params = d.new_dict()?;
+        put_name(&mut params, "Action", action)?;
+        let mut a = d.new_array()?;
+        for n in fields {
+            a.array_push(PdfObject::new_string(n)?)?;
+        }
+        params.dict_put("Fields", a)?;
+        let mut r = d.new_dict()?;
+        put_name(&mut r, "TransformMethod", "FieldMDP")?;
+        r.dict_put("TransformParams", params)?;
+        let mut refs = d.new_array()?;
+        refs.array_push(r)?;
+        let mut v = d.new_dict()?;
+        put_name(&mut v, "Type", "Sig")?;
+        v.dict_put("Reference", refs)?;
+        f.dict_put("V", v)?;
+        Ok(vec![e.page])
+    })
+    .unwrap();
+}
+
+/// Changes a property of `name`, moves it, and deletes it, in that order: what each said.
+fn touch_field(eng: &Engine, id: DocId, name: &str) -> [std::result::Result<(), String>; 3] {
+    let w = field(eng, id, name);
+    let patch = FieldPatch { tooltip: Some("Tip".into()), required: Some(true), ..Default::default() };
+    [
+        edit_one(eng, id, w.page, w.xref, &patch, EditSource::User).map(|_| ()).map_err(|e| e.to_string()),
+        move_one(eng, id, w.page, w.xref, [100.0, 300.0, 260.0, 330.0], EditSource::User).map(|_| ()).map_err(|e| e.to_string()),
+        delete_many(eng, id, &[(w.page, w.xref)], EditSource::User).map(|_| ()).map_err(|e| e.to_string()),
+    ]
+}
+
+/// A FieldMDP reference naming `fields` under `action`; `params` false leaves `/TransformParams` out.
+fn fieldmdp(d: &PdfDocument, action: &str, fields: &[PdfObject], params: bool) -> Result<PdfObject> {
+    let mut r = d.new_dict()?;
+    put_name(&mut r, "TransformMethod", "FieldMDP")?;
+    if params {
+        let mut p = d.new_dict()?;
+        put_name(&mut p, "Action", action)?;
+        let mut a = d.new_array()?;
+        for n in fields {
+            a.array_push(n.clone())?;
+        }
+        p.dict_put("Fields", a)?;
+        r.dict_put("TransformParams", p)?;
+    }
+    Ok(r)
+}
+/// Signs `Sig` with the `/Reference` array `refs` builds (a way to write a FieldMDP lock a reader may fail to read in full).
+fn sign_refs(eng: &Engine, id: DocId, refs: impl Fn(&PdfDocument) -> Result<PdfObject>) {
+    eng.apply_custom(id, "Sign".into(), EditSource::User, false, |d| {
+        let entries = scan(d)?;
+        let e = entries.iter().find(|e| e.name == "Sig").expect("a signature field");
+        let mut f = e.field.clone();
+        let mut v = d.new_dict()?;
+        put_name(&mut v, "Type", "Sig")?;
+        v.dict_put("Reference", refs(d)?)?;
+        f.dict_put("V", v)?;
+        Ok(vec![e.page])
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_lock_that_cannot_be_read_in_full_locks_every_field() {
+    let one = |d: &PdfDocument, r: PdfObject| -> Result<PdfObject> {
+        let mut refs = d.new_array()?;
+        refs.array_push(r)?;
+        Ok(refs)
+    };
+    let name = |n: &str| PdfObject::new_string(n).unwrap();
+    type Make = Box<dyn Fn(&PdfDocument) -> Result<PdfObject>>;
+    let cases: Vec<(&str, Make)> = vec![
+        ("no /TransformParams", Box::new(move |d| one(d, fieldmdp(d, "", &[], false)?))),
+        ("Include names past 4096", Box::new(move |d| {
+            let mut names: Vec<PdfObject> = (0..4096).map(|i| name(&format!("Z{i}"))).collect();
+            names.push(name("Sum"));
+            one(d, fieldmdp(d, "Include", &names, true)?)
+        })),
+        ("an Include entry that is not text", Box::new(move |d| one(d, fieldmdp(d, "Include", &[PdfObject::new_int(7)?, name("Other")], true)?))),
+    ];
+    for (i, (what, refs)) in cases.into_iter().enumerate() {
+        let (eng, id, _) = script_form(&format!("fieldmdp-unreadable-{i}"), &["Sum", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        sign_refs(&eng, id, refs);
+        let (n, rects) = (steps(&eng, id), all_rects(&eng, id));
+        for name in ["Sum", "Other"] {
+            for r in touch_field(&eng, id, name) {
+                let e = r.unwrap_err();
+                assert!(e.contains("locked by a signature") && e.contains(name), "{what} {name}: {e}");
+            }
+        }
+        assert_eq!((steps(&eng, id), all_rects(&eng, id)), (n, rects), "{what}: no step, nothing moved");
+    }
+}
+
+#[test]
+fn a_reference_that_is_one_dictionary_is_read_as_the_one_entry_it_would_be() {
+    let (eng, id, _) = script_form("fieldmdp-single-dict", &["Sum", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign_refs(&eng, id, |d| fieldmdp(d, "Include", &[PdfObject::new_string("Sum").unwrap()], true));
+    for r in touch_field(&eng, id, "Sum") {
+        let e = r.unwrap_err();
+        assert!(e.contains("locked by a signature") && e.contains("Sum"), "{e}");
+    }
+    for r in touch_field(&eng, id, "Other") {
+        r.unwrap();
+    }
+}
+
+#[test]
+fn a_field_a_fieldmdp_signature_covers_is_not_edited_moved_or_deleted() {
+    // (action, fields it names, covered, free)
+    let cases: [(&str, &[&str], &[&str], &[&str]); 3] = [
+        ("Include", &["Sum"], &["Sum"], &["Other", "Sig2"]),
+        ("Exclude", &["Other"], &["Sum", "Sig2"], &["Other"]),
+        ("All", &[], &["Sum", "Other", "Sig2"], &[]),
+    ];
+    for (i, (action, named, covered, free)) in cases.into_iter().enumerate() {
+        let (eng, id, _) = script_form(&format!("fieldmdp-author-{i}"), &["Sum", "Other"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        // A second signature field, not signed: a lock covers it like any field.
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig2", [72.0, 450.0, 240.0, 490.0]));
+        sign_fieldmdp(&eng, id, action, named);
+        let (n, rects) = (steps(&eng, id), all_rects(&eng, id));
+        for name in covered {
+            for r in touch_field(&eng, id, name) {
+                let e = r.unwrap_err();
+                assert!(e.contains("locked by a signature") && e.contains(name), "{action} {name}: {e}");
+            }
+        }
+        assert_eq!((steps(&eng, id), all_rects(&eng, id)), (n, rects), "{action}: no step, nothing moved");
+        for name in covered {
+            assert_eq!(field(&eng, id, name).name, *name, "{action}: still there");
+        }
+        for name in free {
+            for r in touch_field(&eng, id, name) {
+                r.unwrap_or_else(|e| panic!("{action} {name}: {e}"));
+            }
+        }
+        assert_eq!(steps(&eng, id), n + 3 * free.len(), "{action}: one step per change");
+    }
+}
+
+#[test]
+fn the_lock_of_an_unsigned_signature_field_covers_nothing() {
+    let (eng, id, _) = script_form("fieldmdp-author-unsigned-lock", &["Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig2", [72.0, 450.0, 240.0, 490.0]));
+    eng.apply_custom(id, "Lock".into(), EditSource::User, false, |d| {
+        let entries = scan(d)?;
+        let e = entries.iter().find(|e| e.name == "Sig2").expect("a signature field");
+        let mut f = e.field.clone();
+        let mut l = d.new_dict()?;
+        put_name(&mut l, "Action", "All")?;
+        f.dict_put("Lock", l)?;
+        Ok(vec![e.page])
+    })
+    .unwrap();
+    let n = steps(&eng, id);
+    for r in touch_field(&eng, id, "Other") {
+        r.unwrap();
+    }
+    assert_eq!(steps(&eng, id), n + 3, "edit, move and delete are one step each");
+}
+
+#[test]
+fn a_signed_signature_field_is_not_edited_moved_or_deleted() {
+    let (eng, id, _) = script_form("fieldmdp-author-sig", &["Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    let before = field(&eng, id, "Sig");
+    sign_fieldmdp(&eng, id, "Include", &["Other"]);
+    let (n, rects) = (steps(&eng, id), all_rects(&eng, id));
+    for r in touch_field(&eng, id, "Sig") {
+        let e = r.unwrap_err();
+        assert!(e.contains("is signed and cannot be changed"), "{e}");
+    }
+    assert_eq!((steps(&eng, id), all_rects(&eng, id)), (n, rects));
+    assert_eq!(field(&eng, id, "Sig").xref, before.xref);
+}
+
+#[test]
+fn a_radio_button_may_not_join_a_group_a_signature_covers() {
+    let (eng, id, _) = script_form("fieldmdp-author-radio", &["Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    add1(&eng, id, 0, nf(FieldKind::Radio, "Choice", [72.0, 300.0, 90.0, 318.0]));
+    sign_fieldmdp(&eng, id, "Include", &["Choice"]);
+    let n = steps(&eng, id);
+    let join = NewField { group: Some("Choice".into()), name: None, ..nf(FieldKind::Radio, "x", [100.0, 300.0, 118.0, 318.0]) };
+    let e = add_one(&eng, id, 0, &join, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("locked by a signature"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step");
+    // A new field of its own is not a change to a covered one.
+    add1(&eng, id, 0, nf(FieldKind::Text, "Fresh", [72.0, 250.0, 240.0, 270.0]));
+}

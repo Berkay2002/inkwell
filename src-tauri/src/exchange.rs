@@ -66,8 +66,12 @@ pub const MAX_EXPORT_COPIED: usize = 256 << 20;
 pub struct Budget {
     left: Cell<usize>,
     gone: Cell<bool>,
+    /// Text entries dropped for being over [`MAX_STR`].
+    too_long: Cell<usize>,
     /// Indirect strings and number lists already read, by object number: read once, then cloned.
     strings: RefCell<HashMap<i32, String>>,
+    /// Indirect strings over [`MAX_STR`]: only the length is kept (they are dropped, so not charged).
+    long: RefCell<HashMap<i32, usize>>,
     numbers: RefCell<HashMap<(i32, usize), Vec<f32>>>,
 }
 
@@ -77,7 +81,7 @@ impl Budget {
     }
 
     pub fn with_limit(bytes: usize) -> Budget {
-        Budget { left: Cell::new(bytes), gone: Cell::new(false), strings: RefCell::default(), numbers: RefCell::default() }
+        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default() }
     }
 
     /// Charges `n` bytes. When they are not there the budget is gone for good and this says false: the
@@ -108,6 +112,16 @@ impl Budget {
         }
     }
 
+    /// An indirect string over [`MAX_STR`] was read: its length is kept, nothing is copied or charged.
+    pub fn keep_long(&self, object: i32, len: usize) {
+        self.long.borrow_mut().insert(object, len);
+    }
+
+    /// The length of an indirect string read before, without copying it.
+    pub fn string_len_of(&self, object: i32) -> Option<usize> {
+        self.strings.borrow().get(&object).map(String::len).or_else(|| self.long.borrow().get(&object).copied())
+    }
+
     /// An indirect number list read before, by object number and cap.
     pub fn numbers_of(&self, object: i32, cap: usize) -> Option<Vec<f32>> {
         self.numbers.borrow().get(&(object, cap)).cloned()
@@ -127,6 +141,16 @@ impl Budget {
 
     pub fn gone(&self) -> bool {
         self.gone.get()
+    }
+
+    /// A text entry was left empty for being over [`MAX_STR`].
+    pub fn note_too_long(&self) {
+        self.too_long.set(self.too_long.get() + 1);
+    }
+
+    /// How many text entries [`Budget::note_too_long`] counted.
+    pub fn too_long(&self) -> usize {
+        self.too_long.get()
     }
 
     /// Refuses the file once the budget is gone.

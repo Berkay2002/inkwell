@@ -504,8 +504,9 @@ export const useNav = create<Store>((set, get) => {
     askAudit: async (doc) => {
       try {
         patch(doc, { audit: await api.linksAudit(doc) });
-      } catch {
-        patch(doc, { audit: null });
+      } catch (e) {
+        // A document the audit refuses (Remove all would too): the reason is shown, not "Checking" for good.
+        patch(doc, { audit: null, notice: String(e) });
       }
     },
     showProblems: false,
@@ -534,6 +535,16 @@ export const SIGNED_LINKS =
 
 /** A link Inkwell follows in Read mode (anything else is kept as it is and does nothing). */
 export const isLive = (t: api.LinkTarget) => t.kind === "page" || t.kind === "uri" || t.kind === "file";
+
+/**
+ * Whether the document's links may be changed, and whether it is signed. Both belong to the document, so every loaded
+ * page says the same: read from `page` (the selected link's, else the current one) and, while that page has not loaded,
+ * from any page that has.
+ */
+export function linkLock(d: DocNav | undefined, page: number): { locked: string | null; signed: boolean } {
+  const e = d?.links[page] ?? Object.values(d?.links ?? {})[0];
+  return { locked: e?.locked ?? null, signed: e?.signed ?? false };
+}
 
 /**
  * What pressing a link shows in Read mode: the style the link asks for (`/H`), and nothing for a link that

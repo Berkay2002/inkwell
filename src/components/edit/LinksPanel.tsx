@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { linkCheckUrl, linkPickFile, type LinkHighlight, type LinkTarget, type NewLinkTarget, type PageLink } from "../../lib/api";
-import { SIGNED_LINKS, confirmOpen, isProblem, linkState, rgbToHex, stateLabel, targetLabel, useNav, viewTarget } from "../../lib/nav";
+import { SIGNED_LINKS, confirmOpen, isProblem, linkLock, linkState, rgbToHex, stateLabel, targetLabel, useNav, viewTarget } from "../../lib/nav";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
 
@@ -34,8 +34,8 @@ export function LinksPanel({ doc }: { doc: DocState }) {
   const all = d?.links[doc.currentPage]?.links ?? [];
   const here = showProblems ? all.filter((k) => isProblem(linkState(k.target))) : all;
   // Certified: the engine leaves the links alone, so the controls that change them are off, with the reason.
-  const locked = d?.links[doc.currentPage]?.locked ?? null;
-  const signed = d?.links[doc.currentPage]?.signed ?? false;
+  // It is the document's, so it is read from the page of the selected link too, and from any loaded page.
+  const { locked, signed } = linkLock(d, d?.selectedLink?.page ?? doc.currentPage);
   const sel: PageLink | null = d?.selectedLink ? (d.links[d.selectedLink.page]?.links.find((k) => k.id === d.selectedLink!.id) ?? null) : null;
 
   // Leaving the section stops drawing.

@@ -522,6 +522,52 @@ fn an_export_is_not_held_to_the_import_text_budget_but_still_has_a_bound() {
 }
 
 #[test]
+fn a_comment_text_over_1_mb_is_left_empty_and_counted_so_the_file_still_imports() {
+    // The importer refuses a value over 1 MB (and so the whole file), so an export that carried it would not read back.
+    let objs = [format!("({})", "x".repeat(1_500_000)), "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (long) /Contents 4 0 R /P 3 0 R >>".to_string(), "<< /Type /Annot /Subtype /Text /Rect [40 10 60 30] /NM (short) /Contents (kept) /P 3 0 R >>".to_string()];
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "long-contents");
+    let (eng, id, _) = open_bytes(&d, "long.pdf", &one_page_pdf("", "/Annots [5 0 R 6 0 R]", &refs));
+    for fmt in [Format::Xfdf, Format::Fdf] {
+        let (bytes, done) = export(&eng, id, fmt, "long.pdf").unwrap();
+        assert_eq!((done.count, done.left_out, done.long_text), (2, 0, 1), "{fmt:?}");
+        let back = parse(&bytes).unwrap();
+        let text = |n: &str| back.items.iter().find(|c| c.name == n).map(|c| c.contents.clone());
+        assert_eq!((text("long").as_deref(), text("short").as_deref()), (Some(""), Some("kept")), "{fmt:?}");
+    }
+}
+
+#[test]
+fn a_shared_text_over_1_mb_is_not_charged_to_the_export_budget_by_every_comment() {
+    // 200 comments share one 1.5 MB /Contents: charged each, that is 300 MB, over the 256 MB export bound.
+    let n = 200;
+    let annots: String = (0..n).map(|i| format!("{} 0 R ", 5 + i)).collect();
+    let mut objs = vec![format!("({})", "x".repeat(1_500_000))];
+    objs.extend((0..n).map(|i| format!("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n{i}) /Contents 4 0 R /P 3 0 R >>")));
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "shared-long-contents");
+    let (eng, id, _) = open_bytes(&d, "shared.pdf", &one_page_pdf("", &format!("/Annots [{annots}]"), &refs));
+    let (bytes, done) = export(&eng, id, Format::Xfdf, "shared.pdf").unwrap();
+    assert_eq!((done.count, done.left_out, done.long_text), (n, 0, n));
+    assert!(bytes.len() < 200_000, "no text was carried");
+}
+
+#[test]
+fn distinct_texts_over_1_mb_are_dropped_before_they_are_charged_to_the_export_budget() {
+    // 10 comments, each its own 1.5 MB indirect /Contents: kept and charged that is 15 MB, over the 8 MB bound,
+    // although every one is dropped (the bound is 256 MB in the app: 200 such comments).
+    let n = 10;
+    let annots: String = (0..n).map(|i| format!("{} 0 R ", 4 + n + i)).collect();
+    let mut objs: Vec<String> = (0..n).map(|_| format!("({})", "x".repeat(1_500_000))).collect();
+    objs.extend((0..n).map(|i| format!("<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /NM (n{i}) /Contents {} 0 R /P 3 0 R >>", 4 + i)));
+    let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+    let d = dir("xfdf", "distinct-long-contents");
+    let (eng, id, _) = open_bytes(&d, "distinct.pdf", &one_page_pdf("", &format!("/Annots [{annots}]"), &refs));
+    let (items, left_out, long_text) = eng.read_custom(id, |d| collect_within(d, 8 << 20)).unwrap();
+    assert_eq!((items.len(), left_out, long_text), (n, 0, n));
+}
+
+#[test]
 fn name_entries_given_as_one_shared_string_are_not_read_at_all() {
     // /Name, /RT, /IT and /Subtype are names: a 20 MB string behind each of 100 comments would be 2 GB of copies.
     let big = format!("2 0 obj\n({})\nendobj\n", "x".repeat(20_000_000));

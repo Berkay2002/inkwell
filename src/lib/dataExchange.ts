@@ -24,6 +24,8 @@ export interface CommentsImported {
 export interface CommentsExported {
   count: number;
   leftOut: number;
+  /** Text entries left empty for being over 1 MB, which a file Inkwell reads cannot hold. */
+  longText?: number;
 }
 export interface FormSummary {
   set: number;
@@ -88,7 +90,8 @@ export function formImportText(s: FormSummary, signed: boolean): string {
 
 export function commentsExportText(r: CommentsExported, file: string): string {
   const left = r.leftOut ? ` ${plural(r.leftOut, "comment")} left out: measurements, and kinds the file cannot carry.` : "";
-  return `Exported ${plural(r.count, "comment")} to ${file}.${left}`;
+  const long = r.longText ? ` ${plural(r.longText, "text")} longer than 1 MB left empty.` : "";
+  return `Exported ${plural(r.count, "comment")} to ${file}.${left}${long}`;
 }
 
 export function formExportText(r: FormExported, file: string): string {

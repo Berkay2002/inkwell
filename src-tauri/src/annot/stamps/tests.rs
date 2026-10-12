@@ -157,6 +157,83 @@ fn a_pdf_page_becomes_a_stamp_transparent_where_the_page_paints_nothing() {
 }
 
 #[test]
+fn a_picture_that_mentions_pdf_in_its_metadata_is_still_a_picture() {
+    let d = dir("stamps", "pdf-text-in-picture");
+    let lib = d.join("lib");
+    // The text is in a PNG text chunk before the pixels, and in a JPEG comment segment.
+    let mut png = half_red(8, 4);
+    let chunk_type_and_data = b"tEXtComment\0see %PDF-1.7 for details";
+    let mut chunk = (chunk_type_and_data.len() as u32 - 4).to_be_bytes().to_vec();
+    chunk.extend_from_slice(chunk_type_and_data);
+    chunk.extend_from_slice(&crc32(chunk_type_and_data).to_be_bytes());
+    png.splice(33..33, chunk);
+    assert!(!is_pdf(&png) && png.windows(5).any(|w| w == b"%PDF-"));
+    let s = create(&lib, &Source { path: &write(&d, "a.png", &png), page: None }, "Png", "").unwrap();
+    assert_eq!((s.width, s.height), (8, 4));
+
+    let mut jpg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpg).encode(&[200u8; 8 * 4 * 3], 8, 4, image::ExtendedColorType::Rgb8).unwrap();
+    let com = b"%PDF-1.4 hidden";
+    let mut seg = vec![0xff, 0xfe];
+    seg.extend_from_slice(&(com.len() as u16 + 2).to_be_bytes());
+    seg.extend_from_slice(com);
+    jpg.splice(2..2, seg);
+    assert!(!is_pdf(&jpg));
+    let s = create(&lib, &Source { path: &write(&d, "a.jpg", &jpg), page: None }, "Jpeg", "").unwrap();
+    assert_eq!((s.width, s.height), (8, 4));
+    // A real PDF, with or without junk before its header, is still one.
+    assert!(is_pdf(b"%PDF-1.7\n") && is_pdf(b"junk\n%PDF-1.4"));
+
+    // A BMP whose pixel data holds the text: 4 x 2, 24 bits, rows of 12 bytes.
+    let mut bmp = b"BM".to_vec();
+    bmp.extend_from_slice(&(54u32 + 24).to_le_bytes());
+    bmp.extend_from_slice(&[0; 4]);
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&4i32.to_le_bytes());
+    bmp.extend_from_slice(&2i32.to_le_bytes());
+    bmp.extend_from_slice(&[1, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x13, 0x0b, 0, 0, 0x13, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    bmp.extend_from_slice(b"%PDF-1.4 hidden!");
+    bmp.resize(54 + 24, 200);
+    assert!(!is_pdf(&bmp));
+    let s = create(&lib, &Source { path: &write(&d, "a.bmp", &bmp), page: None }, "Bmp", "").unwrap();
+    assert_eq!((s.width, s.height), (4, 2));
+}
+
+#[test]
+fn a_page_with_a_huge_picture_is_refused_before_it_is_drawn() {
+    let page = |objs: &[&str]| {
+        let mut v = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /XObject << /Im 5 0 R /Fm 6 0 R >> >> >>".to_string(),
+            "<< /Length 28 >>\nstream\nq 100 0 0 100 0 0 cm /Im Do Q\nendstream".to_string(),
+        ];
+        v.extend(objs.iter().map(|s| s.to_string()));
+        raw_pdf(&v)
+    };
+    let image = |side: u32| format!("<< /Type /XObject /Subtype /Image /Width {side} /Height {side} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 64 >>\nstream\n{}\nendstream", "x".repeat(64));
+    let plain_form = "<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream";
+    // 10000 x 10000 on the page itself.
+    let e = err(render_pdf(&page(&[&image(10_000), plain_form]), None, RENDER_LIMIT));
+    assert!(e.contains("too many pixels"), "{e}");
+    // The same inside a form the page draws.
+    let form = "<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Resources << /XObject << /Big 7 0 R >> >> /Length 0 >>\nstream\n\nendstream";
+    let e = err(render_pdf(&page(&[&image(8), form, &image(10_000)]), None, RENDER_LIMIT));
+    assert!(e.contains("too many pixels"), "{e}");
+    // A small picture draws.
+    render_pdf(&page(&[&image(8), plain_form]), None, RENDER_LIMIT).unwrap();
+    // A size that cannot be read counts as over the cap: a real, a negative, a missing one, a name.
+    for (w, h) in [("8.5", "8"), ("-8", "8"), ("/Big", "8"), ("8", "/Big")] {
+        let im = format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 64 >>\nstream\n{}\nendstream", "x".repeat(64));
+        let e = err(render_pdf(&page(&[&im, plain_form]), None, RENDER_LIMIT));
+        assert!(e.contains("size cannot be read"), "{w} x {h}: {e}");
+    }
+    let no_width = format!("<< /Type /XObject /Subtype /Image /Height 8 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 64 >>\nstream\n{}\nendstream", "x".repeat(64));
+    assert!(err(render_pdf(&page(&[&no_width, plain_form]), None, RENDER_LIMIT)).contains("size cannot be read"));
+}
+
+#[test]
 fn a_page_that_takes_too_long_to_draw_is_aborted() {
     // A page of 150 000 small squares: far more work than a zero time limit allows.
     let content = "0 0 5 5 re f\n".repeat(150_000);
@@ -309,6 +386,95 @@ fn an_id_that_is_not_one_we_made_never_reaches_the_file_system() {
 }
 
 #[test]
+fn write_atomic_replaces_the_file_whole_and_leaves_no_temp_file_behind() {
+    let d = dir("stamps", "atomic");
+    let f = d.join("a.json");
+    write_atomic(&f, b"one").unwrap();
+    write_atomic(&f, b"two, longer").unwrap();
+    assert_eq!(std::fs::read(&f).unwrap(), b"two, longer");
+    // A target that cannot be replaced (a folder) is an error, and the temp file does not stay.
+    std::fs::create_dir(d.join("b.json")).unwrap();
+    assert!(write_atomic(&d.join("b.json"), b"x").is_err());
+    let mut names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["a.json", "b.json"]);
+}
+
+/// The damaged indexes a writer set aside.
+fn backups(lib: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(lib).unwrap().map(|e| e.unwrap().path()).filter(|p| p.to_string_lossy().ends_with(".bad")).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_damaged_index_is_set_aside_by_a_writer_and_a_second_one_keeps_the_first_backup() {
+    let d = dir("stamps", "backups");
+    let lib = d.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let src = write(&d, "s.png", &half_red(4, 4));
+    for (i, junk) in [&b"first damage"[..], b"second damage"].into_iter().enumerate() {
+        std::fs::write(lib.join(INDEX), junk).unwrap();
+        assert!(list(&lib).warning.is_some());
+        assert_eq!(backups(&lib).len(), i, "listing sets nothing aside");
+        create(&lib, &Source { path: &src, page: None }, "S", "").unwrap();
+        let b = backups(&lib);
+        assert_eq!(b.len(), i + 1, "one backup per damage");
+        assert!(b.iter().any(|p| std::fs::read(p).unwrap() == junk));
+    }
+}
+
+#[test]
+fn a_write_never_uses_a_temp_file_another_writer_may_have() {
+    let d = dir("stamps", "temp-names");
+    let lib = d.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    // What the fixed names of an earlier version, or another writer, may hold.
+    for f in ["stamps.tmp", "stamps.json.tmp"] {
+        std::fs::write(lib.join(f), b"someone else's").unwrap();
+    }
+    let src = write(&d, "s.png", &half_red(4, 4));
+    let s = create(&lib, &Source { path: &src, page: None }, "S", "").unwrap();
+    for f in ["stamps.tmp", "stamps.json.tmp"] {
+        assert_eq!(std::fs::read(lib.join(f)).unwrap(), b"someone else's", "{f}");
+    }
+    let mut names: Vec<String> = std::fs::read_dir(&lib).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, [format!("{}.png", s.id), format!("{}.t.png", s.id), "stamps.json".into(), "stamps.json.tmp".into(), "stamps.tmp".into()]);
+    // Two writers at once (threads here) both land and the index stays whole.
+    let (lib_ref, src_ref) = (&lib, &src);
+    let ids: Vec<String> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..4).map(|i| sc.spawn(move || create(lib_ref, &Source { path: src_ref, page: None }, &format!("T{i}"), "").unwrap().id)).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(list(&lib).stamps.len(), 1 + ids.len());
+}
+
+#[test]
+fn a_writer_deletes_temp_files_older_than_a_minute_and_only_those() {
+    let d = dir("stamps", "stale-temp");
+    let lib = d.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let aged = |name: &str, secs: u64| {
+        std::fs::write(lib.join(name), b"x").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(lib.join(name)).unwrap();
+        f.set_modified(std::time::SystemTime::now() - Duration::from_secs(secs)).unwrap();
+    };
+    aged("stamps.json.0123456789abcdef.tmp", 3600);
+    aged("0123456789abcdef.png.fedcba9876543210.tmp", 120);
+    aged("stamps.json.1111111111111111.tmp", 5);
+    aged("keep.txt", 3600);
+    // A reader leaves them; a writer clears the old ones.
+    list(&lib);
+    assert_eq!(std::fs::read_dir(&lib).unwrap().count(), 4);
+    let src = write(&d, "s.png", &half_red(4, 4));
+    let s = create(&lib, &Source { path: &src, page: None }, "S", "").unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(&lib).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, [format!("{}.png", s.id), format!("{}.t.png", s.id), "keep.txt".into(), "stamps.json".into(), "stamps.json.1111111111111111.tmp".into()]);
+}
+
+#[test]
 fn a_hostile_index_reads_as_an_empty_or_trimmed_library_and_never_panics() {
     let d = dir("stamps", "hostile");
     let lib = d.join("lib");
@@ -320,8 +486,7 @@ fn a_hostile_index_reads_as_an_empty_or_trimmed_library_and_never_panics() {
         index(junk);
         let l = list(&lib);
         assert!(l.stamps.is_empty() && l.warning.is_some(), "{junk:?}");
-        assert!(lib.join(format!("{INDEX}.bad")).exists(), "the damaged file is kept aside");
-        assert!(!lib.join(INDEX).exists());
+        assert!(lib.join(INDEX).exists() && backups(&lib).is_empty(), "reading moves nothing");
     }
 
     // Deep nesting (past the parser's depth limit), and a file over the size cap.

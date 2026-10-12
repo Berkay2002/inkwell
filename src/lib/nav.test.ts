@@ -43,6 +43,7 @@ import {
   hexToRgb,
   isUnder,
   linkHint,
+  linkLock,
   linkState,
   locate,
   pressFeedback,
@@ -336,12 +337,32 @@ describe("link actions", () => {
     expect(vi.mocked(message).mock.calls[1][0]).not.toContain("signed");
   });
 
+  it("shows the reason when the audit is refused, and does not offer to remove", async () => {
+    vi.mocked(api.linksAudit).mockRejectedValue("Page 1 has more annotations than Inkwell reads, so it can't tell that every link was removed.");
+    await useNav.getState().askAudit(1);
+    expect(useNav.getState().docs[1].audit).toBeNull();
+    expect(useNav.getState().docs[1].notice).toMatch(/more annotations than Inkwell reads/);
+    expect(await useNav.getState().removeAllLinks(1)).toBe(false);
+    expect(message).not.toHaveBeenCalled();
+  });
+
   it("says so, and asks nothing, when the document has no links", async () => {
     vi.mocked(api.linksAudit).mockResolvedValue({ total: 0, external: 0, broken: 0, signed: false, rows: [] });
     expect(await useNav.getState().removeAllLinks(1)).toBe(false);
     expect(message).not.toHaveBeenCalled();
     expect(editLinks).not.toHaveBeenCalled();
     expect(useNav.getState().docs[1].notice).toMatch(/no links/);
+  });
+
+  it("reads the document's lock from the selected link's page, or any loaded page, not only the current one", async () => {
+    vi.mocked(api.linksList).mockResolvedValue({ rev: 0, links: [], locked: "This document is certified.", signed: true });
+    await useNav.getState().loadLinks(1, 4);
+    const d = useNav.getState().docs[1];
+    // Page 0 is the current page and has not loaded; page 4 has.
+    expect(linkLock(d, 0)).toEqual({ locked: "This document is certified.", signed: true });
+    expect(linkLock(d, 4)).toEqual({ locked: "This document is certified.", signed: true });
+    expect(linkLock(undefined, 0)).toEqual({ locked: null, signed: false });
+    expect(linkLock({ ...d, links: {} }, 0)).toEqual({ locked: null, signed: false });
   });
 
   it("shows the press the link asks for, and none for a link that does nothing", () => {

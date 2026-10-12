@@ -152,6 +152,11 @@ impl PdfObject {
         unsafe { ffi_try!(mupdf_pdf_to_float(context(), self.inner)) }
     }
 
+    /// The address of the object, which is the same for two references that resolve to one object.
+    pub fn addr(&self) -> usize {
+        self.inner as usize
+    }
+
     pub fn as_indirect(&self) -> Result<i32, Error> {
         unsafe { ffi_try!(mupdf_pdf_to_indirect(context(), self.inner)) }
     }

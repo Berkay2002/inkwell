@@ -494,34 +494,66 @@ pub struct LinkAudit {
     pub rows: Vec<AuditRow>,
 }
 
+/// The `/Annots` arrays looked at, by what they resolve to: two references to one array (10 0 R pointing at 11 0 R)
+/// are one array. The arrays are kept so an address is never reused by another object.
+#[derive(Default)]
+struct Arrays {
+    seen: HashSet<usize>,
+    keep: Vec<PdfObject>,
+}
+
 /// The `/Annots` array of `page` has not been looked at yet (one that two pages share is read once).
-fn fresh_array(page: &PdfObject, arrays: &mut HashSet<i32>) -> Result<bool> {
-    match page.get_dict("Annots")? {
-        Some(a) if a.is_indirect()? => Ok(arrays.insert(a.as_indirect()?)),
-        _ => Ok(true),
+fn fresh_array(page: &PdfObject, arrays: &mut Arrays) -> Result<bool> {
+    let Some(a) = page.get_dict("Annots")? else { return Ok(true) };
+    if !a.is_indirect()? {
+        return Ok(true);
     }
+    // A reference to a reference is followed to the array (a loop of them is not an array, and is read as before).
+    let mut array = a;
+    for _ in 0..8 {
+        if !array.is_indirect()? {
+            break;
+        }
+        let Some(next) = array.resolve()? else { return Ok(true) };
+        array = next;
+    }
+    if array.is_indirect()? {
+        return Ok(true);
+    }
+    if !arrays.seen.insert(array.addr()) {
+        return Ok(false);
+    }
+    arrays.keep.push(array);
+    Ok(true)
 }
 
 /// Counts every link annotation once, whatever pages list it and however many arrays hold it, and whether or not
-/// it has a usable rectangle: the number "Remove all links" asks with is the number it removes.
+/// it has a usable rectangle: the number "Remove all links" asks with is the number it removes. A document it could
+/// not count whole (a page over the entries read, more pages than Remove all walks) is refused with Remove all's reason,
+/// so no count is shown that Remove all then refuses.
 pub fn audit(eng: &Engine, doc: DocId) -> Result<LinkAudit> {
     eng.read_custom(doc, |d| {
         let mut out = LinkAudit { signed: crate::outline::signed(d), ..Default::default() };
         let mut names = Names::default();
-        let (mut arrays, mut seen) = (HashSet::new(), HashSet::new());
+        let (mut arrays, mut seen) = (Arrays::default(), HashSet::new());
         // The same budget Remove all has, so the count is never one that Remove all then refuses.
         let mut budget = MAX_WALK;
         let mut spend = |cost: usize| -> Result<()> {
             budget = budget.checked_sub(cost).ok_or_else(over_budget)?;
             Ok(())
         };
-        for page in 0..d.page_count()?.max(0) as u32 {
+        let n = d.page_count()?;
+        check_pages(n)?;
+        for page in 0..n.max(0) as u32 {
             spend(2)?;
             if !fresh_array(&d.find_page(page as i32)?, &mut arrays)? {
                 continue;
             }
             let found = page_annots(d, page)?;
             spend(2 * found.looked)?;
+            if found.cut {
+                return Err(cut_page(page));
+            }
             let counted: HashSet<i32> = found.links.iter().map(|(id, _)| *id).filter(|id| *id < 0 || seen.insert(*id)).collect();
             out.total += counted.len() as u32;
             for l in read_page_with(d, page, 0, &mut names)?.links.into_iter().filter(|l| counted.contains(&l.id)) {
@@ -1121,6 +1153,19 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
     }
 }
 
+/// A document longer than [`MAX_PAGES`]: neither the audit nor Remove all walks it (they must agree).
+fn check_pages(n: i32) -> Result<()> {
+    if n > MAX_PAGES {
+        return Err(EngineError::Invalid(format!("This document has more than {MAX_PAGES} pages, more than Inkwell removes the links of at once.")));
+    }
+    Ok(())
+}
+
+/// A page whose `/Annots` is longer than what is read: Inkwell cannot tell that every link of it was counted or removed.
+fn cut_page(page: u32) -> EngineError {
+    EngineError::Invalid(format!("Page {} has more annotations than Inkwell reads, so it can't tell that every link was removed.", page + 1))
+}
+
 fn over_budget() -> EngineError {
     EngineError::Invalid("This document has more links and annotations than Inkwell counts or removes at once, so it leaves them as they are.".into())
 }
@@ -1130,15 +1175,13 @@ fn over_budget() -> EngineError {
 /// so a document over a cap or the budget is refused whole and never half done. `None`: nothing to remove.
 fn remove_all(doc: &mut PdfDocument, mut budget: usize) -> Result<Option<Done>> {
     let n = doc.page_count()?;
-    if n > MAX_PAGES {
-        return Err(EngineError::Invalid(format!("This document has more than {MAX_PAGES} pages, more than Inkwell removes the links of at once.")));
-    }
+    check_pages(n)?;
     let mut spend = |cost: usize| -> Result<()> {
         budget = budget.checked_sub(cost).ok_or_else(over_budget)?;
         Ok(())
     };
     let mut any = false;
-    let mut arrays = HashSet::new();
+    let mut arrays = Arrays::default();
     for page in 0..n as u32 {
         spend(2)?;
         let p = doc.find_page(page as i32)?;
@@ -1149,10 +1192,7 @@ fn remove_all(doc: &mut PdfDocument, mut budget: usize) -> Result<Option<Done>> 
         let found = annots_of(&p)?;
         spend(2 * found.looked)?;
         if found.cut {
-            return Err(EngineError::Invalid(format!(
-                "Page {} has more annotations than Inkwell reads, so it can't tell that every link was removed.",
-                page + 1
-            )));
+            return Err(cut_page(page));
         }
         any |= !found.links.is_empty();
     }
@@ -1167,7 +1207,7 @@ fn remove_all(doc: &mut PdfDocument, mut budget: usize) -> Result<Option<Done>> 
     let mut keyed = Vec::new();
     let mut objects = Vec::new();
     let mut seen = HashSet::new();
-    arrays.clear();
+    arrays = Arrays::default();
     for page in 0..n as u32 {
         let p = doc.find_page(page as i32)?;
         if !fresh_array(&p, &mut arrays)? {

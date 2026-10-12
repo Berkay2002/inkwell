@@ -504,17 +504,24 @@ pub(crate) enum Lock {
     Exclude(Vec<String>),
 }
 
-/// The names in a `/Lock /Fields` array.
-fn lock_names(lock: &PdfObject) -> Vec<String> {
-    let Some(a) = get(lock, "Fields") else { return Vec::new() };
-    (0..a.len().unwrap_or(0).min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten().as_ref().and_then(text)).collect()
+/// The names in a `/Lock /Fields` array, and whether all of them were read (the array is there, holds at most 4096
+/// entries, and each is a name or string).
+fn lock_names(lock: &PdfObject) -> (Vec<String>, bool) {
+    let Some(a) = get(lock, "Fields") else { return (Vec::new(), false) };
+    let len = a.len().unwrap_or(0);
+    let names: Vec<String> = (0..len.min(4096) as i32).filter_map(|i| a.get_array(i).ok().flatten().as_ref().and_then(text)).collect();
+    let complete = len <= 4096 && names.len() == len;
+    (names, complete)
 }
 
-/// What a signature's `/Lock` dictionary covers.
+/// What a signature's `/Lock` dictionary covers. An `Include` that cannot be read in full (no `/Fields`, more than 4096
+/// of them, an entry that is not text) locks everything: the fields it could not name must not be left open.
 fn lock_of(l: &PdfObject) -> Lock {
+    let (names, complete) = lock_names(l);
     match get(l, "Action").as_ref().and_then(text).as_deref() {
-        Some("Include") => Lock::Include(lock_names(l)),
-        Some("Exclude") => Lock::Exclude(lock_names(l)),
+        Some("Include") if complete => Lock::Include(names),
+        // An Exclude that lost names only locks more.
+        Some("Exclude") => Lock::Exclude(names),
         _ => Lock::All,
     }
 }
@@ -522,14 +529,23 @@ fn lock_of(l: &PdfObject) -> Lock {
 /// Every lock the `/Reference` entries of a signature value carry: each FieldMDP method names its fields like `/Lock`
 /// does, a DocMDP with `/P 1` allows no change at all. An approval signature with neither locks nothing.
 fn reference_locks(v: &PdfObject) -> Vec<Lock> {
+    // A /Reference that cannot be read may hold a lock: it locks everything.
+    if v.get_dict("Reference").is_err() {
+        return vec![Lock::All];
+    }
     let Some(refs) = get(v, "Reference") else { return Vec::new() };
-    (0..refs.len().unwrap_or(0).min(16) as i32)
+    // One dictionary stands for the one entry it would be (as `outline::certified` reads it).
+    let single = refs.is_dict().unwrap_or(false);
+    (0..if single { 1 } else { refs.len().unwrap_or(0).min(16) as i32 })
         .filter_map(|i| {
-            let r = refs.get_array(i).ok().flatten()?;
-            let params = get(&r, "TransformParams")?;
+            let r = match if single { Ok(Some(refs.clone())) } else { refs.get_array(i) } {
+                Ok(r) => r?,
+                Err(_) => return Some(Lock::All),
+            };
             match get(&r, "TransformMethod").as_ref().and_then(text).as_deref() {
-                Some("FieldMDP") => Some(lock_of(&params)),
-                Some("DocMDP") if int_of(&params, "P") == Some(1) => Some(Lock::All),
+                // A FieldMDP that names no parameters says nothing about which fields: all of them.
+                Some("FieldMDP") => Some(get(&r, "TransformParams").map_or(Lock::All, |p| lock_of(&p))),
+                Some("DocMDP") if int_of(&get(&r, "TransformParams")?, "P") == Some(1) => Some(Lock::All),
                 _ => None,
             }
         })
@@ -556,6 +572,10 @@ fn locks_of_fields(entries: &[Entry]) -> Vec<Lock> {
         .into_iter()
         .filter(|e| e.kind == FieldKind::Signature)
         .flat_map(|e| {
+            // A /V or /Lock that errors when read is not an absent one: it may hold a lock, so everything is locked.
+            if e.field.get_dict_inheritable("V").is_err() || e.field.get_dict("Lock").is_err() || e.obj.get_dict("Lock").is_err() {
+                return vec![Lock::All];
+            }
             let Some(v) = geti(&e.field, "V").filter(|v| v.is_dict().unwrap_or(false)) else { return Vec::new() };
             let mut locks = reference_locks(&v);
             locks.extend(get(&e.field, "Lock").or_else(|| get(&e.obj, "Lock")).map(|l| lock_of(&l)));

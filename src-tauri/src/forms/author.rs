@@ -252,6 +252,10 @@ pub fn add(doc: &mut PdfDocument, page: u32, what: &NewField) -> Result<i32> {
     if what.kind == FieldKind::Radio && what.group.is_some() && existing_group.is_none() {
         return Err(bad(format!("no radio group named {}", what.group.as_deref().unwrap_or(""))));
     }
+    // A button that joins a group is written into the group's /Kids: a group a signature covers stays as it is.
+    if let Some(g) = existing_group {
+        super::layout::guard(doc, &entries, &[g])?;
+    }
     let name = what.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
         if let Some(g) = existing_group { g.name.clone() } else { unique_name(&taken, base_name(what.kind)) }
     });
@@ -336,6 +340,9 @@ pub fn move_to(doc: &mut PdfDocument, page: u32, xref: i32, rect: [f32; 4]) -> R
     if r.x1 - r.x0 < 2.0 || r.y1 - r.y0 < 2.0 {
         return Err(bad("a field needs a rectangle of at least 2 x 2 points"));
     }
+    let entries = scan(doc)?;
+    let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
+    super::layout::guard(doc, &entries, &[e])?;
     {
         let p = doc.load_pdf_page(page as i32)?;
         let w = p.load_widget(xref)?.ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
@@ -355,6 +362,8 @@ pub fn delete(doc: &mut PdfDocument, page: u32, xrefs: &[i32]) -> Result<()> {
             return Err(bad(format!("no field {x} on page {}", page + 1)));
         }
     }
+    let picked: Vec<&Entry> = entries.iter().filter(|e| e.page == page && xrefs.contains(&e.xref)).collect();
+    super::layout::guard(doc, &entries, &picked)?;
     let form = doc.catalog()?.get_dict("AcroForm")?;
     let mut p = doc.load_pdf_page(page as i32)?;
     for x in xrefs {
@@ -444,6 +453,8 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
     refuse_if_certified(doc)?;
     let entries = scan(doc)?;
     let e = entries.iter().find(|e| e.page == page && e.xref == xref).ok_or_else(|| bad(format!("no field {xref} on page {}", page + 1)))?;
+    // Every change, not only a new name: a field a signature covers, and a signed signature field, stay as they are.
+    super::layout::guard(doc, &entries, &[e])?;
     let mut field = e.field.clone();
     let mut widget = e.obj.clone();
     let siblings: Vec<&Entry> = entries.iter().filter(|s| s.node == e.node).collect();
@@ -463,8 +474,6 @@ pub fn edit(doc: &mut PdfDocument, page: u32, xref: i32, patch: &FieldPatch) -> 
         let full = if parents.is_empty() { leaf.to_string() } else { format!("{parents}.{leaf}") };
         if full != e.name {
             super::layout::valid_name(&full)?;
-            // The field's own lock first: a field a signature covers, and a signed signature field, keep their name.
-            super::layout::guard(doc, &entries, &[e])?;
             let clash = |o: &Entry| o.node != e.node && (o.name == full || o.name.starts_with(&format!("{full}.")) || full.starts_with(&format!("{}.", o.name)));
             if entries.iter().any(clash) {
                 return Err(bad(format!("A field named {full} already exists")));

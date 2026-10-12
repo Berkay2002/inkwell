@@ -76,15 +76,16 @@ fn pick<'a>(entries: &'a [Entry], items: &[Item], min: usize, what: &str) -> Res
     Ok(out)
 }
 
-/// A signed signature field stays where it is, and so does a field a signature covers (its /Lock, a FieldMDP).
+/// What no change to a field may touch (layout, name, properties, delete, joining a radio group): a signed signature
+/// field, and a field a signature covers (its /Lock, a FieldMDP). An unsigned signature field is one of those fields
+/// like any other.
 pub(crate) fn guard(doc: &PdfDocument, entries: &[Entry], picked: &[&Entry]) -> Result<()> {
     let locks = scripts::locks_of(doc, entries);
     for e in picked {
-        if e.kind == FieldKind::Signature {
-            if geti(&e.field, "V").is_some_and(|v| v.is_dict().unwrap_or(false)) {
-                return Err(bad(format!("The signature field [ {} ] is signed and stays where it is", e.name)));
-            }
-        } else if scripts::locked(&locks, e) {
+        if e.kind == FieldKind::Signature && geti(&e.field, "V").is_some_and(|v| v.is_dict().unwrap_or(false)) {
+            return Err(bad(format!("The signature field [ {} ] is signed and cannot be changed", e.name)));
+        }
+        if scripts::name_locked(&locks, &e.name) {
             return Err(bad(format!("The field [ {} ] is locked by a signature", e.name)));
         }
     }
