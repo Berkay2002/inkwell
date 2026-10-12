@@ -96,11 +96,12 @@ maps that to user space, so the same numbers hold on rotated and cropped pages (
   copy): save and close it first. A failure after the first copy names the copies already written.
 
 ## Shrink (`fit.rs`)
-- The box is the page less the bands the marks use: top = top margin + the height of the lines in the three top
-  slots (0 when they are empty), bottom likewise, left and right = the left and right margins as set. The scale is
-  `s = min(1, (h − top − bottom) / h, (w − left − right) / w)`, never up, and the content is centred in the box.
-  The left and right margins are read literally, so the default 72 pt on a Letter page gives about 0.76 (the
-  page shrinks in both directions, not only down). `s < 0.1` is refused ("The margins leave too little room…").
+- Only the top and bottom bands drive the scale: top = top margin + the height of the lines in the three top
+  slots (0 when they are empty), bottom likewise. `s = min(1, (h − top − bottom) / h)`: uniform, never up, and the
+  content is centred between the bands vertically and on the page's centre across. The left and right margins
+  only place the text across the page; they are kept in `/Shrink` but do not change the scale (a footer only,
+  with the default 36 pt and 12 pt text, gives 0.94 on Letter, whatever the left and right margins are).
+  `s < 0.1` is refused ("The margins leave too little room…"). Test: `only_the_top_and_bottom_bands_drive_the_scale`.
 - Written as one section in the opening `q %Inkwell` wrapper stream, before the balancing `q`s so a stray `Q` in
   the page's content cannot undo it: `/Artifact <</PCMark /Shrink /HeaderFooter [t b l r] /Bates [t b l r]>> BDC`,
   the `cm` (display space scaled and moved, mapped through `View::matrix`, so `/Rotate` and crop boxes work), a

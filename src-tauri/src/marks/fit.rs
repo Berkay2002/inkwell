@@ -24,7 +24,8 @@ use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::Buffer;
 use std::ops::Range;
 
-/// The space a mark keeps clear, in points from the page edge: top, bottom, left, right.
+/// The space a mark keeps clear, in points from the page edge: top, bottom, left, right (the last two
+/// are kept in the file but do not move the content).
 pub(super) type Bands = [f64; 4];
 
 /// Under this scale the page would be too small to read: the margins are refused instead.
@@ -47,14 +48,16 @@ pub(super) fn text_bands(texts: &[String; 6], style: &Style, margins: &[f64; 4])
 
 /// The `cm` (user space) that puts the page's content into the box the bands leave, and the page's
 /// visible rectangle in user space as `x y w h` (the content's own space, for the clip after it).
+/// Only the top and bottom bands drive the scale: a header or footer sits in them, and the left and
+/// right margins only place its text across the page. The content stays centred across the page.
 fn geometry(view: &View, b: Bands) -> Result<(M, [f64; 4])> {
     let (w, h) = (view.w, view.h);
-    let [top, bottom, left, right] = b;
-    let s = 1.0f64.min((h - top - bottom) / h).min((w - left - right) / w);
+    let [top, bottom, _, _] = b;
+    let s = 1.0f64.min((h - top - bottom) / h);
     if s.is_nan() || s < MIN_SCALE {
         return Err(invalid("The margins leave too little room to shrink the page. Make them smaller, or turn off \"Shrink pages to fit the margins\"."));
     }
-    let (cx, cy) = ((left + w - right) / 2.0, (bottom + h - top) / 2.0);
+    let (cx, cy) = (w / 2.0, (bottom + h - top) / 2.0);
     // The page in display space, scaled about its own centre, then moved to the centre of the box.
     let d: M = [s, 0.0, 0.0, s, cx - s * w / 2.0, cy - s * h / 2.0];
     let cm = mul(mul(view.to_display(), d), view.matrix);

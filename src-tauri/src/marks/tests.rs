@@ -723,15 +723,18 @@ fn shrink_puts_the_content_between_the_bands_on_every_rotation_and_box() {
         let unshrunk = reopened(&doc);
         add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
         let doc = reopened(&doc);
-        // the top and bottom bands: margin + one line; left and right: the margins
-        let band: [f32; 4] = [72.0, 48.0, (w - 72.0) as f32, (h - 48.0) as f32];
+        // the top and bottom bands: margin + one line; across, the content is the page scaled about its centre
+        let scale = (h - 96.0) / h;
+        let l = (w * (1.0 - scale) / 2.0) as f32;
+        let band: [f32; 4] = [l, 48.0, w as f32 - l, (h - 48.0) as f32];
         for name in ["LL", "UL", "LR", "UR"] {
             inside(word(&doc, name), band, &format!("{extra:?} {name}"));
         }
         // it kept the page size and the text above and below does not touch the content
         assert_eq!(doc.load_page(0).unwrap().bounds().unwrap().width() as f64, w, "{extra:?}");
         assert!(word(&doc, "TC").y1 <= word(&doc, "UL").y0 + 1.0, "{extra:?}: header over the content");
-        assert!(word(&doc, "BC").y0 >= word(&doc, "LL").y1 - 1.0, "{extra:?}: footer over the content");
+        // (word boxes carry the font's ascent and descent; the content sits right at the band's edge)
+        assert!(word(&doc, "BC").y0 >= word(&doc, "LL").y1 - 4.0, "{extra:?}: footer over the content");
         // never up: a corner word that already fits does not grow
         let before = word(&unshrunk, "UL");
         let after = word(&doc, "UL");
@@ -761,6 +764,34 @@ fn shrink_with_nothing_to_clear_does_not_scale_up() {
 }
 
 #[test]
+fn only_the_top_and_bottom_bands_drive_the_scale() {
+    // a footer only, with the default 72 pt left and right margins: the scale is (792 - 48) / 792
+    let footer = |margins: [f64; 4]| {
+        let mut h = HeaderFooter::default();
+        h.text[4] = "BC".into();
+        h.shrink = true;
+        h.margins = margins;
+        h
+    };
+    let width_of_ur = |m: [f64; 4]| {
+        let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+        let before = word(&reopened(&doc), "UR");
+        add(&mut doc, &req(Mark::HeaderFooter(footer(m)), vec![0])).unwrap();
+        let doc = reopened(&doc);
+        let (ul, ur) = (word(&doc, "UL"), word(&doc, "UR"));
+        // scaled about the page's centre: UL started 4 pt from the left edge
+        let s = 744.0 / 792.0;
+        near(ul.x0, (306.0 - s * 302.0) as f32, "centred across the page");
+        (ur.x1 - ur.x0) / (before.x1 - before.x0)
+    };
+    let default = width_of_ur([36.0, 36.0, 72.0, 72.0]);
+    let wide = width_of_ur([36.0, 36.0, 0.0, 0.0]);
+    let narrow = width_of_ur([36.0, 36.0, 200.0, 200.0]);
+    assert!((default - 744.0 / 792.0).abs() < 0.01, "{default}: not 0.94 (the left and right margins must not shrink it)");
+    assert!((default - wide).abs() < 0.001 && (default - narrow).abs() < 0.001, "{default} {wide} {narrow}");
+}
+
+#[test]
 fn shrink_clips_to_the_visible_area() {
     // a big word outside the crop box but inside the media box
     let content = "BT /F1 36 Tf 10 10 Td (OUTSIDE) Tj ET BT /F1 12 Tf 200 300 Td (IN) Tj ET";
@@ -783,8 +814,9 @@ fn shrink_survives_unbalanced_content_and_a_stray_q() {
         add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
         let doc = reopened(&doc);
         if content.starts_with('Q') {
-            inside(word(&doc, "UL"), [72.0, 48.0, 540.0, 744.0], "a stray Q does not undo the shrink");
-            inside(word(&doc, "LR"), [72.0, 48.0, 540.0, 744.0], "a stray Q does not undo the shrink");
+            let l = (612.0 * (1.0 - 696.0 / 792.0) / 2.0) as f32;
+            inside(word(&doc, "UL"), [l, 48.0, 612.0 - l, 744.0], "a stray Q does not undo the shrink");
+            inside(word(&doc, "LR"), [l, 48.0, 612.0 - l, 744.0], "a stray Q does not undo the shrink");
         }
         // the marks are where they were asked for either way
         near(word(&doc, "TC").y0, 36.0, "TC top");
@@ -862,7 +894,7 @@ fn two_kinds_share_the_page_and_each_removal_recomputes_it() {
     remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap();
     let bates_only = reopened(&doc);
     assert!(word(&bates_only, "UL").y0 < both.y0 - 4.0, "the top band is no longer kept clear: the content moved up");
-    inside(word(&bates_only, "LL"), [72.0, 0.0, 540.0, 792.0 - 48.0], "bottom band still kept");
+    inside(word(&bates_only, "LL"), [0.0, 0.0, 612.0, 792.0 - 48.0], "bottom band still kept");
     // the Bates mark goes too: the original page
     remove(&mut doc, MarkKind::Bates, &[0]).unwrap();
     assert_eq!(stream_count(&doc, 0, "PCMark"), 0);
