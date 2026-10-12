@@ -37,11 +37,14 @@ pub struct Env {
     pub recognizer: Option<Arc<dyn Recognizer>>,
     /// A file that remembers the folders runs worked in, so a sweep at startup can find what a crash left.
     pub journal: Option<PathBuf>,
+    /// Told of each PDF a run that takes content out (Redact, Sanitize) has just written, so a catalog that listed
+    /// a file of that name forgets it (as a normal save of a redacted document does).
+    pub saved: Option<Arc<dyn Fn(&Path) + Send + Sync>>,
 }
 
 impl Env {
     pub fn new(tesseract: Option<PathBuf>, is_open: Arc<dyn Fn(&Path) -> bool + Send + Sync>) -> Self {
-        Self { tesseract, date: today_utc(), is_open, recognizer: None, journal: None }
+        Self { tesseract, date: today_utc(), is_open, recognizer: None, journal: None, saved: None }
     }
 
     /// Nothing is open; today's date; no Tesseract.

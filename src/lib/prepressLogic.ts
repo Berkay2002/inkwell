@@ -576,7 +576,10 @@ export function tabTarget(count: number, at: number, back: boolean): number | nu
   return (at + (back ? -1 : 1) + count) % count;
 }
 
-/** Ctrl/Cmd+S (not Save as) is held back while Convert Colors waits to save: a Save would write the conversion over the original. */
+/**
+ * Ctrl/Cmd+S (not Save as), Ctrl/Cmd+W and Ctrl/Cmd+K are held back while Convert Colors waits to save: a Save, the
+ * save prompt of a tab close and the palette's Save would each write the conversion over the original.
+ */
 export function holdsSave(e: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }, unsaved: boolean): boolean {
-  return unsaved && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s";
+  return unsaved && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && ["s", "w", "k"].includes(e.key.toLowerCase());
 }

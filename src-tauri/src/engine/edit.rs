@@ -1510,12 +1510,19 @@ impl Engine {
     /// Reverts the last step (or the last assistant turn). A no-op (returning the state) when
     /// there is nothing to undo.
     pub fn undo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, |ed| ed.undo_target())
+        self.travel(id, None, |ed| ed.undo_target())
+    }
+
+    /// [`Engine::undo`] only while the document is still at generation `rev` (the one a step just made): checked
+    /// under the lane lock, so a step that landed since (an assistant edit, an undo and redo) is never undone in
+    /// its place. `Err(Stale)` then, and nothing changes.
+    pub fn undo_if(&self, id: DocId, rev: u32) -> Result<EditState> {
+        self.travel(id, Some(rev), |ed| ed.undo_target())
     }
 
     /// Reapplies what was undone last. A no-op when there is nothing to redo.
     pub fn redo(&self, id: DocId) -> Result<EditState> {
-        self.travel(id, |ed| ed.redo_target())
+        self.travel(id, None, |ed| ed.redo_target())
     }
 
     /// Shows the document as of history entry `index` (undo or redo up to it). Later entries
@@ -1523,7 +1530,7 @@ impl Engine {
     pub fn restore(&self, id: DocId, index: usize) -> Result<EditState> {
         // Checked under the lane lock: an edit in between may have dropped the entry.
         let mut bad = index > 0;
-        let state = self.travel(id, |ed| {
+        let state = self.travel(id, None, |ed| {
             bad = index >= ed.steps.len();
             Some(index).filter(|_| !bad)
         })?;
@@ -1557,11 +1564,20 @@ impl Engine {
             .collect())
     }
 
-    fn travel(&self, id: DocId, target: impl FnOnce(&Editor) -> Option<usize>) -> Result<EditState> {
+    fn travel(&self, id: DocId, only_at: Option<u32>, target: impl FnOnce(&Editor) -> Option<usize>) -> Result<EditState> {
         let entry = self.entry(id)?;
         let mut lane = entry.editor.lock();
-        let Some(ed) = lane.as_mut() else { return Ok(clean_state(&entry)) };
-        let Some(to) = target(ed).filter(|&t| t != ed.cur) else { return Ok(ed.state(&entry)) };
+        // The generation only moves under this lock (`publish`), so this cannot change before the step is taken.
+        if only_at.is_some_and(|rev| entry.layout.read().rev != rev) {
+            return Err(EngineError::Stale);
+        }
+        // A conditional undo that finds nothing to undo did not undo: the caller must not think it did.
+        let nothing = |entry: &DocEntry, ed: Option<&Editor>| match only_at {
+            Some(_) => Err(EngineError::Stale),
+            None => Ok(ed.map_or_else(|| clean_state(entry), |ed| ed.state(entry))),
+        };
+        let Some(ed) = lane.as_mut() else { return nothing(&entry, None) };
+        let Some(to) = target(ed).filter(|&t| t != ed.cur) else { return nothing(&entry, Some(ed)) };
         ed.doc = open_snap(&ed.steps[to].snap, &entry)?;
         ed.cur = to;
         Ok(self.publish(&entry, ed))

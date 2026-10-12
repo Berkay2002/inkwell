@@ -41,9 +41,11 @@ pub const VERSION: u32 = 1;
 pub const MAX_TEXT: usize = 20 << 20;
 /// What one file's stored records may inflate to (the embedded index of a PDF is untrusted input).
 const MAX_BLOB: u64 = 96 << 20;
-/// A PDF up to this size is read into memory and opened from there, so no handle is left on the file (a build
-/// must not block the user's Save-over, delete or rename of it).
+/// A PDF is read into memory and opened from there, so no handle is left on the file (a build must not block
+/// the user's Save-over, delete or rename of it). One over `MAX_READ` is read alone (one such copy at a time)...
 const MAX_READ: u64 = 128 << 20;
+/// ...and one over this is listed as too large and not opened.
+const MAX_FILE: u64 = 512 << 20;
 /// Pages of one file that are indexed, and bookmarks kept.
 const MAX_PAGES: usize = 100_000;
 const MAX_BOOKMARKS: usize = 50_000;
@@ -63,6 +65,8 @@ pub enum Status {
     Damaged,
     /// Needs a password: nothing was read.
     Password,
+    /// Over `MAX_FILE`: not opened (its size and a sample are kept, so a move is still recognised).
+    TooLarge,
 }
 
 /// One row of the files table.
@@ -115,6 +119,9 @@ pub struct Meta {
     pub cut: u32,
     pub capped: bool,
     pub index_len: u64,
+    /// Files over `MAX_FILE`, listed but not indexed (an older `catalog.json` has none).
+    #[serde(default)]
+    pub too_large: u32,
 }
 
 /// One page as stored: the matcher's record (`PageRec`) with the text in its compact form.
@@ -266,6 +273,7 @@ fn unusable_meta(dir: &Path) -> Option<Meta> {
         cut: 0,
         capped: false,
         index_len: 0,
+        too_large: 0,
     })
 }
 
@@ -303,6 +311,7 @@ pub fn create(root: &Path, name: &str, folder: &str, recursive: bool) -> Result<
         cut: 0,
         capped: false,
         index_len: 0,
+        too_large: 0,
     };
     save_meta(&dir, &m)?;
     Ok(m)
@@ -686,6 +695,7 @@ pub struct Summary {
     pub removed: u32,
     pub damaged: u32,
     pub password: u32,
+    pub too_large: u32,
     pub cloud_only: u32,
     pub pages: u64,
     pub cut: u32,
@@ -712,8 +722,11 @@ struct Shared<'a> {
     finished: AtomicU32,
     total: u32,
     progress: &'a (dyn Fn(u32, u32) + Sync),
-    /// Files up to this size are read into memory before they are opened (`MAX_READ`).
+    /// Files over this size are read one at a time (`MAX_READ`); over `max_file` they are not read.
     max_read: u64,
+    max_file: u64,
+    /// Held while a file over `max_read` is in memory.
+    big: Mutex<()>,
     /// Blobs written by this run (removed again when it is cancelled).
     written: Mutex<Vec<u32>>,
 }
@@ -737,35 +750,42 @@ fn index_file(sh: &Shared, job: &Job) -> Option<FileRec> {
         status: Status::Damaged,
         cut: false,
     };
+    #[cfg(test)]
+    tests::before_open(&job.path);
     // Read whole, so no handle stays on the file while it is indexed (a Save-over, delete or rename of the PDF
     // must not wait for a build) and a long path is no problem; the sample is hashed from the same bytes.
-    // shortcut: a file over `max_read` is opened by path (and so held while it is read), because a copy of it in
-    // memory per thread is too much; upgrade by reading it in chunks into a memory-backed stream.
-    let bytes = if job.size <= sh.max_read {
-        match std::fs::read(&job.path) {
-            Ok(b) => Some(b),
-            Err(_) => {
-                rec.head_tail = head_tail(&job.path, job.size);
-                return Some(rec);
-            }
+    // The size is the file's now, not the listing's: it may have grown since, and what is read is capped by it.
+    let Ok(mut file) = std::fs::File::open(&job.path) else {
+        rec.head_tail = head_tail(&job.path, job.size);
+        return Some(rec);
+    };
+    let len = file.metadata().map_or(job.size, |m| m.len());
+    let mut too_large = len > sh.max_file;
+    // A big file is read alone, so the copies in memory stay few.
+    let _alone = (!too_large && len > sh.max_read).then(|| sh.big.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut bytes = Vec::new();
+    if !too_large {
+        match (&mut file).take(sh.max_file.saturating_add(1)).read_to_end(&mut bytes) {
+            Ok(n) => too_large = n as u64 > sh.max_file,
+            Err(_) => bytes.clear(),
         }
-    } else {
-        None
-    };
-    rec.head_tail = match &bytes {
-        Some(b) => sample_of(&mut std::io::Cursor::new(b), job.size),
-        None => head_tail(&job.path, job.size),
-    };
+    }
+    drop(file);
+    if too_large {
+        rec.status = Status::TooLarge;
+        rec.head_tail = head_tail(&job.path, job.size);
+        return Some(rec);
+    }
+    if bytes.is_empty() {
+        rec.head_tail = head_tail(&job.path, job.size);
+        return Some(rec);
+    }
+    rec.head_tail = sample_of(&mut std::io::Cursor::new(&bytes), job.size);
     // A file that makes MuPDF panic is skipped like a damaged one.
-    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Probe {
-        let opened = match &bytes {
-            Some(b) => PdfDocument::from_bytes(b),
-            // MuPDF takes a str path on Windows; a name that is not valid Unicode can't be opened there
-            None => match job.path.to_str() {
-                Some(s) => PdfDocument::open(s),
-                None => return Probe::Bad(Status::Damaged),
-            },
-        };
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || -> Probe {
+        let opened = PdfDocument::from_bytes(&bytes);
+        // The document holds its own copy: this one is not kept for the (long) read of the pages.
+        drop(bytes);
         let Ok(doc) = opened else { return Probe::Bad(Status::Damaged) };
         if doc.needs_password().unwrap_or(true) {
             return Probe::Bad(Status::Password);
@@ -833,11 +853,11 @@ fn worker(sh: &Shared) {
 /// time and sample, the rest is read again. `progress(done, total)` is called per file, from the build's threads.
 /// Cancelling leaves the live generation as it was.
 pub fn build(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32, u32) + Sync)) -> Result<Summary> {
-    build_with(dir, full, cancel, progress, MAX_READ)
+    build_with(dir, full, cancel, progress, MAX_READ, MAX_FILE)
 }
 
 /// [`build`] with the size up to which a file is read into memory given (tests use a small one).
-pub(super) fn build_with(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32, u32) + Sync), max_read: u64) -> Result<Summary> {
+pub(super) fn build_with(dir: &Path, full: bool, cancel: &AtomicBool, progress: &(dyn Fn(u32, u32) + Sync), max_read: u64, max_file: u64) -> Result<Summary> {
     let mut meta = load_meta_or_unusable(dir)?;
     let folder = PathBuf::from(&meta.folder);
     if !folder.is_dir() {
@@ -929,6 +949,8 @@ pub(super) fn build_with(dir: &Path, full: bool, cancel: &AtomicBool, progress: 
         total,
         progress,
         max_read,
+        max_file,
+        big: Mutex::new(()),
         written: Mutex::new(Vec::new()),
     };
     std::fs::create_dir_all(text_dir(dir)).map_err(io)?;
@@ -983,15 +1005,17 @@ pub(super) fn build_with(dir: &Path, full: bool, cancel: &AtomicBool, progress: 
     sum.files = table.files.len() as u32;
     sum.damaged = table.files.iter().filter(|r| r.status == Status::Damaged).count() as u32;
     sum.password = table.files.iter().filter(|r| r.status == Status::Password).count() as u32;
+    sum.too_large = table.files.iter().filter(|r| r.status == Status::TooLarge).count() as u32;
     sum.pages = table.files.iter().map(|r| u64::from(r.pages)).sum();
     sum.cut = table.files.iter().filter(|r| r.cut).count() as u32;
     meta.generation = generation;
     meta.built = now_ms();
     meta.files = sum.files;
-    meta.indexed = sum.files - sum.damaged - sum.password;
+    meta.indexed = sum.files - sum.damaged - sum.password - sum.too_large;
     meta.pages = sum.pages;
     meta.damaged = sum.damaged;
     meta.password = sum.password;
+    meta.too_large = sum.too_large;
     meta.cloud_only = sum.cloud_only;
     meta.cut = sum.cut;
     meta.capped = sum.capped;
@@ -1103,6 +1127,7 @@ pub fn forget(dir: &Path, path: &Path) -> Result<u32> {
         meta.indexed = count(Status::Indexed);
         meta.damaged = count(Status::Damaged);
         meta.password = count(Status::Password);
+        meta.too_large = count(Status::TooLarge);
         meta.pages = table.files.iter().map(|r| u64::from(r.pages)).sum();
         meta.cut = table.files.iter().filter(|r| r.cut).count() as u32;
         meta.index_len = index.len() as u64;
