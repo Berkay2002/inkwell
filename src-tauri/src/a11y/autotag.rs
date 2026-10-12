@@ -14,12 +14,12 @@
 
 use super::content::{self, Op, TextPos};
 use super::tables::{self, Table};
-use super::tree::name;
+use super::tree::{name, xref_of};
 use super::{Progress, Result, annots, bad, page_content};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::text_page::{TextBlockType, TextCharFlags, TextPageFlags};
 use mupdf::{Buffer, Matrix, Rect};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,9 +50,9 @@ struct PageText {
     tables: Vec<Table>,
     /// The table each line is a cell of.
     table_of: Vec<Option<usize>>,
-    /// The page's runs, when table detection computed them: the tag pass takes them instead of
-    /// walking the content again.
-    runs: Option<Vec<Run>>,
+    /// The page's runs and the length of the content they were computed from, when table
+    /// detection computed them: the tag pass takes them instead of walking the content again.
+    runs: Option<(usize, Vec<Run>)>,
 }
 
 fn page_text(doc: &PdfDocument, p: i32) -> Result<PageText> {
@@ -104,7 +104,7 @@ fn page_text(doc: &PdfDocument, p: i32) -> Result<PageText> {
 /// already marked, or inside a form, is left alone), and form fields keep the text near them.
 /// A page with too many lines is not looked at (walking its content is the costly part). Also
 /// returns the page's runs, which the tag pass needs again.
-fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<(Vec<Table>, Option<Vec<Run>>)> {
+fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<(Vec<Table>, Option<(usize, Vec<Run>)>)> {
     if lines.len() < 4 || lines.len() > tables::MAX_ITEMS {
         return Ok((Vec::new(), None));
     }
@@ -156,7 +156,7 @@ fn find_tables(doc: &PdfDocument, p: i32, lines: &[Line]) -> Result<(Vec<Table>,
             _ => false,
         })
     });
-    Ok((found, Some(rs)))
+    Ok((found, Some((data.len(), rs))))
 }
 
 /// A block's lines in order, cut where they change between a table's cells and plain text:
@@ -490,6 +490,9 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
 
     let mut built: Vec<(i32, Page)> = Vec::new();
     let mut touched = Vec::new();
+    // A page object listed twice in /Kids is tagged once: its content is already marked, so the
+    // second entry would apply offsets from the unmarked stream to the marked one.
+    let mut done: HashSet<i32> = HashSet::new();
     for p in 0..n {
         if cancel.load(Ordering::Relaxed) {
             return Err(stop());
@@ -497,13 +500,18 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
         let cached = texts[p as usize].runs.take();
         let t = &texts[p as usize];
         let mut page_obj = doc.find_page(p)?;
+        let x = xref_of(&page_obj)?;
+        if x != 0 && !done.insert(x) {
+            progress(Progress { done: p as u32 + 1, pages: n as u32, stage: "tag" });
+            continue;
+        }
         let page_ctm = page_obj.page_ctm()?;
         let res = page_obj.get_dict_inheritable("Resources")?.filter(|r| r.is_dict().unwrap_or(false));
         let data = page_content(&page_obj)?;
         let ops = content::parse(&data);
         let runs = match cached {
-            Some(r) => r,
-            None => in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len()),
+            Some((len, r)) if len == data.len() => r,
+            _ => in_order(runs(&ops, res.as_ref(), page_ctm.clone(), &t.lines)?, data.len()),
         };
 
         // Blocks to elements. A table takes its lines out of their blocks and comes in once, where

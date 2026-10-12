@@ -302,6 +302,34 @@ fn a_page_with_more_than_6000_lines_keeps_its_paragraphs() {
 }
 
 #[test]
+fn a_page_listed_twice_in_kids_is_tagged_once() {
+    let mut c = String::new();
+    for (i, t) in ["First line of the page", "Second line", "Third line", "Fourth line"].iter().enumerate() {
+        c += &at("F1", 12, 72, 700 - 18 * i as i32, t);
+    }
+    let mut s = page(c);
+    s.objs.push((2, "<</Type/Pages /Kids [10 0 R 10 0 R] /Count 2>>".into()));
+    let path = file("table-dup-kids", &s);
+    let (eng, id) = open(&path);
+    let text = |eng: &Engine, id| -> Vec<String> { eng.page_text(id, 0).unwrap().into_iter().map(|l| l.t).collect() };
+    let before = text(&eng, id);
+    let png = eng.page_png(id, eng.edit_state(id).unwrap().rev, 0, 150).unwrap();
+    fix_doc(&eng, id, &Fix::Autotag, EditSource::User).unwrap();
+    assert_eq!(text(&eng, id), before);
+    assert_eq!(png, eng.page_png(id, eng.edit_state(id).unwrap().rev, 0, 150).unwrap());
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    // The content stream is the original with marks added: balanced, and no operator damaged.
+    let doc = PdfDocument::open(&path).unwrap();
+    let ops: Vec<String> = content::parse(&page_content(&doc.find_page(0).unwrap()).unwrap()).iter().map(|o| String::from_utf8_lossy(&o.name).into_owned()).collect();
+    let count = |n: &str| ops.iter().filter(|o| *o == n).count();
+    assert_eq!((count("BDC"), count("EMC")), (4, 4), "{ops:?}");
+    assert_eq!((count("BT"), count("Tj"), count("ET")), (4, 4, 4), "{ops:?}");
+    assert_eq!(ops.len(), 5 * 4 + 8, "{ops:?}");
+    assert_eq!(ops.iter().filter(|o| *o == "Tf" || *o == "Td").count(), 8);
+}
+
+#[test]
 fn a_table_header_is_not_a_heading() {
     // The table's 18 pt header row is larger than the 16 pt "Notes" heading. It is a table row, so
     // it takes no heading level: the 24 pt title is H1 and "Notes" is H2.
