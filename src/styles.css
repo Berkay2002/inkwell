@@ -1504,10 +1504,22 @@ select {
   border-radius: var(--radius-sm);
   text-align: left;
 }
-.ink-menu button:hover,
+.ink-menu button[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+.ink-menu button:not([aria-disabled="true"]):hover,
 .ink-menu button:focus-visible {
   background: var(--surface-2);
   outline: none;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .ink-menu button.danger {
   color: var(--danger);

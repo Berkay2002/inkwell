@@ -307,3 +307,77 @@ fn an_edit_that_removes_the_signature_still_saves_after_the_signed_bytes() {
     eng.save(id, None).unwrap();
     assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
 }
+
+/// The same file with its `startxref` pointing nowhere: MuPDF has to rebuild the cross-reference table.
+fn broken_xref(mut b: Vec<u8>) -> Vec<u8> {
+    let at = b.windows(10).rposition(|w| w == b"startxref\n").unwrap() + 10;
+    let end = at + b[at..].iter().position(|&c| c == b'\n').unwrap();
+    b.splice(at..end, *b"99999999");
+    b
+}
+
+#[test]
+fn a_signed_file_that_had_to_be_repaired_takes_no_edit_but_can_be_saved_as_a_copy() {
+    let d = dir("certified", "signed-repaired");
+    let bytes = broken_xref(signed_only());
+    let (eng, id, path) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
+    let refused = |r: Result<()>| {
+        let e = r.unwrap_err().to_string();
+        assert!(e.contains("repaired") && e.contains("save a copy"), "{e}");
+    };
+    refused(eng.apply(id, EditOp::Delete { pages: vec![1] }).map(|_| ()));
+    refused(custom(&eng, id, |_| Ok(vec![0])));
+    assert!(eng.edit_state(id).unwrap().undo.is_none(), "a refusal is not an undo step");
+    // Nothing was written to the original, and a copy is the file as repaired.
+    eng.save(id, None).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let copy = d.join("copy.pdf").to_string_lossy().into_owned();
+    eng.save_as_other(id, &copy).unwrap();
+    let again = crate::engine::Engine::new(2, 64 << 20);
+    assert_eq!(again.open(&copy).unwrap().page_count, 2);
+    // The copy is the document now, and takes edits.
+    eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
+    assert!(eng.edit_state(id).unwrap().undo.is_some());
+}
+
+#[test]
+fn a_repaired_file_whose_signature_state_cannot_be_read_is_refused_with_its_own_message() {
+    let d = dir("certified", "repaired-unknown");
+    // More fields than the check walks: `signed` fails closed, and the message says why.
+    let bytes = broken_xref(pdf(&format!("/AcroForm << /Fields [{}] >>", "0 ".repeat(20_001)), "<< >>"));
+    let (eng, id, _) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
+    let e = eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap_err().to_string();
+    assert!(e.contains("repaired") && e.contains("could not be read") && !e.contains("signed file"), "{e}");
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+}
+
+#[test]
+fn an_unsigned_file_that_had_to_be_repaired_is_still_edited() {
+    let d = dir("certified", "unsigned-repaired");
+    let bytes = broken_xref(pdf("", "<< >>"));
+    let (eng, id, _) = crate::outline::tests::open_bytes(&d, "a.pdf", &bytes);
+    eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
+    assert!(eng.edit_state(id).unwrap().undo.is_some());
+}
+
+#[test]
+fn a_signed_file_that_had_to_be_repaired_takes_no_password_security_either() {
+    use crate::protect::ProtectSpec;
+    let d = dir("certified", "repaired-protect");
+    let (eng, id, path) = crate::outline::tests::open_bytes(&d, "a.pdf", &broken_xref(signed_only()));
+    let spec = ProtectSpec {
+        open_password: Some("pw".into()),
+        permissions_password: None,
+        printing: Default::default(),
+        changes: Default::default(),
+        copy: true,
+        accessibility: true,
+        cipher: Default::default(),
+    };
+    let e = eng.protect(id, spec, None, user()).unwrap_err().to_string();
+    assert!(e.contains("repaired") && e.contains("save a copy"), "{e}");
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+    let before = std::fs::read(&path).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

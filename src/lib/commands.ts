@@ -26,6 +26,7 @@ import { useTools } from "./toolsStore";
 import { useSheets } from "./organizePlus";
 import { useDocJs } from "./docJsStore";
 import { createPortfolio } from "./portfolioStore";
+import { useExchange } from "./dataExchange";
 
 export interface Command {
   id: string;
@@ -344,6 +345,10 @@ export const commands: Command[] = [
   { id: "page-boxes", title: "Set page boxes (trim, bleed)…", needsDoc: true, run: openPageBoxes },
   { id: "redact", title: "Redact", needsDoc: true, run: () => useRedact.getState().setOpen(!useRedact.getState().open) },
   { id: "comments", title: "Comments", keys: ["Ctrl+Alt+M"], needsDoc: true, run: () => useAnnot.getState().setOpen(!useAnnot.getState().open) },
+  { id: "comments-export", title: "Export comments (XFDF, FDF)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().exportComments(d.id)) },
+  { id: "comments-import", title: "Import comments (XFDF, FDF)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importComments(d.id)) },
+  { id: "forms-export", title: "Forms: export form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().exportForm(d.id)) },
+  { id: "forms-import", title: "Forms: import form data (FDF, XFDF, JSON)…", needsDoc: true, run: withDoc((d) => void useExchange.getState().importForm(d.id)) },
   { id: "measure", title: "Measure", needsDoc: true, run: () => useMeasure.getState().setOpen(!useMeasure.getState().open) },
   { id: "forms", title: "Forms", keys: ["Ctrl+Alt+F"], needsDoc: true, run: () => useForms.getState().setOpen(!useForms.getState().open) },
   {
@@ -386,8 +391,8 @@ export const commands: Command[] = [
       const th = useThreads.getState();
       if (th.tool && th.selected?.doc === d.id) return void th.removeBead(d.id, th.selected.thread, th.selected.bead);
       const f = useForms.getState();
-      const field = f.open && f.authoring ? f.get(d.id).selected : null;
-      if (field) return void f.remove(d.id, [field]);
+      const fields = f.open && f.authoring ? f.get(d.id).picked : [];
+      if (fields.length > 0) return void f.remove(d.id, fields);
       const m = useMeasure.getState();
       const measured = m.open ? m.get(d.id).selected : null;
       if (measured) return void m.remove(d.id, measured);

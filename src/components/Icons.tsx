@@ -96,6 +96,23 @@ const PATHS = {
   plates: "M9 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10ZM15 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10ZM12 10a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z",
   swatches: "M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z",
   pagebox: "M4 3h16v18H4ZM8 7h8v10H8Z",
+  // form layout: bars are the edge or centre line, boxes the fields
+  alignLeft: "M4 3v18M8 6h12v4H8ZM8 14h7v4H8Z",
+  alignRight: "M20 3v18M4 6h12v4H4ZM9 14h7v4H9Z",
+  alignTop: "M3 4h18M6 8v12h4V8ZM14 8v7h4V8Z",
+  alignBottom: "M3 20h18M6 4v12h4V4ZM14 9v7h4V9Z",
+  alignHCenter: "M12 3v18M5 6h14v4H5ZM8 14h8v4H8Z",
+  alignVCenter: "M3 12h18M6 5v14h4V5ZM14 8v8h4V8Z",
+  centerBoth: "M4 4h16v16H4ZM9 9h6v6H9Z",
+  centerH: "M4 4h16v16H4ZM12 4v3M12 17v3M8 9h8v6H8Z",
+  centerV: "M4 4h16v16H4ZM4 12h3M17 12h3M9 8h6v8H9Z",
+  distributeH: "M4 3v18M20 3v18M10 7h4v10h-4Z",
+  distributeV: "M3 4h18M3 20h18M7 10h10v4H7Z",
+  sameWidth: "M3 5h18v5H3ZM6 14h12v5H6ZM3 12h.01M21 12h.01",
+  sameHeight: "M5 3h5v18H5ZM14 6h5v12h-5Z",
+  sameSize: "M3 3h11v11H3ZM16 16h5v5h-5Z",
+  duplicate: "M9 9h11v11H9ZM5 15V4h11",
+  copies: "M3 3h7v7H3ZM14 3h7v7h-7ZM3 14h7v7H3ZM14 14h7v7h-7Z",
   access: "M12 3.5a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6ZM5 9.5l7 1.5 7-1.5M12 11v4.5M8.5 20.5 12 15.5l3.5 5",
 };
 
