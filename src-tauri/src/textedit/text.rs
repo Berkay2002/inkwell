@@ -404,6 +404,8 @@ pub(crate) struct PageContent {
     pub areas: Vec<Area>,
     /// The page's crop box in user space.
     pub crop: [f64; 4],
+    /// What the page paints that is not text: the parts of its painted paths and its form XObjects.
+    pub marks: Vec<Obstacle>,
     /// Our own decorations (`/Span <</IWDeco …>> BDC … EMC`): the operators they span and the show
     /// operators they lie under or through.
     decos: Vec<(usize, usize, Vec<usize>)>,
@@ -498,7 +500,7 @@ pub(crate) fn read_page(doc: &PdfDocument, page: u32) -> Result<PageContent> {
     if lines.is_empty() && extra.glyphlike >= 100 {
         areas.push(Area { rect: extra.glyph_box, issue: Issue::Outlines });
     }
-    Ok(PageContent { page: p, streams, pieces, ops, fonts, advances, lines, areas, crop, decos })
+    Ok(PageContent { page: p, streams, pieces, ops, fonts, advances, lines, areas, crop, marks: extra.marks, decos })
 }
 
 /// What the interpreter notices besides text.
@@ -511,7 +513,21 @@ struct Extra {
     glyph_box: [f64; 4],
     /// Our own decorations, in stream order.
     decos: Vec<DecoMark>,
+    /// Painted path parts and form XObjects (see [`PageContent::marks`]).
+    marks: Vec<Obstacle>,
 }
+
+/// Something on a page a one-line block that grows must keep clear of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Obstacle {
+    /// In user space.
+    pub rect: [f64; 4],
+    /// A form XObject: what is drawn inside it is not read, so a line inside it does not grow.
+    pub form: bool,
+}
+
+/// How many painted path parts a page is read for.
+const MAX_MARKS: usize = 20_000;
 
 /// How many decorations of ours a page is read for.
 const MAX_DECOS: usize = 10_000;
@@ -677,6 +693,9 @@ fn interpret(
     let mut deco: Option<(usize, usize, bool, Option<((f64, f64), (f64, f64))>)> = None;
     // The current path: its box in user space and whether it has curves.
     let mut path = (EMPTY, false);
+    // Its parts (a rectangle, a straight or curved segment) and where the next one starts; kept when it is painted.
+    let mut parts: Vec<[f64; 4]> = Vec::new();
+    let mut at = None::<(f64, f64)>;
     extra.glyph_box = EMPTY;
     for (i, op) in ops.iter().enumerate() {
         match op.op.as_slice() {
@@ -714,20 +733,33 @@ fn interpret(
                 if let Some([x, y]) = op.nums::<2>() {
                     let (x, y) = ts.ctm.apply(x, y);
                     path.0 = union(path.0, [x, y, x, y]);
+                    if let (true, Some(a)) = (op.is("l"), at) {
+                        parts.push(union([a.0, a.1, a.0, a.1], [x, y, x, y]));
+                    }
+                    at = Some((x, y));
                 }
             }
             b"c" | b"v" | b"y" => {
+                let mut part = at.map_or(EMPTY, |a| [a.0, a.1, a.0, a.1]);
                 for pair in op.operands.chunks(2) {
                     if let (Some(x), Some(y)) = (pair[0].as_f64(), pair.get(1).and_then(Obj::as_f64)) {
                         let (x, y) = ts.ctm.apply(x, y);
                         path.0 = union(path.0, [x, y, x, y]);
+                        part = union(part, [x, y, x, y]);
+                        at = Some((x, y));
                     }
+                }
+                if part[0] <= part[2] {
+                    parts.push(part);
                 }
                 path.1 = true;
             }
             b"re" => {
                 if let Some([x, y, w, h]) = op.nums::<4>() {
-                    path.0 = union(path.0, ts.ctm.bbox([x, y, x + w, y + h]));
+                    let r = ts.ctm.bbox([x, y, x + w, y + h]);
+                    path.0 = union(path.0, r);
+                    parts.push(r);
+                    at = Some(ts.ctm.apply(x, y));
                     if let Some(d) = deco.as_mut() {
                         d.3 = Some((ts.ctm.apply(x, y + h / 2.0), ts.ctm.apply(x + w, y + h / 2.0)));
                     }
@@ -740,6 +772,13 @@ fn interpret(
                     extra.glyphlike += 1;
                     extra.glyph_box = union(extra.glyph_box, path.0);
                 }
+                // A path that only clips (`n`) paints nothing.
+                if !op.is("n") {
+                    let room = MAX_MARKS.saturating_sub(extra.marks.len());
+                    extra.marks.extend(parts.iter().take(room).map(|&rect| Obstacle { rect, form: false }));
+                }
+                parts.clear();
+                at = None;
                 path = (EMPTY, false);
             }
             b"BT" => {
@@ -769,12 +808,16 @@ fn interpret(
             b"Do" => {
                 let form = op.name(0).and_then(|n| xobjects.and_then(|x| get(x, &String::from_utf8_lossy(n))));
                 if let Some(f) = form.filter(|f| get(f, "Subtype").and_then(|s| s.as_name().ok()).as_deref() == Some(b"Form")) {
-                    if form_shows_text(&f) {
-                        let b = nums(get(&f, "BBox"));
-                        let m = nums(get(&f, "Matrix"));
-                        let m = if m.len() == 6 { Matrix([m[0], m[1], m[2], m[3], m[4], m[5]]) } else { Matrix::IDENTITY };
-                        if b.len() == 4 {
-                            extra.forms.push(m.then(&ts.ctm).bbox([b[0], b[1], b[2], b[3]]));
+                    let b = nums(get(&f, "BBox"));
+                    let m = nums(get(&f, "Matrix"));
+                    let m = if m.len() == 6 { Matrix([m[0], m[1], m[2], m[3], m[4], m[5]]) } else { Matrix::IDENTITY };
+                    if b.len() == 4 {
+                        let rect = m.then(&ts.ctm).bbox([b[0], b[1], b[2], b[3]]);
+                        if extra.marks.len() < MAX_MARKS {
+                            extra.marks.push(Obstacle { rect, form: true });
+                        }
+                        if form_shows_text(&f) {
+                            extra.forms.push(rect);
                         }
                     }
                 }
@@ -859,8 +902,8 @@ fn interpret(
                                 // A large gap inside TJ reads as a space.
                                 if dx > ts.size * 0.2 && !text.ends_with(' ') {
                                     text.push(' ');
-                                    // The gap shows as the font's own space; what is left of it is kerning.
-                                    let sw = if m.is_space(32, 1) && m.width(32) > 0.0 { m.width(32) * 1000.0 } else { 250.0 };
+                                    // The gap shows as the font's own space (a composite font has none: code 32 is a CID there); what is left of it is kerning.
+                                    let sw = if !m.composite && m.is_space(32, 1) && m.width(32) > 0.0 { m.width(32) * 1000.0 } else { 250.0 };
                                     glyphs.push(Glyph { kern: std::mem::take(&mut kern), w: sw, ..Glyph::gap() });
                                     kern = n + sw;
                                 } else {
@@ -1027,10 +1070,38 @@ fn edge_spaces(l: &Line) -> (f64, f64) {
     (lead, trail)
 }
 
+/// The images and annotations of `page` (0-based) a one-line block's growth must keep clear of, read once for
+/// the page (a rewrite does not move them). None when they can't be read: then no line grows.
+pub(crate) fn page_obstacles(doc: &PdfDocument, page: u32) -> Option<Vec<Obstacle>> {
+    let mut out: Vec<Obstacle> = crate::imageedit::placed_images(doc, page)
+        .ok()?
+        .iter()
+        .map(|img| {
+            let [a, b, c, d, e, f] = img.ctm;
+            let corners = [(e, f), (a + e, b + f), (c + e, d + f), (a + c + e, b + d + f)];
+            let rect = corners.iter().fold(EMPTY, |r, &(x, y)| union(r, [x, y, x, y]));
+            Obstacle { rect, form: false }
+        })
+        .collect();
+    let p = doc.find_page(page as i32).ok()?;
+    if let Some(list) = get(&p, "Annots").filter(|a| a.is_array().unwrap_or(false)) {
+        for i in 0..list.len().unwrap_or(0) as i32 {
+            let Some(a) = list.get_array(i).ok().flatten() else { continue };
+            let popup = get(&a, "Subtype").and_then(|s| s.as_name().ok()).as_deref() == Some(b"Popup");
+            let r = nums(get(&a, "Rect"));
+            if !popup && r.len() == 4 {
+                out.push(Obstacle { rect: [r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3])], form: false });
+            }
+        }
+    }
+    Some(out)
+}
+
 /// How far right (user space) the line `l` of a one-line block may be set when a replacement is longer: up to
-/// the nearest of the next text or image box that starts to its right on its baseline band and the page's margin,
-/// and never short of where it ends now.
-fn room_right(images: &[crate::imageedit::Placed], pc: &PageContent, l: &Line) -> f64 {
+/// the nearest of the next text, image, annotation or painted mark (a cell's border or fill, a rule) that starts
+/// to its right on its baseline band, the edge of the one it stands in, and the page's margin; never short of
+/// where it ends now.
+fn room_right(beside: &[Obstacle], pc: &PageContent, l: &Line) -> f64 {
     let [x0, y0, x1, y1] = l.rect;
     let (lo, hi) = (y0.min(y1), y0.max(y1));
     // On the band when more than a third of the line's height is shared.
@@ -1055,15 +1126,21 @@ fn room_right(images: &[crate::imageedit::Placed], pc: &PageContent, l: &Line) -
             near = near.min(a - l.size * 0.5);
         }
     }
-    for img in images {
-        let [a, b, c, d, e, f] = img.ctm;
-        let xs = [e, a + e, c + e, a + c + e];
-        let ys = [f, b + f, d + f, b + d + f];
-        let (ax, ay) = (xs.iter().copied().fold(f64::MAX, f64::min), ys.iter().copied().fold(f64::MAX, f64::min));
-        let by = ys.iter().copied().fold(f64::MIN, f64::max);
-        if on_band(ay, by) && after(ax) {
-            near = near.min(ax - l.size * 0.5);
+    for o in beside.iter().chain(&pc.marks) {
+        let [a, b, c, d] = o.rect;
+        // Wholly left of the line's end, or not on its band (a rule above or below it is a hairline there).
+        if c <= x1 || !on_band(b, d) {
+            continue;
         }
+        near = if after(a) {
+            near.min(a - l.size * 0.5)
+        } else if o.form {
+            // The line is inside a form: what it draws is not read.
+            x1
+        } else {
+            // The line is inside it (a cell, a field): it ends where that does.
+            near.min(c - l.size * 0.5)
+        };
     }
     near.max(x1)
 }
@@ -1310,6 +1387,9 @@ pub struct KeepLines {
     /// then its overflow goes on a new line below it, the lines under it move down by the lines that were
     /// added, and a typed line break stays a line break.
     pub wrap: bool,
+    /// Find & Replace: the images and annotations of the page (see [`page_obstacles`]), which a one-line block
+    /// that grows keeps clear of. None, and the line does not grow.
+    pub beside: Option<std::sync::Arc<Vec<Obstacle>>>,
 }
 
 /// One run of a block's new content. Unset fields come from run `source` of the block (or its
@@ -1480,9 +1560,9 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
         return Err(invalid("there is no text to set"));
     }
     let st = &o.state;
-    // The images a one-line block's growth must keep clear of (read before the setter takes the document).
-    // None when they can't be read: then the line does not grow.
-    let images = (members.len() == 1 && change.keep.as_ref().is_some_and(|k| !k.wrap)).then(|| crate::imageedit::placed_images(doc, page).ok()).flatten();
+    // What a one-line block's growth must keep clear of besides text (read once for the page by the caller).
+    // None: the line does not grow.
+    let beside = change.keep.as_ref().filter(|k| !k.wrap && members.len() == 1).and_then(|k| k.beside.clone());
     let mut setter = Setter::new(doc, pc.page.clone());
     let mut items = Vec::new();
     // The size lines are spaced by: the first run that is not raised, and what it was.
@@ -1660,8 +1740,8 @@ fn rewrite_in(doc: &mut PdfDocument, page: u32, pc: &PageContent, b: &Block, cha
         }
         let grow = change.keep.as_ref().is_some_and(|k| k.wrap).then_some(lead);
         // A one-line block (a heading, a table cell) may take a longer word where nothing is beside it.
-        let right = match &images {
-            Some(images) if members.len() == 1 && grow.is_none() && align == Align::Left && upright => right + (room_right(images, pc, first) - first.rect[2]).max(0.0) / k,
+        let right = match &beside {
+            Some(beside) if grow.is_none() && align == Align::Left && upright => right + (room_right(beside, pc, first) - first.rect[2]).max(0.0) / k,
             _ => right,
         };
         let (lines, at) = keep_lines(groups, &spans, &full, align, (left, right), 0.5 / k, &m, grow)

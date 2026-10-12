@@ -272,10 +272,15 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   at its edge goes. A line of a block of several lines never grows past the width its
   block had, and a replacement that does not fit is not wrapped or pushed down but skipped with "the replacement
   does not fit on its line". A one-line block (heading, table cell) may grow to the right: up to the nearer of the
-  next text or image box that starts to its right on its baseline band (less half its size) and the page's
-  margin (36 pt in) or, when a block of two or more lines stands over its start (the nearest above or below), that
-  block's right edge, which is the column's; never less than the room it had; past that it is skipped the same
-  way. An image that can't be read, or a page whose images can't be listed, leaves the line as wide as it was. The same goes for a block whose line ends can't
+  next text, image, annotation (any `/Rect`, not a popup) or painted mark (one part of a stroked or filled path: a
+  rectangle, a segment) that starts to its right on its baseline band (less half its size; a rule above or below
+  the line is a hairline there and no neighbour), the right edge of a rectangle or annotation the line stands in
+  (its cell), and the page's margin (36 pt in) or, when a block of two or more lines stands over its start (the
+  nearest above or below), that block's right edge, which is the column's; never less than the room it had; past
+  that it is skipped the same way. A form XObject on the band (its `/BBox`; what it draws is not read) that starts
+  to the right is a neighbour, and one the line stands in stops it growing at all. The page's images and
+  annotations are listed once per page (a rewrite moves none); paths and forms come with each read of the page.
+  Images or annotations that can't be listed leave the line as wide as it was. The same goes for a block whose line ends can't
   be placed in its new text, for a block whose lines have their own character spacing or scale, and for a match
   that stops inside a word a dropped hyphen split. A match across a line end
   drops
@@ -348,7 +353,8 @@ opening any of those closes it (`src/lib/commentRail.ts`).
   the whole block; typed text is sent first, and a selection made in text the engine then tidied is ignored. The
   editor previews underline and strikeout for the whole block only. Footer: "Changes apply when you click away. Undo with Ctrl+Z."
 - **Cost**: one `text_blocks` call per page that is near the viewport, cached per page and document generation
-  (`src/lib/textEdit.ts`); edits list the one page again.
+  (`src/lib/textEdit.ts`); edits list the one page again. A new generation (undo, redo, Replace) lists only the selected page at once, so
+  that its block follows or goes (a typed text left without its block is told so); the others when they are shown.
 - **Tests**: `src/lib/textEdit.test.ts` (helpers and store flows), `scripts/edit-shots.mjs` (runtime: edit a line,
   size, colour, add a text box, undo/redo, save, reopen, on a copy of `docs/study/samples/edit-source.pdf`; screens in
   `docs/screens/edit/`).
