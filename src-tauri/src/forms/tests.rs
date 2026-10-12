@@ -2211,6 +2211,22 @@ fn every_geometry_tool_is_one_step_that_undoes_exactly_and_survives_save_and_reo
 }
 
 #[test]
+fn distribute_with_overlapping_fields_spans_to_the_furthest_edge_and_keeps_the_order() {
+    // A long field with two short ones inside its span: by leading edge the last is C, but A ends furthest.
+    let fields = [("A", [100.0, 100.0, 300.0, 120.0]), ("B", [110.0, 140.0, 150.0, 160.0]), ("C", [200.0, 180.0, 240.0, 200.0])];
+    let (eng, id, _) = rotated_form("layout-distribute-overlap", &fields);
+    let abc = items_of(&eng, id, &["A", "B", "C"]);
+    distribute_one(&eng, id, &abc, Axis::Horizontal, EditSource::User).unwrap();
+    let r = |n: &str| rect_of_name(&eng, id, n);
+    let (a, b, c) = (r("A"), r("B"), r("C"));
+    assert!(near(a[0], 100.0), "the first stays: {a:?}");
+    assert!(a[0] <= b[0] && b[0] <= c[0], "the order is kept: {a:?} {b:?} {c:?}");
+    assert!(near(b[0] - a[2], c[0] - b[2]), "the gaps are equal: {a:?} {b:?} {c:?}");
+    assert!(near(c[2], 300.0), "the span ends at the furthest edge, not at C's own: {c:?}");
+    assert!(near(b[2] - b[0], 40.0) && near(c[2] - c[0], 40.0), "no field is resized");
+}
+
+#[test]
 fn distribute_needs_three_fields_and_makes_the_gaps_equal() {
     let (eng, id, _) = rotated_form(
         "layout-distribute",

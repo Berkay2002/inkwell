@@ -194,7 +194,8 @@ pub fn center(doc: &mut PdfDocument, items: &[Item], axis: Axis) -> Result<Optio
     commit(doc, moves)
 }
 
-/// Equal gaps between the fields along `axis`, the two outermost staying where they are. Three or more, one page.
+/// Equal gaps between the fields along `axis`, in the order of their leading edges, the first one staying where it is
+/// and the span ending at the furthest trailing edge. Three or more, one page.
 pub fn distribute(doc: &mut PdfDocument, items: &[Item], axis: Axis) -> Result<Option<Vec<u32>>> {
     refuse_certified(doc)?;
     if axis == Axis::Both {
@@ -206,7 +207,9 @@ pub fn distribute(doc: &mut PdfDocument, items: &[Item], axis: Axis) -> Result<O
     one_page(&picked, "Distribute")?;
     let i = usize::from(axis == Axis::Vertical);
     picked.sort_by(|a, b| a.rect[i].total_cmp(&b.rect[i]));
-    let (first, last) = (picked[0].rect[i], picked[picked.len() - 1].rect[i + 2]);
+    // The far end is the furthest trailing edge, not the last field's: a long field that overlaps the others would
+    // otherwise be counted twice.
+    let (first, last) = (picked[0].rect[i], picked.iter().map(|e| e.rect[i + 2]).fold(f32::MIN, f32::max));
     let sizes: f32 = picked.iter().map(|e| e.rect[i + 2] - e.rect[i]).sum();
     let gap = (last - first - sizes) / (picked.len() - 1) as f32;
     let mut at = first;

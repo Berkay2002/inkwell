@@ -100,8 +100,9 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
   column); "vertical centres" one y centre (a row). Same size keeps each field's top-left corner and pulls the field back
   onto the page if it would run off.
 - **Centre on the page** (horizontally, vertically, both) moves the picked fields as a group, per page.
-- **Distribute** (horizontally, vertically) needs three or more fields: the two outermost stay and the gaps between
-  the others become equal (a gap may be negative when the fields are wider than the room).
+- **Distribute** (horizontally, vertically) needs three or more fields: in the order of their leading edges the first
+  stays, the span ends at the furthest trailing edge, and the gaps between the fields become equal (a gap may be
+  negative when the fields are wider than the room, or overlap).
 - **Nudge**: arrow keys move the picked fields 1 pt (Shift: 10 pt), clamped to the page. The presses of a burst are added
   up and sent at key up as one step.
 - All of it is worked out in page space, as shown: `/Rotate` and a crop box that does not start at the origin are
