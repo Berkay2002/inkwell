@@ -437,6 +437,31 @@ fn a_source_with_a_parent_loop_in_its_field_tree_combines_and_its_fields_are_lis
 }
 
 #[test]
+fn a_parent_loop_with_no_field_type_anywhere_still_writes_and_opens() {
+    use crate::outline::tests::raw_pdf;
+    // widget 5 and field 6 are each other's /Parent and no /FT is set: MuPDF refused the copied loop on readback
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] >> >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".into(),
+        "<< >>".into(),
+        "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /Rect [10 10 100 50] /P 3 0 R >>".into(),
+        "<< /T (Loop) /Kids [5 0 R] /Parent 5 0 R >>".into(),
+    ];
+    let d = dir("combine-parent-loop-untyped");
+    let a = write(&d, "a.pdf", 1, 0);
+    let l = d.join("loop.pdf");
+    std::fs::write(&l, raw_pdf(&objs)).unwrap();
+    let l = l.to_string_lossy().into_owned();
+    let (eng, _) = open(&a);
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    combine::run(&eng, &[src(&a, ""), src(&l, "")], opt, &out).unwrap();
+    let (e2, i2) = open(&out);
+    assert_eq!(e2.read_custom(i2, |d| Ok(d.page_count()?)).unwrap(), 2);
+}
+
+#[test]
 fn combine_and_insert_keep_page_transitions() {
     let d = dir("combine-trans");
     let a = write(&d, "a.pdf", 2, 0);
