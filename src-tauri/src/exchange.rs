@@ -216,13 +216,20 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Node> {
     let mut stack: Vec<Node> = Vec::new();
     let mut root: Option<Node> = None;
     let mut count = 0usize;
-    let make = |e: &quick_xml::events::BytesStart, count: &mut usize| -> Result<Node> {
+    // An element and each of its attributes count as one node: a few elements with 100 000 attributes each are
+    // as much work as 100 000 elements.
+    let tick = |count: &mut usize| -> Result<()> {
         *count += 1;
         if *count > MAX_NODES {
-            return Err(bad("This file has more than 100 000 elements, so Inkwell does not read it."));
+            return Err(bad("This file has more than 100 000 elements and attributes, so Inkwell does not read it."));
         }
+        Ok(())
+    };
+    let make = |e: &quick_xml::events::BytesStart, count: &mut usize| -> Result<Node> {
+        tick(count)?;
         let mut n = Node { name: e.local_name().as_ref().to_ascii_lowercase(), ..Node::default() };
         for a in e.attributes() {
+            tick(count)?;
             let a = a.map_err(|_| err("an attribute is malformed"))?;
             let key = a.key.local_name().as_ref().to_string();
             let full: &str = a.key.as_ref();
@@ -407,6 +414,17 @@ mod tests {
         assert!(parse_xml(b"").is_err() && parse_xml(&[0xFF, 0xFE, 0, 1, 2]).is_err(), "garbage");
         let long = format!("<r a=\"{}\"/>", "x".repeat(MAX_STR + 1));
         assert!(parse_xml(long.as_bytes()).is_err(), "string length");
+    }
+
+    #[test]
+    fn attributes_count_toward_the_node_limit() {
+        let attrs = |n: usize| (0..n).map(|i| format!("a{i}=\"1\"")).collect::<Vec<_>>().join(" ");
+        assert!(parse_xml(format!("<r {}/>", attrs(MAX_NODES - 1)).as_bytes()).is_ok(), "right at the limit");
+        let e = parse_xml(format!("<r {}/>", attrs(MAX_NODES)).as_bytes()).unwrap_err();
+        assert!(e.to_string().contains("100 000"), "{e}");
+        // Namespace declarations are read too, so they count.
+        let ns = (0..MAX_NODES).map(|i| format!("xmlns:n{i}=\"u\"")).collect::<Vec<_>>().join(" ");
+        assert!(parse_xml(format!("<r {ns}/>").as_bytes()).is_err());
     }
 
     #[test]
