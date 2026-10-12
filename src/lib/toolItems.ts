@@ -8,6 +8,7 @@ import { useBatch } from "./batchStore";
 import { useConvert } from "./convertStore";
 import { useDocJs } from "./docJsStore";
 import { useMarks } from "./marksStore";
+import { useMeasure } from "./measure";
 import { openConvertColors, openOutputPreview, openPageBoxes, openPrinterMarks } from "./prepressStore";
 import { createPortfolio, usePortfolio } from "./portfolioStore";
 import { useProtect } from "./protectStore";
@@ -28,6 +29,17 @@ import { useTools } from "./toolsStore";
 export function toolItems(doc: Pick<DocState, "id" | "name"> | null, portfolio = false): ToolItem[] {
   const id = doc?.id;
   return [
+    {
+      id: "measure",
+      group: "comment",
+      icon: "ruler",
+      label: "Measure",
+      description: "Measure distances, perimeters and areas on a drawing",
+      detail: "Click along a drawing to get a length, a perimeter or an area at its scale. Snaps to lines, saves each result as a measurement you can export, and can set the scale from a dimension printed on the page.",
+      keywords: "measure distance length perimeter area scale ruler dimension calibrate drawing plan",
+      command: "measure",
+      onSelect: () => useMeasure.getState().setOpen(true),
+    },
     {
       id: "links",
       group: "edit",

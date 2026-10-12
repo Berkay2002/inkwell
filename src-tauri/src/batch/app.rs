@@ -50,6 +50,8 @@ fn env_of(app: &AppHandle, eng: &Arc<Engine>, tesseract: Option<PathBuf>) -> Env
     let eng = eng.clone();
     let mut env = Env::new(tesseract, Arc::new(move |p| eng.check_not_open(&p.to_string_lossy(), None).is_err()));
     env.journal = journal_of(app);
+    let app = app.clone();
+    env.saved = Some(Arc::new(move |p| crate::search::catalog::app::forget_saved(&app, &p.to_string_lossy())));
     env
 }
 

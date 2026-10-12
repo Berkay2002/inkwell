@@ -92,7 +92,7 @@ export interface FileRef {
 /** Open dialog (run by Rust). */
 export const pickOpen = (multiple: boolean, title?: "locate" | "compare" | "search") => invoke<FileRef[]>("pick_open", { multiple, title: title ?? null });
 /** What a save dialog filters for; PDF unless told otherwise. */
-export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "any";
+export type SaveKind = "pdf" | "text" | "html" | "xhtml" | "word" | "csv" | "any";
 /** Save dialog (run by Rust) in the folder of document `doc` or of open token `near`, with file name `name`. */
 export const pickSave = (name: string, at: { doc?: number; near?: string } = {}, kind?: SaveKind) =>
   invoke<FileRef | null>("pick_save", { name, doc: at.doc ?? null, near: at.near ?? null, kind: kind ?? null });
@@ -207,6 +207,7 @@ export interface CatalogMeta {
   pages: number;
   damaged: number;
   password: number;
+  tooLarge: number;
   cloudOnly: number;
   cut: number;
   capped: boolean;
@@ -223,6 +224,7 @@ export interface CatalogSummary {
   removed: number;
   damaged: number;
   password: number;
+  tooLarge: number;
   cloudOnly: number;
   pages: number;
   cut: number;
@@ -345,6 +347,8 @@ export interface EditState {
 
 export const editApply = (doc: number, op: EditOp) => invoke<EditState>("edit_apply", { doc, op });
 export const editUndo = (doc: number) => invoke<EditState>("edit_undo", { doc });
+/** Undo only while the document is still at generation `rev`; rejects with "stale" when a step landed since. */
+export const editUndoIf = (doc: number, rev: number) => invoke<EditState>("edit_undo_if", { doc, rev });
 export const editRedo = (doc: number) => invoke<EditState>("edit_redo", { doc });
 export const editState = (doc: number) => invoke<EditState>("edit_state", { doc });
 

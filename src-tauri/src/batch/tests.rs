@@ -1047,6 +1047,39 @@ fn a_batch_output_drops_an_embedded_index_the_step_made_stale() {
     assert!(!embed::status(&out).present, "the stale index is not kept in the output");
 }
 
+/// A result is written to a name a catalog still lists (the file there was deleted after the catalog was built):
+/// the catalog must not keep the old file's words under it.
+#[test]
+fn a_redaction_written_over_a_catalogued_name_is_forgotten_by_the_catalog() {
+    use crate::search::catalog::{self, app::{forget_all, Jobs}};
+    let d = dir("redact-forgets");
+    let docs = d.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    let src = put(&docs, "in.pdf", &text_pdf(&[&["the secret word is quokka"]]));
+    let stale = put(&docs, "in (batch).pdf", &text_pdf(&[&["older words, also quokka"]]));
+    let root = d.join("catalogs");
+    let m = catalog::create(&root, "T", &docs.to_string_lossy(), true).unwrap();
+    let cat = root.join(&m.id);
+    catalog::build(&cat, true, &AtomicBool::new(false), &|_, _| {}).unwrap();
+    assert_eq!(catalog::load_meta(&cat).unwrap().files, 2);
+    std::fs::remove_file(&stale).unwrap();
+    let jobs = Arc::new(Jobs::default());
+    let mut e = env();
+    let (r2, j2) = (root.clone(), jobs.clone());
+    e.saved = Some(Arc::new(move |p| {
+        let _ = forget_all(&r2, &j2, p);
+    }));
+    let redact = Step::Redact(RedactStep {
+        queries: vec![RedactQuery::Text { text: "quokka".into(), case_sensitive: false, whole_word: true }],
+        ..RedactStep::default()
+    });
+    let r = run(&action("R", vec![redact]), &[src], None, &e, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    assert_eq!(r.files[0].status, Status::Ok, "{:?}", r.files[0].reason);
+    assert_eq!(Path::new(&r.files[0].outputs[0].path), stale, "the result took the name the catalog lists");
+    let rows = catalog::load_meta(&cat).unwrap();
+    assert_eq!(rows.files, 1, "the row of the name the result was written to is gone");
+}
+
 #[test]
 fn the_built_in_actions_run_end_to_end() {
     let d = dir("builtins");

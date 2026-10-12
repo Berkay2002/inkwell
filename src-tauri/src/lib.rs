@@ -79,6 +79,7 @@ enum SaveKind {
     Html,
     Xhtml,
     Word,
+    Csv,
     /// No filter: print-to-file output whose format the printer driver decides.
     Any,
 }
@@ -147,6 +148,7 @@ async fn pick_save(
             SaveKind::Html => d.add_filter("HTML", &["html", "htm"]),
             SaveKind::Xhtml => d.add_filter("XHTML", &["xhtml"]),
             SaveKind::Word => d.add_filter("Word document", &["docx"]),
+            SaveKind::Csv => d.add_filter("CSV (spreadsheet)", &["csv"]),
             SaveKind::Any => d,
         };
         if let Some(dir) = near.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
@@ -412,6 +414,13 @@ async fn edit_apply(window: Window, eng: Eng<'_>, reg: Reg<'_>, doc: DocId, mut 
 async fn edit_undo(eng: Eng<'_>, doc: DocId) -> Result<EditState, EngineError> {
     let eng = eng.inner().clone();
     blocking(move || eng.undo(doc)).await
+}
+
+/// Undo, but only while the document is still at generation `rev` (see `Engine::undo_if`); "stale" otherwise.
+#[tauri::command]
+async fn edit_undo_if(eng: Eng<'_>, doc: DocId, rev: u32) -> Result<EditState, EngineError> {
+    let eng = eng.inner().clone();
+    blocking(move || eng.undo_if(doc, rev)).await
 }
 
 #[tauri::command]
@@ -1065,6 +1074,7 @@ pub fn run() {
             tile_raw,
             edit_apply,
             edit_undo,
+            edit_undo_if,
             edit_state,
             edit_redo,
             history_ipc::history_state,
@@ -1168,12 +1178,15 @@ pub fn run() {
             annot::app::annot_delete,
             annot::app::annot_reply,
             annot::app::annot_state,
+            measure::app::measure_lock,
             measure::app::measure_scale_get,
             measure::app::measure_scale_set,
             measure::app::measure_add,
             measure::app::measure_value,
             measure::app::measure_list,
             measure::app::measure_snap,
+            measure::app::measure_rescale,
+            measure::app::measure_export_csv,
             forms::app::forms_list,
             forms::app::forms_set_value,
             forms::app::forms_reset,
