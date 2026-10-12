@@ -2,10 +2,13 @@
 
 /* Read | Edit | Organize, also in the reader's toolbar */
 .mode-pill {
+  --pill-pad: 2px;
   display: inline-flex;
   flex: none;
+  box-sizing: border-box;
+  height: var(--tb-control-h);
   gap: 2px;
-  padding: 3px;
+  padding: var(--pill-pad);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
@@ -14,9 +17,10 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 12px;
-  border-radius: 7px;
+  /* the pill's height less its border and padding: the active item never stands taller than Tools or the assistant */
+  height: calc(var(--tb-control-h) - 2px - 2 * var(--pill-pad));
+  padding: 0 10px;
+  border-radius: calc(var(--radius-md) - var(--pill-pad));
   color: var(--text);
 }
 .mode-pill button:hover:not(.on) {

@@ -91,7 +91,7 @@ export function TabBar() {
 function Btn({ icon, title, on, onClick, disabled }: { icon: IconName; title: string; on?: boolean; onClick: () => void; disabled?: boolean }) {
   return (
     <button className={on ? "icon-btn on" : "icon-btn"} title={title} aria-label={title} aria-pressed={on} onClick={onClick} disabled={disabled}>
-      <Icon name={icon} />
+      <Icon name={icon} size={20} filled={on} />
     </button>
   );
 }

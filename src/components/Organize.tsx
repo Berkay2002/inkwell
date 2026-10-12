@@ -39,15 +39,15 @@ export function ModeSwitch({ doc }: { doc: DocState }) {
   return (
     <div className="mode-pill" role="tablist" aria-label="View">
       <button role="tab" aria-selected={!doc.organize && !editing} className={doc.organize || editing ? "" : "on"} onClick={() => set(false)}>
-        <Icon name="book" size={15} />
+        <Icon name="book" size={16} filled={!doc.organize && !editing} />
         Read
       </button>
       <button role="tab" aria-selected={editing} className={editing ? "on" : ""} onClick={() => set(false, true)}>
-        <Icon name="edit" size={15} />
+        <Icon name="edit" size={16} filled={editing} />
         Edit
       </button>
       <button role="tab" aria-selected={doc.organize} className={doc.organize ? "on" : ""} onClick={() => set(true)}>
-        <Icon name="grid" size={15} />
+        <Icon name="grid" size={16} filled={doc.organize} />
         Organize
       </button>
     </div>

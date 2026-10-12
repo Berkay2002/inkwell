@@ -57,7 +57,7 @@ function PanelTab({ name, label, icon }: { name: Exclude<SidebarPanel, "none">; 
       aria-label={icon ? label : undefined}
       onClick={() => useStore.getState().setSidebar(name)}
     >
-      {icon ? <Icon name={icon} size={15} /> : label}
+      {icon ? <Icon name={icon} size={16} filled={on} /> : label}
     </button>
   );
 }

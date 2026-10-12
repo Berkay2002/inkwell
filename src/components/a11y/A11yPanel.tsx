@@ -29,7 +29,7 @@ import {
 import { renderPage } from "../../lib/history";
 import { revealInFolder } from "../../recents";
 import type { DocState } from "../../store";
-import { Icon } from "../Icons";
+import { Icon, type IconName } from "../Icons";
 import { OrderTool } from "./OrderTool";
 import { TagsTree } from "./TagsTree";
 import "./a11y.css";
@@ -361,7 +361,7 @@ function GroupView({ doc, group }: { doc: DocState; group: Group }) {
   );
 }
 
-const GLYPH: Record<RuleResult["status"], string> = { passed: "✓", failed: "✕", manual: "!", skipped: "–" };
+const GLYPH: Record<RuleResult["status"], IconName> = { passed: "check", failed: "close", manual: "warning", skipped: "minus" };
 
 export function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
   const lang = useA11y((s) => s.lang);
@@ -381,7 +381,7 @@ export function Rule({ doc, x }: { doc: DocState; x: RuleResult }) {
     <li className={`a11y-rule ${x.status}`}>
       <div className="a11y-rule-head">
         <span className={`a11y-glyph ${x.status}`} aria-hidden="true">
-          {GLYPH[x.status]}
+          <Icon name={GLYPH[x.status]} size={14} />
         </span>
         <span className="a11y-rule-name">{x.name}</span>
         <span className={`a11y-status ${x.status}`}>{STATUS_WORD[x.status]}</span>
