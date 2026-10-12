@@ -70,7 +70,9 @@ form `/BBox` are the box of all that. A measurement from another app keeps its o
 and last point), `/IC` for the area fill, and on a distance `/LL`, `/LLE` and `/LLO`: the dimension line, its label and
 its endings are drawn `/LL` from the points (clockwise on screen when positive), with leader lines from `/LLO` next to
 each point to `/LLE` past the dimension line. `/Rect` and `/BBox` take in the endings, the leaders and the wider
-stroke. A distance with no `/LE` gets our end ticks. Every move writes a new appearance stream and font and points
+stroke. A polygon with an `/IC` keeps the fill opacity the file asked for (`/ca` or `/CA` of the annotation, else the
+`/ca` of its appearance's graphics states) and is opaque when it asked for none; ours is a 12% wash. A distance with
+no `/LE` gets our end ticks. Every move writes a new appearance stream and font and points
 `/AP /N` at them; it never edits the stream the annotation pointed at, because a file can share that form with other
 annotations or the page. The stream MuPDF's own `update` makes in between is deleted, but the previous appearance (and
 its font) stays in the file unused until a full save. An `annot_edit` colour change makes MuPDF redraw the shape without the label.
@@ -146,19 +148,21 @@ Comments does (opening one closes the other) and shows a floating bar over the p
 - **Drag to edit:** with Select and a measurement selected, each of its points shows a handle. Drag one to move that
   point: it snaps as drawing does (end points, midpoints, crossings, the path), Shift holds it to 45 degrees from the
   point before it (an area's first point to its last) and turns snapping off, and the label next to it shows the new
-  value while you drag. Release writes it (`measure_move`, one undo step). Esc during the drag puts it back; a click
+  value and the snap ("End point"...) while you drag, with the same marker as drawing on the point. Release writes it
+  (`measure_move`, one undo step). Esc during the drag puts it back, and so does a release off the page or outside the
+  viewer (outside the window the pointer is clamped to the edge, and some webviews report 0,0); a click
   without moving writes nothing. From the keyboard a handle takes focus (Tab), the arrow keys move it by 1 point
   (Shift: 10) along the screen whatever the page rotation, and the move is written after a short pause, on Enter, when
   focus leaves or the tool changes (a run of keys is one undo step); Esc drops it, and so does a pointer capture that is
   lost before the button comes up. Handles have an aria label ("Area point 3 of 4").
-  Not shown on a certified file at `/P` 1 or 2 (it says why in the rail); a signed file shows the same note links and
+  Not shown on a certified file at `/P` 1 or 2 (the rail says why, with or without a selection); a signed file shows the same note links and
   outline give, and the change is saved after the signature.
 - **Result:** one `measure_add` (one undo step, saved by Save, in history). The page then draws the engine's own
   appearance with its label. With Select, a click on a measurement selects it: the rail shows its value, units and
   scale. Its scale (or unit) can be changed and Apply re-measures it (`measure_rescale`); Delete (key or button) removes
   it (`annot_delete`, one undo step). Re-measuring replaces the annotation, so replies to it go too and the new one is last
   in `/Annots` (undo brings them back). Undo, redo and a restored version re-read the list and the page scales.
-- **Rail:** the selected measurement, or the last value made; the cumulative value per kind and unit (never summed across
+- **Rail:** the selected measurement (its value follows a drag as the label does), or the last value made; the cumulative value per kind and unit (never summed across
   units); the list by page (click to jump to it); Export to CSV.
 - **Calibrate:** pick it from the scale chip, draw over a dimension printed on the drawing, type its real length and
   unit: the page scale becomes "1 in = n unit" (n = real length x 72 / the line's length in points).

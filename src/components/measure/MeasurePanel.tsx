@@ -16,6 +16,10 @@ export function MeasurePanel({ doc }: { doc: DocState }) {
   const items = d?.items ?? NO_ITEMS;
   const sel = d?.selected ? (items.find((m) => m.page === d.selected!.page && m.xref === d.selected!.xref) ?? null) : null;
   const sums = useMemo(() => totals(items), [items]);
+  const live = useMeasure((s) => s.live);
+  const locked = useMeasure((s) => s.locks[id]) ?? null;
+  /** The value under way in a drag, else the stored one. */
+  const valueOf = (m: Measure) => (live && live.doc === id && live.xref === m.xref ? live.text : m.quantity.text);
 
   useEffect(() => {
     if (open) void ms().refresh(id);
@@ -41,7 +45,12 @@ export function MeasurePanel({ doc }: { doc: DocState }) {
           </button>
         </div>
         <div className="cm-body ms-body">
-          {sel ? <Selected doc={id} m={sel} /> : d?.last ? <Last last={d.last} /> : <p className="dim cm-empty">Pick Distance, Perimeter or Area and click on the page. Select shows a measurement here.</p>}
+          {locked && (
+            <p className="dim ms-hint" role="note">
+              {locked}
+            </p>
+          )}
+          {sel ? <Selected doc={id} m={sel} value={valueOf(sel)} /> : d?.last ? <Last last={d.last} /> : <p className="dim cm-empty">Pick Distance, Perimeter or Area and click on the page. Select shows a measurement here.</p>}
 
           {sums.length > 0 && (
             <section className="ms-sec">
@@ -69,7 +78,7 @@ export function MeasurePanel({ doc }: { doc: DocState }) {
                 .map((m) => (
                   <button key={m.xref} className={`ms-item${sel?.xref === m.xref ? " on" : ""}`} onClick={() => go(m)}>
                     <span>{KIND_NAME[m.kind]}</span>
-                    <b>{m.quantity.text}</b>
+                    <b>{valueOf(m)}</b>
                   </button>
                 ))}
             </section>
@@ -98,7 +107,7 @@ function Last({ last }: { last: LastMeasure }) {
 }
 
 /** One measurement: its value, scale and units; the scale can be changed (it is measured again) and it can be deleted. */
-function Selected({ doc, m }: { doc: number; m: Measure }) {
+function Selected({ doc, m, value }: { doc: number; m: Measure; value: string }) {
   const live = useMeasure((s) => scaleOf(s.docs[doc], m.page));
   const locked = useMeasure((s) => s.locks[doc]) ?? null;
   const signed = useMeasure((s) => !!s.signed[doc]);
@@ -113,7 +122,7 @@ function Selected({ doc, m }: { doc: number; m: Measure }) {
       <h3 className="cm-page">
         {KIND_NAME[m.kind]} · page {m.page + 1}
       </h3>
-      <div className="ms-big">{m.quantity.text}</div>
+      <div className="ms-big">{value}</div>
       <dl className="ms-facts">
         <dt>Units</dt>
         <dd>{m.quantity.unit}</dd>

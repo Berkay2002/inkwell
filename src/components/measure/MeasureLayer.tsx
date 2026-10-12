@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { scaleOf, useMeasure } from "../../lib/measure";
 import {
-  type Hover, type Measure, type MeasureKind, type Pt, KIND_NAME, MIN_POINTS, clickAt, latestOnly, neighbour, nudge, numText, place,
+  type Hover, type Measure, type MeasureKind, type Pt, KIND_NAME, MIN_POINTS, clickAt, latestOnly, neighbour, nudge, inBox, numText, onPage, place,
   quantityOf, UNSCALED,
 } from "../../lib/measureLogic";
 import { type Rot, type Size, pageSpaceTransform } from "../../lib/layout";
@@ -35,6 +35,8 @@ interface Edit {
   /** All the points as they would be. */
   pts: Pt[];
   moved: boolean;
+  /** The snap the dragged point sits on, for the marker and the name next to it (null: none, or moved by the keys). */
+  snap: Hover["snap"];
   /** Written; the points stay on show until the list has been read again. */
   saving: boolean;
 }
@@ -165,11 +167,16 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     return () => window.removeEventListener("keydown", k);
   });
 
-  const toPage = (e: { clientX: number; clientY: number }): Pt => {
+  /** Where the pointer is in page space, off the page too. */
+  const atPage = (e: { clientX: number; clientY: number }): Pt => {
     const m = new DOMMatrix(getComputedStyle(space.current!).transform).inverse();
     const r = space.current!.parentElement!.getBoundingClientRect();
     const q = m.transformPoint({ x: e.clientX - r.left, y: e.clientY - r.top });
-    return [Math.min(Math.max(q.x, 0), rawSize[0]), Math.min(Math.max(q.y, 0), rawSize[1])];
+    return [q.x, q.y];
+  };
+  const toPage = (e: { clientX: number; clientY: number }): Pt => {
+    const q = atPage(e);
+    return [Math.min(Math.max(q[0], 0), rawSize[0]), Math.min(Math.max(q[1], 0), rawSize[1])];
   };
 
   const busy = useRef(false);
@@ -232,7 +239,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     const was = ms().get(docId).items.find((m) => m.xref === e.xref);
     if (!e.moved || !was || was.points.every((p, j) => p[0] === e.pts[j][0] && p[1] === e.pts[j][1])) return setEdit(null);
     // the ref too: a blur or a click that follows in this event must see it is being written
-    editRef.current = { ...e, saving: true };
+    editRef.current = { ...e, snap: null, saving: true };
     setEdit(editRef.current);
     // The new points stay on show until the list has been read again; a refusal puts the old ones back (the panel says why).
     void ms().move(docId, { page, xref: e.xref }, e.pts).then(() => setEdit((cur) => (cur?.saving ? null : cur)));
@@ -259,7 +266,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     const same = cur?.xref === m.xref;
     holding.current = true;
     stopTimer();
-    setEdit({ xref: m.xref, i, pts: same ? cur.pts : m.points, moved: same && cur.moved, saving: false });
+    setEdit({ xref: m.xref, i, pts: same ? cur.pts : m.points, moved: same && cur.moved, snap: null, saving: false });
   };
   const drag = (e: React.PointerEvent, m: Measure) => {
     const cur = editRef.current;
@@ -268,7 +275,12 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
       setEdit((c) => {
         if (!c || c.saving) return c;
         const from = m.points[c.i];
-        return { ...c, pts: c.pts.map((p, j) => (j === c.i ? h.at : p)), moved: c.moved || Math.hypot(h.at[0] - from[0], h.at[1] - from[1]) * zoom > 2 };
+        return {
+          ...c,
+          pts: c.pts.map((p, j) => (j === c.i ? h.at : p)),
+          moved: c.moved || Math.hypot(h.at[0] - from[0], h.at[1] - from[1]) * zoom > 2,
+          snap: h.snap,
+        };
       }),
     );
   };
@@ -279,6 +291,10 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     asked.cancel();
     want.current = null;
+    // Let go off the page or outside the viewer (outside the window the pointer is clamped to its edge, and a webview
+    // may report 0,0, which a zoomed page can cover): the point goes back, as with Esc.
+    const viewer = space.current?.closest(".viewer");
+    if (!onPage(atPage(e), rawSize) || (viewer && !inBox([e.clientX, e.clientY], viewer.getBoundingClientRect()))) return cancel();
     if (editRef.current && !editRef.current.saving) commit(editRef.current);
   };
   const press = (e: React.KeyboardEvent, m: Measure, i: number) => {
@@ -298,7 +314,7 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     if (!next) return;
     e.preventDefault();
     e.stopPropagation();
-    setEdit({ xref: m.xref, i, pts: next, moved: true, saving: false });
+    setEdit({ xref: m.xref, i, pts: next, moved: true, snap: null, saving: false });
     stopTimer();
     timer.current = window.setTimeout(() => {
       const c = editRef.current;
@@ -309,6 +325,15 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
   const ownLabel = !!em && em.plain && !!em.scale;
   const editRemote = useRemoteLabel(edit?.moved && em && !ownLabel ? { doc: docId, page, kind: em.kind, pts: edit.pts, xref: em.xref } : null);
   const editLabel = !edit?.moved || !em ? null : ownLabel ? quantityOf(em.kind, edit.pts, em.scale!).text : editRemote;
+
+  // The value the rail shows while this layer's drag is on (cleared when it ends, only by the layer that set it).
+  const liveText = edit?.moved && editLabel ? editLabel : null;
+  const liveXref = edit?.xref;
+  useEffect(() => {
+    if (liveText === null || liveXref === undefined) return;
+    ms().setLive({ doc: docId, xref: liveXref, text: liveText });
+    return () => ms().setLive(null);
+  }, [docId, liveXref, liveText]);
 
   const style = (at: Pt) => ({ left: at[0], top: at[1] });
   const path = (p: Pt[]) => p.map((q) => `${q[0]},${q[1]}`).join(" ");
@@ -323,6 +348,8 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
     return pagePlain ? quantityOf(liveKind!, live, scale).text : (drawRemote ?? "");
   })();
   const sz = 5 / zoom;
+  // The snap marker: at the pointer while drawing, on the dragged point while a handle is held.
+  const mark = kind ? hover : edit?.snap && !edit.saving ? { at: edit.pts[edit.i], snap: edit.snap } : null;
 
   return (
     <>
@@ -376,13 +403,13 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
           {pts.map((q, i) => (
             <circle key={i} className="ms-vertex" cx={q[0]} cy={q[1]} r={sz * 0.7} />
           ))}
-          {kind && hover?.snap && (
-            <g className={`ms-snap ${hover.snap}`} transform={`translate(${hover.at[0]} ${hover.at[1]})`}>
-              {hover.snap === "midpoint" ? (
+          {mark?.snap && (
+            <g className={`ms-snap ${mark.snap}`} transform={`translate(${mark.at[0]} ${mark.at[1]})`}>
+              {mark.snap === "midpoint" ? (
                 <polygon points={`0,${-sz * 1.3} ${sz * 1.2},${sz} ${-sz * 1.2},${sz}`} />
-              ) : hover.snap === "intersection" ? (
+              ) : mark.snap === "intersection" ? (
                 <path d={`M${-sz} ${-sz}L${sz} ${sz}M${sz} ${-sz}L${-sz} ${sz}`} />
-              ) : hover.snap === "line" ? (
+              ) : mark.snap === "line" ? (
                 <path d={`M${-sz} 0H${sz}M0 ${-sz}V${sz}`} />
               ) : (
                 <rect x={-sz} y={-sz} width={sz * 2} height={sz * 2} />
@@ -390,13 +417,14 @@ function Layer({ docId, page, rot, rawSize, zoom }: Props) {
             </g>
           )}
         </svg>
-        {edit?.moved && editLabel && (
+        {edit?.moved && (editLabel || mark?.snap) && (
           <div
             className="ms-label"
             style={{ ...style(edit.pts[edit.i]), transform: `rotate(${-rot * 90}deg) scale(${1 / zoom}) translate(14px, 14px)` }}
             aria-hidden="true"
           >
-            <b>{editLabel}</b>
+            {editLabel ? <b>{editLabel}</b> : null}
+            {!kind && mark?.snap && <span>{SNAP_NAME[mark.snap]}</span>}
           </div>
         )}
         {kind && hover && (

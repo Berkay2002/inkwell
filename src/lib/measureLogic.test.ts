@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  neighbour, nudge, pageDelta,
+  inBox, neighbour, nudge, onPage, pageDelta, type Pt,
   type Measure, type Scale, UNSCALED, calibrate, clickAt, latestOnly, constrain45, inUnit, numText, parseScale, parseUnit, pathLength,
   place, polygonArea, quantityOf, realPerPt, scaleLabel, totals, trimNum,
 } from "./measureLogic";
@@ -161,5 +161,30 @@ describe("calibrating and totals", () => {
     expect(neighbour("perimeter", a, 0)).toEqual([10, 0]);
     expect(neighbour("perimeter", a, 2)).toEqual([10, 0]);
     expect(neighbour("area", a, 0)).toEqual([10, 10]);
+  });
+});
+
+describe("where a drag may end", () => {
+  it("a release outside the viewer's box is dropped, even where a zoomed page covers it", () => {
+    const box = { left: 200, top: 50, right: 1000, bottom: 700 };
+    expect(inBox([500, 300], box)).toBe(true);
+    expect(inBox([200, 700], box)).toBe(true);
+    expect(inBox([0, 0], box)).toBe(false);
+    expect(inBox([1001, 300], box)).toBe(false);
+    expect(inBox([500, 701], box)).toBe(false);
+    expect(inBox([NaN, 300], box)).toBe(false);
+  });
+  const size: Pt = [612, 792];
+  it("a release on the page, edges included, is kept", () => {
+    expect(onPage([300, 400], size)).toBe(true);
+    expect(onPage([0, 0], size)).toBe(true);
+    expect(onPage([612, 792], size)).toBe(true);
+  });
+  it("a release past any edge, or at nothing, is dropped", () => {
+    expect(onPage([-0.5, 400], size)).toBe(false);
+    expect(onPage([300, -10], size)).toBe(false);
+    expect(onPage([612.5, 400], size)).toBe(false);
+    expect(onPage([300, 800], size)).toBe(false);
+    expect(onPage([NaN, 400], size)).toBe(false);
   });
 });

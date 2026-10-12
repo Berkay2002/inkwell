@@ -1287,6 +1287,96 @@ fn moving_a_foreign_measure_keeps_its_look_and_does_not_clip_it() {
     });
 }
 
+/// A polygon from another app. `annot` is extra entries of the annotation (`/IC`, `/CA`), `gs` the
+/// graphics states its form carries (`/Resources` of the form).
+fn foreign_area(annot: &str, gs: &str) -> Spec {
+    let d = "<< /Type /NumberFormat /U (sq ft) /C 1 /D 100 /FD true >>";
+    let measure = format!("<< /Type /Measure /Subtype /RL /R (1 in = 10 ft) /X [{XFT}] /D [{XFT}] /A [{d}] >>");
+    let res = if gs.is_empty() { String::new() } else { format!("/Resources << /ExtGState << {gs} >> >>") };
+    Spec {
+        page: "/Annots [5 0 R]".into(),
+        extra: vec![
+            (
+                5,
+                format!(
+                    "<< /Type /Annot /Subtype /Polygon /Rect [100 600 172 672] /Vertices [100 600 172 600 172 672 100 672] \
+                     /IT /PolygonDimension /F 4 /C [0 0 1] {annot} /AP << /N 7 0 R >> /Measure {measure} >>"
+                ),
+            ),
+            (7, format!("<< /Type /XObject /Subtype /Form /BBox [100 600 172 672] {res} /Length 3 >>\nstream\nq Q\nendstream")),
+        ],
+        ..Default::default()
+    }
+}
+
+/// The `/ca` of the first graphics state of the annotation's own appearance, and the pixel inside the area after a move.
+fn fill_after_move(test: &str, spec: &Spec) -> (f64, [i32; 3]) {
+    let (eng, id, _) = open(test, spec);
+    let xref = list_all(&eng, id).unwrap()[0].xref;
+    // The same 72 x 72 square, moved up to the top of the page (page space, y down).
+    let square = [[100.0, 100.0], [172.0, 100.0], [172.0, 172.0], [100.0, 172.0]];
+    move_points(&eng, id, 0, xref, &square, EditSource::User).unwrap();
+    // A second move reads the form the first one wrote: the opacity is carried, not reset.
+    let again = [[100.0, 100.0], [172.0, 100.0], [172.0, 172.0], [100.0, 180.0]];
+    move_points(&eng, id, 0, xref, &again, EditSource::User).unwrap();
+    let ca = with_annot(&eng, id, xref, |o| {
+        let ap = o.get_dict("AP").unwrap().unwrap().get_dict("N").unwrap().unwrap();
+        let gs = ap.get_dict("Resources").unwrap().unwrap().get_dict("ExtGState").unwrap().unwrap().get_dict("GS1").unwrap().unwrap();
+        f64::from(gs.get_dict("ca").unwrap().unwrap().as_float().unwrap())
+    });
+    let px = eng
+        .read_custom(id, |d| {
+            let p = d.load_pdf_page(0)?;
+            let pix = p.to_pixmap(&mupdf::Matrix::IDENTITY, &mupdf::Colorspace::device_rgb(), false, true)?;
+            let (w, n) = (pix.width() as usize, pix.n() as usize);
+            let i = (130 * w + 120) * n;
+            Ok([i32::from(pix.samples()[i]), i32::from(pix.samples()[i + 1]), i32::from(pix.samples()[i + 2])])
+        })
+        .unwrap();
+    (ca, px)
+}
+
+#[test]
+fn a_moved_foreign_area_keeps_the_fill_opacity_the_file_asked_for() {
+    const RED: &str = "/IC [1 0 0]";
+    // An /IC and no opacity anywhere: opaque, as it was drawn before the move.
+    let (ca, px) = fill_after_move("fill-opaque", &foreign_area(RED, ""));
+    assert_eq!(ca, 1.0);
+    assert!(px[0] > 200 && px[1] < 30 && px[2] < 30, "solid red inside: {px:?}");
+    // /CA on the annotation.
+    let (ca, px) = fill_after_move("fill-ca", &foreign_area("/IC [1 0 0] /CA 0.5", ""));
+    assert_eq!(ca, 0.5);
+    assert!(px[0] > 200 && (100..160).contains(&px[1]), "half red inside: {px:?}");
+    // /ca of its appearance's graphics state, when the annotation says nothing.
+    let (ca, _) = fill_after_move("fill-gs", &foreign_area(RED, "/GS0 << /Type /ExtGState /ca 0.25 /CA 1 >>"));
+    assert_eq!(ca, 0.25);
+    // A state that sets only the stroke's /CA, listed first, is not the fill's opacity.
+    let (ca, _) = fill_after_move("fill-stroke-gs", &foreign_area(RED, "/GS0 << /CA 1 >> /GS1 << /ca 0.3 >>"));
+    assert!((ca - 0.3).abs() < 1e-6, "{ca}");
+    // The annotation's /CA wins over the form's.
+    let (ca, _) = fill_after_move("fill-both", &foreign_area("/IC [1 0 0] /CA 0.5", "/GS0 << /ca 0.25 >>"));
+    assert_eq!(ca, 0.5);
+    // No /IC: the file draws no fill, so an opacity it names is no reason to paint one; the light wash stays.
+    for (test, annot, gs) in [("wash-ca", "/CA 1", ""), ("wash-gs", "", "/GS0 << /ca 1 >>")] {
+        let (ca, px) = fill_after_move(test, &foreign_area(annot, gs));
+        assert!((ca - 0.12).abs() < 1e-6, "{test}: {ca}");
+        assert!(px[0] > 200 && px[1] > 150, "{test}: pale inside: {px:?}");
+    }
+}
+
+#[test]
+fn an_area_of_ours_keeps_its_light_wash_when_moved() {
+    let (eng, id, _) = open("own-wash", &Spec::default());
+    let (xref, _) = add(&eng, id, Kind::Area, &[[100.0, 100.0], [172.0, 100.0], [172.0, 172.0], [100.0, 172.0]], Some(&FT10));
+    move_points(&eng, id, 0, xref, &[[100.0, 100.0], [172.0, 100.0], [172.0, 172.0], [100.0, 200.0]], EditSource::User).unwrap();
+    let ca = with_annot(&eng, id, xref, |o| {
+        let ap = o.get_dict("AP").unwrap().unwrap().get_dict("N").unwrap().unwrap();
+        let gs = ap.get_dict("Resources").unwrap().unwrap().get_dict("ExtGState").unwrap().unwrap().get_dict("GS1").unwrap().unwrap();
+        f64::from(gs.get_dict("ca").unwrap().unwrap().as_float().unwrap())
+    });
+    assert!((ca - 0.12).abs() < 1e-6, "{ca}");
+}
+
 #[test]
 fn plain_says_whether_the_ui_can_label_it_alone() {
     // Nothing on the page, and a scale of ours, are plain; so is an annotation we made.
