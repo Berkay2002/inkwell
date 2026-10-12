@@ -119,7 +119,7 @@ function Layer({ docId, page, rot, rawSize, zoom, list, show, tool, follow, foll
   return (
     <div
       ref={space}
-      className={`th-space${tool ? " tool" : ""}`}
+      className="th-space"
       style={{ width: rawSize[0], height: rawSize[1], transform: pageSpaceTransform(rawSize, rot, zoom), "--z": zoom } as React.CSSProperties}
     >
       {tool && (

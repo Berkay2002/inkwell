@@ -250,11 +250,11 @@ function PagePreview({ doc, page, size, rev, extent, children, caption }: { doc:
 
 function ConvertView({ sheet }: { sheet: ConvertSheet }) {
   const d = useStore((s) => s.docs[sheet.doc]);
+  const locked = useLocked(sheet.doc)?.certified === true;
   if (!d) return null;
   const o = sheet.opts;
   const set = act().setConvert;
   const running = sheet.phase === "running";
-  const locked = useLocked(sheet.doc)?.certified === true;
   const problem = convertProblem(o, d.pageCount, d.currentPage);
   return (
     <section className="pr-sheet pp-sheet" role="dialog" aria-modal="true" tabIndex={-1} aria-label="Convert Colors" onMouseDown={(e) => e.stopPropagation()}>

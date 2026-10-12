@@ -1,0 +1,68 @@
+/* ErrorBoundary: the card that stands in for a panel that crashed. */
+.err-boundary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  padding: 16px;
+}
+.err-boundary.fill {
+  flex: 1;
+}
+.err-boundary.dock {
+  flex: none;
+  width: min(360px, 45vw);
+  background: var(--window);
+}
+.err-boundary.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  align-items: center;
+  background: rgb(0 0 0 / 0.25);
+}
+.err-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 16px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+.err-card h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--danger);
+}
+.err-card p {
+  margin: 0 0 10px;
+  color: var(--text-2);
+}
+.err-msg {
+  margin: 0 0 12px;
+  padding: 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+.err-actions {
+  display: flex;
+  gap: 8px;
+}
+.err-retry,
+.err-close {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+}
+.err-retry {
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+.err-close {
+  color: var(--text);
+  background: var(--surface-2);
+}

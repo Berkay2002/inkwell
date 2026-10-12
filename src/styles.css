@@ -873,7 +873,7 @@ select {
   padding: 0;
   list-style: none;
 }
-.tool {
+.quick-tool {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -888,7 +888,7 @@ select {
     transform 0.12s,
     box-shadow 0.12s;
 }
-.tool:hover {
+.quick-tool:hover {
   transform: translateY(-1px);
   box-shadow: var(--shadow-2);
 }
@@ -1577,7 +1577,7 @@ select {
   .home *::after {
     transition: none !important;
   }
-  .home .tool:hover {
+  .home .quick-tool:hover {
     transform: none;
   }
 }
