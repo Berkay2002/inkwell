@@ -602,16 +602,23 @@ pub(crate) fn authenticate_typed(d: &mut Document, pw: &str) -> Result<bool> {
 
 /// Another PDF to take pages from.
 pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
+    open_source_ex(path, password).map(|(d, _)| d)
+}
+
+/// [`open_source`] that also says whether the file asked for an open password (an owner-password-only
+/// file opens without one).
+pub(crate) fn open_source_ex(path: &str, password: Option<&str>) -> Result<(PdfDocument, bool)> {
     check_pdf(path)?;
     let mut d = Document::open(path)?;
-    if d.needs_password()? {
+    let locked = d.needs_password()?;
+    if locked {
         match password {
             None => return Err(EngineError::NeedsPassword),
             Some(pw) if !authenticate_typed(&mut d, pw)? => return Err(EngineError::BadPassword),
             _ => {}
         }
     }
-    Ok(PdfDocument::try_from(d)?)
+    Ok((PdfDocument::try_from(d)?, locked))
 }
 
 /// Page keys copied into a grafted page (MuPDF's list): nothing that points at other pages.

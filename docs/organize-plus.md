@@ -122,7 +122,8 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   pages, Split and Merge files all drop the signature of the pages they copy too; only Combine shows a note for
   it (the others have no place to put one). The document the pages come from is not changed.
 - A source's security is never carried over: a source with a password or owner restrictions goes in, the result
-  has neither, and the row says "x.pdf's password and restrictions are not carried over", naming the rights
+  has neither, and the row says "x.pdf's password and restrictions are not carried over" (an owner-password-only
+  source has no password, so it says "x.pdf's security is not carried over"), naming the rights
   its permission bits withheld (printing, editing, commenting, form filling and the like) when there are any. An
   owner-password-only source has no password to type, so the row note and the footer ("The combined file has no
   password and no restrictions") are where this shows. A source that forbids copying, or both page

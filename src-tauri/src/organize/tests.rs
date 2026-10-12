@@ -804,9 +804,9 @@ fn a_source_with_security_says_its_password_and_restrictions_are_not_carried_ove
     assert!(plan.files[1].encrypted);
     assert_eq!(
         plan.files[1].note.as_deref(),
-        Some("owner.pdf's password and restrictions are not carried over (it does not allow printing, editing, commenting, form filling, screen reader access)")
+        Some("owner.pdf's security is not carried over (it does not allow printing, editing, commenting, form filling, screen reader access)")
     );
-    // a source with a user password and every right still says the password goes
+    // a source with a user password keeps the wording that names the password
     assert!(plan.files[2].encrypted);
     assert_eq!(plan.files[2].note.as_deref(), Some("locked.pdf's password and restrictions are not carried over"));
     // not opened yet: left out, and it is not said to bring anything
@@ -850,7 +850,7 @@ fn a_revision_2_source_has_its_page_rights_read_from_the_older_bits() {
     assert_eq!(plan.files[1].state, FileState::Ready);
     assert_eq!(
         plan.files[1].note.as_deref(),
-        Some("edit.pdf's password and restrictions are not carried over (it does not allow printing, commenting, form filling)")
+        Some("edit.pdf's security is not carried over (it does not allow printing, commenting, form filling)")
     );
 }
 
