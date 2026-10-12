@@ -1004,6 +1004,28 @@ fn add_shown(lines: &mut Vec<Line>, last: &mut Option<(usize, (f64, f64), f64)>,
     *last = Some((s.bt, s.end, s.size.max(1.0)));
 }
 
+/// How far a line's start and end are from its first and last glyph that is not a space (text space, after
+/// horizontal scaling): the spaces the block's text drops there, with their word spacing, and the kerning
+/// before the first word.
+fn edge_spaces(l: &Line) -> (f64, f64) {
+    let st = &l.origin.state;
+    let all: Vec<(&Glyph, f64)> = l.runs.iter().flat_map(|r| r.glyphs.iter().map(move |g| (g, r.tsize))).collect();
+    let blank = |g: &Glyph| !g.text.is_empty() && g.text.chars().all(paragraph_separator);
+    // `(w - kern)`: the TJ adjustment before a glyph is part of its advance, as `Measure::width` has it.
+    let advance = |g: &Glyph, size: f64| {
+        let tw = if g.bytes.as_slice() == [32] { st.word_spacing } else { 0.0 };
+        let tc = if g.bytes.is_empty() { 0.0 } else { st.char_spacing };
+        ((g.w - g.kern) / 1000.0 * size + tc + tw) * st.scale
+    };
+    let n = all.iter().take_while(|(g, _)| blank(g)).count();
+    if n == all.len() {
+        return (0.0, 0.0);
+    }
+    let lead = all[..n].iter().map(|(g, size)| advance(g, *size)).sum::<f64>() + all[n].0.kern / 1000.0 * all[n].1 * st.scale * -1.0;
+    let trail = all.iter().rev().take_while(|(g, _)| blank(g)).map(|(g, size)| advance(g, *size)).sum();
+    (lead, trail)
+}
+
 /// A line's start and end along the text direction of `first` (text space x of `first`).
 fn span_in(first: &Line, l: &Line) -> (f64, f64, f64) {
     let Some(inv) = first.origin.tm.then(&first.origin.ctm).invert() else {
@@ -1484,7 +1506,14 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
     };
     let m = Measure { styles: &setter.styles, cs: st.char_spacing, scale: st.scale };
     // The block's extent along its first line, in that line's text space.
-    let spans: Vec<(f64, f64, f64)> = members.iter().map(|l| span_in(first, l)).collect();
+    let mut spans: Vec<(f64, f64, f64)> = members.iter().map(|l| span_in(first, l)).collect();
+    if change.keep.is_some() {
+        // Where each line's words are, not its blanks: a line may begin or end with spaces that the text drops.
+        for (sp, l) in spans.iter_mut().zip(&members) {
+            let (lead, trail) = edge_spaces(l);
+            (sp.0, sp.1) = (sp.0 + lead, (sp.1 - trail).max(sp.0 + lead));
+        }
+    }
     let mut left = spans.iter().map(|s| s.0).fold(f64::MAX, f64::min);
     let right = spans.iter().map(|s| s.1).fold(f64::MIN, f64::max);
     let align = change.align.unwrap_or(b.align);
@@ -1509,25 +1538,7 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
         if groups.is_empty() {
             return Err(invalid("there is no text to set"));
         }
-        // A single left-aligned line may grow to the right as far as nothing else on the page is in the way:
-        // the next text or area on its line, else the page's margin.
-        let mut room = right;
-        if grows {
-            let r = members[0].rect;
-            let beside = |q: &[f64; 4]| q[1] < r[3] && q[3] > r[1] && q[0] >= r[2] - 0.5;
-            let stop = pc
-                .lines
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !b.lines.contains(i))
-                .map(|(_, l)| l.rect)
-                .chain(pc.areas.iter().map(|a| a.rect))
-                .filter(beside)
-                .map(|q| q[0] - size * k)
-                .fold(pc.crop[2] - 36.0, f64::min);
-            room = room.max(spans[0].0 + (stop - r[0]) / k);
-        }
-        let (lines, at) = keep_lines(groups, &spans, align, (left, room), 0.5 / k, &m)
+        let (lines, at) = keep_lines(groups, &spans, align, (left, right), 0.5 / k, &m)
             .ok_or_else(|| invalid("the replacement does not fit on its line"))?;
         line_at = at;
         lines

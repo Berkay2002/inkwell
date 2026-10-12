@@ -231,12 +231,13 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   did and its spaces take up its width, which is what its word spacing did); a line that holds one is set at
   the start (or middle, or end, by the block's alignment) of the line it was, with that line's own baseline, so
   nothing moves with a first-line indent or uneven leading; in a justified block it is stretched to the end that
-  line had, unless it is the last. The text of a run with a match is kept as it is (double and no-break spaces),
-  only a space the replacement would double at its edge goes. A single left-aligned line may grow to the right
-  as far as no other text or area on its line, else the page margin; any other line that no longer fits where it
-  was is not wrapped or pushed down: its matches are skipped with "the replacement does not fit on its line". The
-  same goes for a block whose line ends can't be placed in its new text, and for a match across a dropped hyphen
-  that leaves no space to start the second line again at. A match across a line end drops
+  line had, unless it is the last (a line's own leading and trailing spaces don't count in its width). The text
+  of a run with a match is kept as it is (double and no-break spaces); only a space the replacement would double
+  at its edge goes. A line, a single-line block (heading, table cell) included, never grows past the width its
+  block had: nothing tells what is beside it, so a replacement that does not fit is not wrapped or pushed down
+  but skipped with "the replacement does not fit on its line". The same goes for a block whose line ends can't
+  be placed in its new text, and for a match that cuts a word across a dropped hyphen. A match across a line end
+  drops
   that one break. Edit text itself re-wraps the whole block to its widest line when its text is committed (its draft
   is one paragraph), so short lines can join. Nothing is searched again
   after a replacement, so a replacement that contains the find text is set once and never loops. The whole run is

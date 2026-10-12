@@ -1435,6 +1435,9 @@ fn do_replace(eng: &Engine, id: DocId, r: &ReplaceRequest) -> Result<Replaced> {
     replace(eng, id, rev(eng, id), r, EditSource::User)
 }
 
+/// A long line with none of the letters of "cat": the second line of a block whose first line may grow.
+const PAD: &str = "xx xx xx xx xx xx xx xx xx xx xx xx xx xx";
+
 const CATS: &str = "BT /F1 12 Tf 72 700 Td (The cat and the Cat sat by a concat.) Tj ET";
 
 #[test]
@@ -1443,11 +1446,12 @@ fn replace_all_is_one_undo_step_across_pages_and_survives_save() {
     let bytes = pages_pdf(&[CATS, "BT /F1 12 Tf 72 700 Td (A cat on page two.) Tj ET\nBT /F1 12 Tf 72 600 Td (Second cat block) Tj ET"]);
     let (eng, id, path) = open(&d, &bytes);
     let before = all_text(&eng, id);
-    let r = do_replace(&eng, id, &req("cat", "dog", SearchOpts::default())).unwrap();
+    // "act" is as wide as "cat": a line is kept as long as it was.
+    let r = do_replace(&eng, id, &req("cat", "act", SearchOpts::default())).unwrap();
     // Case-insensitive, parts of words too: cat, Cat, concat, cat, cat.
     assert_eq!((r.replaced, r.skipped_count, r.stopped.as_deref()), (5, 0, None), "{r:?}");
-    assert_eq!(r.state.undo.as_deref(), Some("Replace \"cat\" with \"dog\""));
-    assert_eq!(all_text(&eng, id), "The dog and the dog sat by a condog. | A dog on page two. Second dog block");
+    assert_eq!(r.state.undo.as_deref(), Some("Replace \"cat\" with \"act\""));
+    assert_eq!(all_text(&eng, id), "The act and the act sat by a conact. | A act on page two. Second act block");
     // One undo restores both pages.
     let u = eng.undo(id).unwrap();
     assert_eq!(all_text(&eng, id), before, "{u:?}");
@@ -1455,7 +1459,7 @@ fn replace_all_is_one_undo_step_across_pages_and_survives_save() {
     eng.save(id, None).unwrap();
     eng.close(id);
     let (eng, id) = reopen(&path);
-    assert_eq!(all_text(&eng, id), "The dog and the dog sat by a condog. | A dog on page two. Second dog block");
+    assert_eq!(all_text(&eng, id), "The act and the act sat by a conact. | A act on page two. Second act block");
 }
 
 #[test]
@@ -1463,27 +1467,29 @@ fn replace_follows_case_and_whole_word_options() {
     let d = dir("replace-opts");
     let (eng, id, _) = open(&d, &pages_pdf(&[CATS]));
     let case = SearchOpts { case_sensitive: true, ..Default::default() };
-    let r = do_replace(&eng, id, &req("cat", "dog", case)).unwrap();
+    let r = do_replace(&eng, id, &req("cat", "act", case)).unwrap();
     // "cat" lower case, also inside "concat"; not "Cat".
     assert_eq!(r.replaced, 2, "{r:?}");
-    assert_eq!(all_text(&eng, id), "The dog and the Cat sat by a condog.");
+    assert_eq!(all_text(&eng, id), "The act and the Cat sat by a conact.");
     eng.undo(id).unwrap();
     let whole = SearchOpts { whole_words: true, ..Default::default() };
-    let r = do_replace(&eng, id, &req("cat", "dog", whole)).unwrap();
+    let r = do_replace(&eng, id, &req("cat", "act", whole)).unwrap();
     assert_eq!(r.replaced, 2, "{r:?}");
-    assert_eq!(all_text(&eng, id), "The dog and the dog sat by a concat.");
+    assert_eq!(all_text(&eng, id), "The act and the act sat by a concat.");
 }
 
 #[test]
 fn a_replacement_that_contains_the_find_text_is_set_once() {
     let d = dir("replace-self");
-    let (eng, id, _) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (a cat, a cat) Tj ET"]));
+    // A longer second line gives the first its room: a line is never set wider than its block.
+    let page = format!("BT /F1 12 Tf 72 700 Td 14 TL (a cat, a cat) Tj T* ({PAD}) Tj ET");
+    let (eng, id, _) = open(&d, &pages_pdf(&[&page]));
     let r = do_replace(&eng, id, &req("cat", "cat cat", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.inserted), (2, 2));
-    assert_eq!(all_text(&eng, id), "a cat cat, a cat cat");
+    assert_eq!(all_text(&eng, id), format!("a cat cat, a cat cat {PAD}"));
     // A second run replaces what the first one wrote, once more each.
     let r = do_replace(&eng, id, &req("a", "aa", SearchOpts::default())).unwrap();
-    assert_eq!(all_text(&eng, id), "aa caat caat, aa caat caat", "{r:?}");
+    assert_eq!(all_text(&eng, id), format!("aa caat caat, aa caat caat {PAD}"), "{r:?}");
 }
 
 #[test]
@@ -1497,19 +1503,19 @@ fn replace_one_changes_only_the_current_match() {
         // The second and third match; the list is as it is now (each replacement is one step).
         let hits = eng.read_custom(id, |d| crate::search::find_in_page(d, 0, &q)).unwrap();
         let at = ReplaceAt { page: 0, rect: hits[pick.min(hits.len() - 1)].rects[0] };
-        let r = do_replace(&eng, id, &ReplaceRequest { at: Some(at), ..req("red", "blue", SearchOpts::default()) }).unwrap();
+        let r = do_replace(&eng, id, &ReplaceRequest { at: Some(at), ..req("red", "rod", SearchOpts::default()) }).unwrap();
         assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
         assert_eq!(r.state.undo.as_deref(), Some("Replace text on p. 1"));
         if pick == 1 {
-            assert_eq!(all_text(&eng, id), "red fox and blue hen another red one");
+            assert_eq!(all_text(&eng, id), "red fox and rod hen another red one");
         }
     }
     // After the second replacement the list is [red, red]; picking index 1 again hit the last one.
-    assert_eq!(all_text(&eng, id), "red fox and blue hen another blue one");
+    assert_eq!(all_text(&eng, id), "red fox and rod hen another rod one");
     eng.save(id, None).unwrap();
     eng.close(id);
     let (eng, id) = reopen(&path);
-    assert_eq!(all_text(&eng, id), "red fox and blue hen another blue one");
+    assert_eq!(all_text(&eng, id), "red fox and rod hen another rod one");
 }
 
 #[test]
@@ -1526,10 +1532,10 @@ fn a_match_across_runs_takes_the_style_of_the_run_it_starts_in() {
     assert_eq!(fonts, [("Worlds plus words", "Helvetica")], "{fonts:?}");
     // A match inside the bold run only changes that run.
     eng.undo(id).unwrap();
-    do_replace(&eng, id, &req("bold", "heavy", SearchOpts::default())).unwrap();
+    do_replace(&eng, id, &req("bold", "bolt", SearchOpts::default())).unwrap();
     let b = blocks(&eng, id, 0).unwrap().blocks[0].clone();
     let fonts: Vec<(&str, &str)> = b.runs.iter().map(|r| (r.text.as_str(), r.font.as_str())).collect();
-    assert_eq!(fonts, [("Worlds and ", "Helvetica"), ("heavy", "Helvetica-Bold"), (" words", "Helvetica")]);
+    assert_eq!(fonts, [("Worlds and ", "Helvetica"), ("bolt", "Helvetica-Bold"), (" words", "Helvetica")]);
 }
 
 #[test]
@@ -1588,15 +1594,15 @@ fn a_match_across_two_blocks_and_one_in_a_form_are_skipped() {
     objs.push(form);
     let (eng, id, _) = open(&d, &raw_pdf(&objs));
     // The two matches in the page's own blocks are replaced; the one in the form is not (shared by pages).
-    let r = do_replace(&eng, id, &req("over", "OVER", SearchOpts::default())).unwrap();
+    let r = do_replace(&eng, id, &req("over", "oer", SearchOpts::default())).unwrap();
     assert_eq!(r.replaced, 2, "{r:?}");
     assert_eq!(r.skipped_count, 1, "{r:?}");
     assert!(r.skipped[0].reason.contains("form"), "{:?}", r.skipped);
-    let r = do_replace(&eng, id, &req("over over", "x", SearchOpts::default())).unwrap();
-    // "first OVER" and "OVER the second" now read "OVER OVER" across the gap: in no one block.
+    let r = do_replace(&eng, id, &req("oer oer", "x", SearchOpts::default())).unwrap();
+    // "first oer" and "oer the second" now read "oer oer" across the gap: in no one block.
     assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
     assert!(r.skipped[0].reason.contains("two text blocks"), "{:?}", r.skipped);
-    assert!(all_text(&eng, id).contains("the first OVER") && all_text(&eng, id).contains("OVER the second"));
+    assert!(all_text(&eng, id).contains("the first oer") && all_text(&eng, id).contains("oer the second"));
 }
 
 #[test]
@@ -1654,9 +1660,9 @@ fn replace_one_on_a_rotated_page_finds_its_block() {
     let hits = eng.read_custom(id, |d| crate::search::find_in_page(d, 0, &q)).unwrap();
     assert_eq!(hits.len(), 2);
     let at = ReplaceAt { page: 0, rect: hits[1].rects[0] };
-    let r = do_replace(&eng, id, &ReplaceRequest { at: Some(at), ..req("north", "south", SearchOpts::default()) }).unwrap();
+    let r = do_replace(&eng, id, &ReplaceRequest { at: Some(at), ..req("north", "forth", SearchOpts::default()) }).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
-    assert_eq!(all_text(&eng, id), "north east south");
+    assert_eq!(all_text(&eng, id), "north east forth");
 }
 
 #[test]
@@ -1721,16 +1727,16 @@ fn replace_all_stops_between_blocks_when_its_time_is_up() {
     let d = dir("replace-budget");
     let two = "BT /F1 12 Tf 72 700 Td (first cat) Tj ET\nBT /F1 12 Tf 72 500 Td (second cat) Tj ET";
     let (eng, id, _) = open(&d, &pages_pdf(&[two]));
-    let r = req("cat", "dog", SearchOpts::default());
+    let r = req("cat", "act", SearchOpts::default());
     // No time at all: the block that was started is done (a run always gets somewhere), then it stops.
     let first = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits { budget: std::time::Duration::ZERO, ..Limits::default() }).unwrap();
     assert_eq!((first.replaced, first.skipped_count), (1, 0), "{first:?}");
     assert!(first.stopped.as_deref().is_some_and(|s| s.starts_with("Stopped at page 1")), "{first:?}");
-    assert_eq!(all_text(&eng, id), "first cat second dog");
+    assert_eq!(all_text(&eng, id), "first cat second act");
     // The next run carries on with what is left.
     let next = do_replace(&eng, id, &r).unwrap();
     assert_eq!((next.replaced, next.stopped), (1, None));
-    assert_eq!(all_text(&eng, id), "first dog second dog");
+    assert_eq!(all_text(&eng, id), "first act second act");
 }
 
 #[test]
@@ -1759,9 +1765,10 @@ fn a_block_cut_by_the_cap_is_checked_for_hyphens_after_the_cut() {
 #[test]
 fn going_on_after_a_stop_replaces_each_match_once_even_when_the_replacement_holds_the_find_text() {
     let d = dir("replace-resume");
-    let page0 = "BT /F1 12 Tf 72 700 Td (first cat) Tj ET\nBT /F1 12 Tf 72 500 Td (second cat) Tj ET";
-    let page1 = "BT /F1 12 Tf 72 700 Td (third cat) Tj ET";
-    let (eng, id, _) = open(&d, &pages_pdf(&[page0, page1]));
+    let block = |y: u32, t: &str| format!("BT /F1 12 Tf 72 {y} Td 14 TL ({t}) Tj T* ({PAD}) Tj ET");
+    let page0 = format!("{}\n{}", block(700, "first cat"), block(500, "second cat"));
+    let page1 = block(700, "third cat");
+    let (eng, id, _) = open(&d, &pages_pdf(&[&page0, &page1]));
     let mut r = req("cat", "cats", SearchOpts::default());
     let none = Limits { budget: std::time::Duration::ZERO, ..Limits::default() };
     // No time: one block per run (the last first), then it says where to go on from.
@@ -1774,38 +1781,40 @@ fn going_on_after_a_stop_replaces_each_match_once_even_when_the_replacement_hold
     }
     // Stopped on page 1 with a block to do, then at the start of page 2, then done.
     assert_eq!(seen, vec![Some(ReplaceFrom { page: 0, upto: Some(1) }), Some(ReplaceFrom { page: 1, upto: None }), None]);
-    assert_eq!(all_text(&eng, id), "first cats second cats | third cats");
+    assert_eq!(all_text(&eng, id), format!("first cats {PAD} second cats {PAD} | third cats {PAD}"));
 }
 
 #[test]
 fn a_block_the_cap_would_cut_is_left_whole_for_the_next_run() {
     let d = dir("replace-resume-cap");
-    let (eng, id, _) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (cat cat cat) Tj ET\nBT /F1 12 Tf 72 500 Td (cat) Tj ET"]));
+    let page = format!("BT /F1 12 Tf 72 700 Td 14 TL (cat cat cat) Tj T* ({PAD}) Tj ET\nBT /F1 12 Tf 72 500 Td 14 TL (cat) Tj T* ({PAD}) Tj ET");
+    let (eng, id, _) = open(&d, &pages_pdf(&[&page]));
     let mut r = req("cat", "cats", SearchOpts::default());
     // Room for 2: the last block (one match) is done; the first has three and is not started.
     let two = Limits { max: 2, ..Limits::default() };
     let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, two).unwrap();
     assert_eq!((out.replaced, out.skipped_count), (1, 0), "{out:?}");
     assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(1) }), "{out:?}");
-    assert_eq!(all_text(&eng, id), "cat cat cat cats");
+    assert_eq!(all_text(&eng, id), format!("cat cat cat {PAD} cats {PAD}"));
     // The next run does it whole: each "cat" is replaced exactly once.
     r.from = out.resume;
     let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits::default()).unwrap();
     assert_eq!((out.replaced, out.resume), (3, None), "{out:?}");
-    assert_eq!(all_text(&eng, id), "cats cats cats cats");
+    assert_eq!(all_text(&eng, id), format!("cats cats cats {PAD} cats {PAD}"));
 }
 
 #[test]
 fn one_block_over_the_cap_is_part_replaced_and_the_rest_listed() {
     let d = dir("replace-over-cap");
-    let (eng, id, _) = open(&d, &pages_pdf(&["BT /F1 12 Tf 72 700 Td (cat cat cat) Tj ET"]));
+    let page = format!("BT /F1 12 Tf 72 700 Td 14 TL (cat cat cat) Tj T* ({PAD}) Tj ET");
+    let (eng, id, _) = open(&d, &pages_pdf(&[&page]));
     let two = Limits { max: 2, ..Limits::default() };
     let out = replace_within(&eng, id, rev(&eng, id), &req("cat", "cats", SearchOpts::default()), EditSource::User, two).unwrap();
     assert_eq!((out.replaced, out.skipped_count), (2, 1), "{out:?}");
     assert!(out.skipped[0].reason.contains("more matches than the 2"), "{out:?}");
     // It is done with: going on does not start it again.
     assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(0) }), "{out:?}");
-    assert_eq!(all_text(&eng, id), "cats cats cat");
+    assert_eq!(all_text(&eng, id), format!("cats cats cat {PAD}"));
 }
 
 /// Three lines of different widths in one block: the short ones would join the widest if the block were re-wrapped.
@@ -1944,23 +1953,42 @@ fn untouched_lines_keep_their_end_even_when_word_spacing_made_it() {
 }
 
 #[test]
+fn a_trailing_space_of_an_untouched_line_does_not_spread_its_words() {
+    let d = dir("replace-trailing-space");
+    // Word-style lines end in a space: it is part of the line's width, but not of its words.
+    let page = "BT /F1 12 Tf 72 700 Td 14 TL (One cat sat ) Tj T* (Two ) Tj T* (Three long hats here) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let q = Query::new("sat", SearchOpts::default()).unwrap();
+    let rect = |eng: &Engine| eng.read_custom(id, |d| crate::search::find_in_page(d, 0, &q)).unwrap()[0].rects[0];
+    let before = rect(&eng);
+    let r = do_replace(&eng, id, &req("long hats", "long bats", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    let after = rect(&eng);
+    assert!(after.iter().zip(&before).all(|(a, b)| (a - b).abs() < 0.05), "{after:?} vs {before:?}");
+}
+
+#[test]
 fn a_centred_block_keeps_the_lines_a_replacement_does_not_touch() {
     let d = dir("replace-centred-lines");
     let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
     let long = "Centred text sits on the middle of its width, so each line is shorter than the one before it, more or less.";
     let change = BlockChange { text: Some(long.into()), align: Some(Align::Center), width: Some(160.0), ..Default::default() };
     edit(&eng, id, rev(&eng, id), 0, 1, &change, EditSource::User).unwrap();
-    let before = blocks(&eng, id, 0).unwrap().blocks[1].lines.clone();
-    assert!(before.len() >= 4, "{before:?}");
+    // Every line of the page by its text and box (the first block is another one).
+    let lines = |eng: &Engine| eng.page_text(id, 0).unwrap().iter().map(|l| (l.t.trim().to_string(), l.b)).collect::<Vec<_>>();
+    let before = lines(&eng);
+    assert!(before.iter().any(|(t, _)| t.contains("shorter")), "{before:?}");
     let r = do_replace(&eng, id, &req("shorter", "smaller", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
-    let after = blocks(&eng, id, 0).unwrap().blocks[1].lines.clone();
+    let after = lines(&eng);
     assert_eq!(after.len(), before.len());
-    let line_of = |t: &str| blocks(&eng, id, 0).unwrap().blocks[1].text.find(t).is_some();
-    assert!(line_of("smaller"));
-    // Only the line that held the word may differ; the others are where and as wide as they were.
-    let same = after.iter().zip(&before).filter(|(a, b)| a.iter().zip(*b).all(|(x, y)| (x - y).abs() < 0.05)).count();
-    assert!(same >= before.len() - 1, "{after:?} vs {before:?}");
+    for ((tb, bb), (ta, ba)) in before.iter().zip(&after) {
+        if tb.contains("shorter") {
+            assert!(ta.contains("smaller"), "{ta:?}");
+        } else {
+            assert!(tb == ta && bb.iter().zip(ba).all(|(x, y)| (x - y).abs() < 0.05), "{tb:?} {bb:?} vs {ta:?} {ba:?}");
+        }
+    }
 }
 
 #[test]
@@ -1968,30 +1996,35 @@ fn a_no_break_space_and_a_double_space_next_to_a_match_stay_as_they_were() {
     let d = dir("replace-keeps-spaces");
     let page = r"BT /F1 12 Tf 72 700 Td (One cat\240and  one more) Tj ET";
     let (eng, id, _) = open(&d, &pages_pdf(&[page]));
-    let before = all_text(&eng, id);
-    assert!(before.contains("and") && before.contains("  one more"), "{before:?}");
-    // The same width ("ant" is as wide as "cat"), so it fits.
+    // (The page text reads a no-break space as a space; the block's text keeps it.)
+    let text = |eng: &Engine| blocks(eng, id, 0).unwrap().blocks[0].text.clone();
+    let before = text(&eng);
+    assert_eq!(before, "One cat\u{a0}and  one more");
+    // "act" is as wide as "cat", so the line fits as it was.
     let r = do_replace(&eng, id, &req("cat", "act", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
-    assert_eq!(all_text(&eng, id), before.replace("cat", "act"));
+    assert!(r.fallbacks.is_empty(), "{r:?}");
+    assert_eq!(text(&eng), "One act\u{a0}and  one more");
     let r = do_replace(&eng, id, &req("one more", "two more", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
-    assert!(all_text(&eng, id).contains("and  two more"), "{}", all_text(&eng, id));
+    assert!(r.fallbacks.is_empty(), "{r:?}");
+    assert_eq!(text(&eng), "One act\u{a0}and  two more");
 }
 
 #[test]
-fn a_single_line_grows_only_as_far_as_nothing_is_in_the_way() {
+fn a_single_line_is_never_set_wider_than_it_was() {
     let d = dir("replace-single-line-room");
-    // Two columns on one baseline: the left one may take the gap, not the right column.
-    let page = "BT /F1 12 Tf 72 700 Td (A cat) Tj ET BT /F1 12 Tf 150 700 Td (Right column) Tj ET";
+    // A heading or a cell: nothing tells what is beside it (a rule, an image, an empty cell), so it stays inside
+    // the width it had.
+    let page = "BT /F1 12 Tf 72 700 Td (A cat) Tj ET";
     let (eng, id, _) = open(&d, &pages_pdf(&[page]));
-    let r = do_replace(&eng, id, &req("cat", "big cat", SearchOpts::default())).unwrap();
+    let r = do_replace(&eng, id, &req("cat", "act", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
     eng.undo(id).unwrap();
-    let r = do_replace(&eng, id, &req("cat", "cat in a very big fluffy hat", SearchOpts::default())).unwrap();
+    let r = do_replace(&eng, id, &req("cat", "cat on a mat", SearchOpts::default())).unwrap();
     assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
     assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
-    assert_eq!(all_text(&eng, id), "A cat Right column");
+    assert_eq!(all_text(&eng, id), "A cat");
 }
 
 #[test]
