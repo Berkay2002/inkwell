@@ -41,7 +41,7 @@ Entry: Tools > Merge/Combine, Organize > "Combine files…", command palette "Co
   away, so the row asks again). The combined file has no password and no restrictions, and the sheet says so.
   Unlocking opens the file's own handle without starting a version history for it.
 - **Left out, with the reason shown on the row**: files that need a password and have not been given it ("Password
-  needed"), files whose owner allows no copying or page changes (even when the password opens them: the owner's
+  needed"), files whose owner allows no copying, or neither page changes nor editing (even when the password opens them: the owner's
   restriction still applies), files that are not PDFs. A range outside a file refuses the
   run and says which file and page ("Page 9 is not in a.pdf"). An open document's own file is never the output.
 - **Output**: a save token from the Save dialog; the result opens in a new tab and the sheet closes.
@@ -125,7 +125,8 @@ blinds by a strip mask, fade/dissolve/glitter as a cross-fade.
   has neither, and the row says "x.pdf's password and restrictions are not carried over", naming the rights
   its permission bits withheld (printing, editing, commenting, form filling and the like) when there are any. An
   owner-password-only source has no password to type, so the row note and the footer ("The combined file has no
-  password and no restrictions") are where this shows. A source that forbids copying or page changes is left out. Permission bits 9 to 12 (printing quality, form filling, page changes, screen
+  password and no restrictions") are where this shows. A source that forbids copying, or both page
+  changes and editing, is left out. Permission bits 9 to 12 (printing quality, form filling, page changes, screen
   readers) only count for a file of security revision 3 or later; an older file's are read as set.
 - Labels are carried page by page: a source's section that is cut by a page range or reordered becomes several
   sections in the result, each with the number the page had in its source.
