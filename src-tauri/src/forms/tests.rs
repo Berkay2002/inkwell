@@ -2293,3 +2293,252 @@ fn layout_tools_hold_their_caps() {
     assert!(e.contains("at most 2000"), "{e}");
     assert_eq!(steps(&eng, id), n, "no step");
 }
+
+fn form_fields_len(eng: &Engine, id: DocId) -> usize {
+    eng.read_custom(id, |d| Ok(get(&d.catalog()?.get_dict("AcroForm")?.unwrap(), "Fields").map_or(0, |f| f.len().unwrap_or(0)))).unwrap()
+}
+
+fn layout_form(test: &str) -> (Arc<Engine>, DocId, String) {
+    let (eng, id, path) = open(test);
+    let opts = vec![Opt { export: "se".into(), label: "Sweden".into() }, Opt { export: "no".into(), label: "Norway".into() }];
+    add1(&eng, id, 0, nf(FieldKind::Text, "Name", [72.0, 100.0, 272.0, 120.0]));
+    add1(&eng, id, 0, NewField { options: Some(opts), ..nf(FieldKind::Combo, "Country", [72.0, 140.0, 220.0, 160.0]) });
+    add1(&eng, id, 0, nf(FieldKind::Text, "Notes", [72.0, 180.0, 272.0, 240.0]));
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Agree", [72.0, 260.0, 86.0, 274.0]));
+    patch_field(&eng, id, "Notes", FieldPatch { multiline: Some(true), ..Default::default() });
+    (eng, id, path)
+}
+
+#[test]
+fn a_field_duplicated_to_other_pages_is_one_field_with_more_widgets() {
+    let (eng, id, path) = layout_form("layout-dup");
+    fill(&eng, id, "Name", text("Alice")).unwrap();
+    let before = all_rects(&eng, id);
+    let name = items_of(&eng, id, &["Name"])[0];
+    let n = steps(&eng, id);
+    duplicate_one(&eng, id, name, &[1], EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    let ws = widgets_named(&eng, id, "Name");
+    assert_eq!(ws.len(), 2, "{ws:?}");
+    assert_eq!(ws[0].node, ws[1].node, "one field");
+    assert_eq!((ws[0].page, ws[1].page), (0, 1));
+    assert!((0..4).all(|i| near(ws[0].rect[i], ws[1].rect[i])), "the same place");
+    assert!(ws.iter().all(|w| w.value == "Alice"), "one value: {ws:?}");
+    // Typing in one is typing in both.
+    fill(&eng, id, "Name", text("Bob")).unwrap();
+    assert!(widgets_named(&eng, id, "Name").iter().all(|w| w.value == "Bob"));
+    // Editing a property afterwards keeps the field's kind, flags and options (they moved to the parent).
+    for (nm, kind) in [("Country", FieldKind::Combo), ("Notes", FieldKind::Text)] {
+        let it = items_of(&eng, id, &[nm])[0];
+        duplicate_one(&eng, id, it, &[1], EditSource::User).unwrap();
+        assert_eq!(patch_field(&eng, id, nm, FieldPatch { required: Some(true), ..Default::default() }), 1);
+        let w = widgets_named(&eng, id, nm);
+        assert_eq!(w.len(), 2, "{nm}");
+        assert!(w.iter().all(|w| w.kind == kind && w.required), "{nm}: {w:?}");
+    }
+    assert!(widgets_named(&eng, id, "Notes").iter().all(|w| w.multiline));
+    assert_eq!(widgets_named(&eng, id, "Country")[0].options.len(), 2);
+    fill(&eng, id, "Country", text("no")).unwrap();
+    assert!(widgets_named(&eng, id, "Country").iter().all(|w| w.value == "no"));
+    // A check box: turning it on turns both widgets on.
+    let agree = items_of(&eng, id, &["Agree"])[0];
+    duplicate_one(&eng, id, agree, &[1], EditSource::User).unwrap();
+    fill(&eng, id, "Agree", FieldValue::Checked(true)).unwrap();
+    let a = widgets_named(&eng, id, "Agree");
+    assert_eq!(a.len(), 2);
+    assert!(a.iter().all(|w| w.checked), "{a:?}");
+    assert!(duplicate_one(&eng, id, name, &[0], EditSource::User).unwrap_err().to_string().contains("other page"));
+    assert!(duplicate_one(&eng, id, name, &[7], EditSource::User).unwrap_err().to_string().contains("no page 8"));
+
+    // Undo takes the widgets off again, exactly.
+    for _ in 0..9 {
+        eng.undo(id).unwrap();
+    }
+    assert!(same_rects(&all_rects(&eng, id), &before), "undo takes every widget off again");
+    for _ in 0..9 {
+        eng.redo(id).unwrap();
+    }
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let w = list_all(&eng2, id2).unwrap().fields;
+    assert_eq!(w.iter().filter(|f| f.name == "Name").count(), 2);
+    assert_eq!(w.iter().filter(|f| f.name == "Name" && f.page == 1).count(), 1);
+    assert!(w.iter().filter(|f| f.name == "Name").all(|f| f.value == "Bob"));
+    assert!(!ap_text(&path, "Name", None).is_empty());
+}
+
+#[test]
+fn a_duplicated_widget_goes_on_its_own_page_when_pages_share_an_annots_array() {
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Shared) /Rect [72 600 200 620] /F 4 /DA (/Helv 0 Tf 0 g) >>";
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 7 0 R >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 7 0 R >>".to_string(),
+        widget.to_string(),
+        "[6 0 R]".to_string(),
+    ]);
+    let (eng, id, _) = open_bytes("layout-dup-shared", bytes);
+    let w = items_of(&eng, id, &["Shared"])[0];
+    assert_eq!(w.0, 0);
+    duplicate_one(&eng, id, w, &[1], EditSource::User).unwrap();
+    let ws = widgets_named(&eng, id, "Shared");
+    assert_eq!(ws.len(), 2, "{ws:?}");
+    assert_eq!(ws.iter().filter(|f| f.page == 0).count(), 1, "the first page did not gain one");
+    assert_eq!(ws.iter().filter(|f| f.page == 1).count(), 1);
+}
+
+#[test]
+fn a_page_too_small_for_the_field_refuses_the_duplicate_and_radios_and_signatures_are_not_copied() {
+    let (eng, id, _) = rotated_form("layout-dup-small", &[("Wide", [100.0, 20.0, 400.0, 40.0])]);
+    add1(&eng, id, 0, nf(FieldKind::Radio, "Pick", [100.0, 60.0, 114.0, 74.0]));
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [100.0, 100.0, 180.0, 130.0]));
+    let n = steps(&eng, id);
+    let e = duplicate_one(&eng, id, items_of(&eng, id, &["Wide"])[0], &[1], EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("does not fit on page 2"), "{e}");
+    assert!(duplicate_one(&eng, id, items_of(&eng, id, &["Pick"])[0], &[1], EditSource::User).unwrap_err().to_string().contains("radio"));
+    assert!(duplicate_one(&eng, id, items_of(&eng, id, &["Sig"])[0], &[1], EditSource::User).unwrap_err().to_string().contains("signature"));
+    assert!(copies_one(&eng, id, items_of(&eng, id, &["Pick"])[0], 2, 1, (2.0, 2.0), EditSource::User).is_err());
+    assert_eq!(steps(&eng, id), n);
+}
+
+#[test]
+fn copies_make_a_grid_named_after_the_field_clipped_to_the_page() {
+    let (eng, id, path) = rotated_form("layout-copies", &[("Cell", [100.0, 100.0, 160.0, 120.0]), ("Total", [100.0, 400.0, 200.0, 420.0])]);
+    patch_field(&eng, id, "Total", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Cell".into()] }), ..Default::default() });
+    let before = all_rects(&eng, id);
+    let n = steps(&eng, id);
+    let (state, done) = copies_one(&eng, id, items_of(&eng, id, &["Cell"])[0], 2, 3, (10.0, 6.0), EditSource::User).unwrap();
+    let _ = state;
+    assert_eq!(done, Copied { made: 5, skipped: 0 });
+    assert_eq!(steps(&eng, id), n + 1);
+    let names: Vec<String> = list_all(&eng, id).unwrap().fields.into_iter().map(|f| f.name).filter(|n| n.starts_with("Cell")).collect();
+    for i in 0..6 {
+        assert!(names.contains(&format!("Cell.{i}")), "{names:?}");
+    }
+    assert!(!names.contains(&"Cell".to_string()));
+    // Row by row, to the right and down, with the gaps between.
+    let r = |n: &str| rect_of_name(&eng, id, n);
+    assert!(near(r("Cell.0")[0], 100.0) && near(r("Cell.1")[0], 170.0) && near(r("Cell.2")[0], 240.0), "{:?}", r("Cell.1"));
+    assert!(near(r("Cell.3")[0], 100.0) && near(r("Cell.3")[1], 126.0), "{:?}", r("Cell.3"));
+    assert!(near(r("Cell.5")[2] - r("Cell.5")[0], 60.0));
+    // The calculation follows the original to its new name; the copies are independent fields.
+    match field(&eng, id, "Total").calculate {
+        Calculate::Simple { fields, .. } => assert_eq!(fields, vec!["Cell.0".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    fill(&eng, id, "Cell.2", text("7")).unwrap();
+    assert_eq!(field(&eng, id, "Cell.2").value, "7");
+    assert_eq!(field(&eng, id, "Cell.0").value, "");
+    assert_eq!(field(&eng, id, "Cell.4").value, "");
+    eng.undo(id).unwrap();
+    eng.undo(id).unwrap();
+    assert!(same_rects(&all_rects(&eng, id), &before), "undo takes the grid off and the name back");
+    assert_eq!(field(&eng, id, "Cell").name, "Cell");
+    eng.redo(id).unwrap();
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let back = list_all(&eng2, id2).unwrap().fields;
+    assert_eq!(back.iter().filter(|f| f.name.starts_with("Cell.")).count(), 6);
+    assert_eq!(back.iter().find(|f| f.name == "Cell.2").unwrap().value, "7");
+
+    // Nothing fits past the right edge: those places are skipped and said so; all of them skipped is an error.
+    let (_, done) = copies_one(&eng, id, items_of(&eng, id, &["Cell.5"])[0], 1, 4, (300.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done, Copied { made: 1, skipped: 2 });
+    let e = copies_one(&eng, id, items_of(&eng, id, &["Cell.4"])[0], 1, 2, (900.0, 0.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("no copy fits"), "{e}");
+}
+
+#[test]
+fn copies_are_refused_for_a_field_with_several_widgets_or_a_calculation() {
+    let (eng, id, _) = open_bytes("layout-copies-refused", shared_widgets_form());
+    let n = steps(&eng, id);
+    let sum = items_of(&eng, id, &["Sum"])[0];
+    let e = copies_one(&eng, id, sum, 2, 1, (4.0, 4.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("several widgets"), "{e}");
+    let (eng2, id2, _) = script_form("layout-copies-calc", &["Rent", "Total"]);
+    patch_field(&eng2, id2, "Total", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Rent".into()] }), ..Default::default() });
+    let e = copies_one(&eng2, id2, items_of(&eng2, id2, &["Total"])[0], 2, 1, (4.0, 4.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("calculated"), "{e}");
+    assert_eq!(steps(&eng, id), n);
+}
+
+#[test]
+fn rename_keeps_dotted_names_valid_and_merges_only_fields_of_one_kind() {
+    let (eng, id, path) = layout_form("layout-rename");
+    add1(&eng, id, 0, nf(FieldKind::Text, "Other", [72.0, 300.0, 200.0, 320.0]));
+    add1(&eng, id, 0, nf(FieldKind::Text, "Sum", [72.0, 340.0, 200.0, 360.0]));
+    patch_field(&eng, id, "Sum", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Other".into()] }), ..Default::default() });
+    let it = |n: &str| items_of(&eng, id, &[n])[0];
+    let rename = |n: &str, to: &str, merge: bool| rename_one(&eng, id, it(n), to, merge, EditSource::User);
+    let top = form_fields_len(&eng, id);
+
+    // A new group, a second field into it, and the calculation follows.
+    let n = steps(&eng, id);
+    rename("Other", "Grp.Other", false).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    assert_eq!(field(&eng, id, "Grp.Other").kind, FieldKind::Text);
+    match field(&eng, id, "Sum").calculate {
+        Calculate::Simple { fields, .. } => assert_eq!(fields, vec!["Grp.Other".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(form_fields_len(&eng, id), top, "the field left /Fields for its group");
+    rename("Name", "Grp.Name", false).unwrap();
+    assert_eq!(form_fields_len(&eng, id), top - 1);
+    rename("Grp.Name", "Deep.er.Name", false).unwrap();
+    rename("Deep.er.Name", "Name", false).unwrap();
+    assert_eq!(form_fields_len(&eng, id), top, "the emptied groups are gone");
+    eng.undo(id).unwrap();
+    assert_eq!(field(&eng, id, "Deep.er.Name").name, "Deep.er.Name");
+    eng.redo(id).unwrap();
+
+    // Refusals: nothing changes and there is no step.
+    let n = steps(&eng, id);
+    let err = |n: &str, to: &str, merge: bool| rename(n, to, merge).unwrap_err().to_string();
+    assert!(err("Notes", "Name", false).contains("already exists"));
+    assert!(err("Notes", "Agree", true).contains("cannot take that name"), "different kinds never merge");
+    assert!(err("Name", "Grp", false).contains("group of fields"));
+    assert!(err("Name", "Notes.x", false).contains("no field can be named below"));
+    assert!(err("Name", "", false).contains("needs a name"));
+    assert!(err("Name", "a..b", false).contains("needs a name"));
+    assert!(err("Name", ".x", false).contains("needs a name"));
+    assert_eq!(steps(&eng, id), n);
+    // The same name is not a step.
+    rename("Name", "Name", false).unwrap();
+    assert_eq!(steps(&eng, id), n);
+
+    // Merge: same kind, with the target's value kept; one field of two widgets.
+    fill(&eng, id, "Name", text("Alice")).unwrap();
+    fill(&eng, id, "Notes", text("a note")).unwrap();
+    rename("Notes", "Name", true).unwrap();
+    let ws = widgets_named(&eng, id, "Name");
+    assert_eq!(ws.len(), 2, "{ws:?}");
+    assert_eq!(ws[0].node, ws[1].node);
+    assert!(ws.iter().all(|w| w.value == "Alice"), "{ws:?}");
+    assert!(widgets_named(&eng, id, "Notes").is_empty());
+    eng.undo(id).unwrap();
+    assert_eq!(widgets_named(&eng, id, "Notes").len(), 1);
+    assert_eq!(widgets_named(&eng, id, "Name").len(), 1);
+    eng.redo(id).unwrap();
+    // Editing a property of the merged field keeps it a text field.
+    assert_eq!(patch_field(&eng, id, "Name", FieldPatch { required: Some(true), ..Default::default() }), 1);
+    assert!(widgets_named(&eng, id, "Name").iter().all(|w| w.required && w.kind == FieldKind::Text));
+
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let back = list_all(&eng2, id2).unwrap().fields;
+    assert_eq!(back.iter().filter(|f| f.name == "Name").count(), 2);
+    assert!(back.iter().any(|f| f.name == "Grp.Other"));
+}
+
+#[test]
+fn renaming_one_widget_of_a_field_renames_the_field() {
+    let (eng, id, _) = open_bytes("layout-rename-kids", shared_widgets_form());
+    let w = widgets_named(&eng, id, "agree");
+    assert_eq!(w.len(), 3);
+    rename_one(&eng, id, (w[1].page, w[1].xref), "consent", false, EditSource::User).unwrap();
+    assert_eq!(widgets_named(&eng, id, "consent").len(), 3);
+    assert!(widgets_named(&eng, id, "agree").is_empty());
+}
