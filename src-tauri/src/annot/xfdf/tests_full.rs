@@ -471,3 +471,37 @@ fn an_embedded_image_codec_is_not_run_to_export_a_file_and_line_breaks_survive_x
     run(&b, idb, &bytes);
     assert_eq!(read_all(&b, idb)[0].file.as_ref().unwrap().desc, "line one\nline two");
 }
+
+#[test]
+fn a_font_shared_by_many_appearances_is_charged_for_every_copy() {
+    // 3000 comments, each with a form that uses the same font with 1024 widths: each is a copy in memory, so the
+    // file's allowance for appearance structure ends it, and the rest get Inkwell's own drawing and are counted.
+    let n = 3000;
+    let widths = format!("[{}]", "500 ".repeat(1024));
+    let refs: String = (0..n).map(|i| format!("{} 0 R ", 10 + i)).collect();
+    let mut objs = vec![
+        obj(5, &format!("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 0 /LastChar 1023 /Widths {widths} >>")),
+        stream_obj(6, &format!("{RED_FORM} /Resources << /Font << /F1 5 0 R >> >>"), b"BT /F1 12 Tf (x) Tj ET"),
+    ];
+    objs.extend((0..n).map(|i| obj(10 + i, &freetext(i, 6))));
+    let (eng, id, _) = blank("ap-shared-font");
+    let t = std::time::Instant::now();
+    let s = run(&eng, id, &fdf_file(&refs, &objs));
+    assert_eq!((s.added, s.skipped.len()), (n, 0), "{:?}", s.skipped);
+    assert!(s.appearances > 100 && s.appearances < n, "{}", s.appearances);
+    assert_eq!(s.notes.iter().map(|r| r.count).sum::<usize>(), n - s.appearances, "{:?}", s.notes);
+    assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
+}
+
+#[test]
+fn a_file_for_a_comment_already_in_the_document_is_not_replaced_and_says_so() {
+    let file = |bytes: &str| {
+        format!(r##"<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><fileattachment page="0" rect="100,600,120,620" name="same" file="a.txt"><data mode="raw" encoding="hex">{bytes}</data></fileattachment></annots></xfdf>"##)
+    };
+    let (eng, id, _) = blank("attach-kept");
+    run(&eng, id, file("41").as_bytes());
+    let s = run(&eng, id, file("4242").as_bytes());
+    assert_eq!((s.added, s.updated), (0, 1), "{s:?}");
+    assert_eq!(reasons(&s.notes), [(attach::KEPT, 1)]);
+    assert_eq!(read_all(&eng, id)[0].file.as_ref().unwrap().data, b"A");
+}

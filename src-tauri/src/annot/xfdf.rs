@@ -489,6 +489,10 @@ fn collect_within(doc: &PdfDocument, limit: usize) -> Result<Collected> {
         }
         // Only a stamp's appearance is written: it is what makes a picture (the other types are drawn from their data).
         let mut c = read(&o, sub, &budget, sub == Sub::Stamp);
+        if c.ap.as_ref().is_some_and(|p| ap::to_fdf(p).len() > ap::MAX_FDF) {
+            c.ap = None;
+            c.notes.push(ap::TOO_BIG);
+        }
         if sub == Sub::FileAttachment && c.file.is_none() {
             for w in c.notes {
                 *notes.entry(w).or_default() += 1;
@@ -1144,7 +1148,7 @@ fn make(c: &Comment, m: &Matrix) -> std::result::Result<(Made, Style), &'static 
         Sub::FileAttachment => {
             // Without its file it is not the comment: skipped, with the reason the file was refused.
             if c.file.is_none() {
-                return Err(c.notes.first().copied().unwrap_or(attach::EXTERNAL));
+                return Err(c.notes.iter().copied().find(|w| attach::REFUSED.contains(w)).unwrap_or(attach::EXTERNAL));
             }
             Made::File(page_rect)
         }
@@ -1445,6 +1449,9 @@ pub(crate) fn import(doc: &mut PdfDocument, parsed: &Parsed) -> Result<(Summary,
                     sum.updated += 1;
                     touched.push(kp);
                     raw(doc, kp, kx, c, &mut sum, &mut notes);
+                    if c.file.is_some() {
+                        *notes.entry(attach::KEPT).or_default() += 1;
+                    }
                 }
                 Err(_) => *why.entry(FAILED).or_default() += 1,
             }

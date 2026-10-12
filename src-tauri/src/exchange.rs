@@ -70,6 +70,9 @@ pub const MAX_BLOBS: usize = 10 << 20;
 /// Bytes one file may make Inkwell decode in all, counting what a cap stopped: a bomb that fails is not in
 /// [`MAX_BLOBS`], so many comments sharing one would otherwise each cost a full cap of inflating.
 pub const MAX_DECODE_WORK: usize = 256 << 20;
+/// Bytes of dictionaries, arrays and names of appearances one file may hold at once (an estimate of their size in
+/// memory): the same font read again by every comment is a copy each. Past it appearances are left out and counted.
+pub const MAX_AP_STRUCT: usize = 64 << 20;
 /// Least charged to [`MAX_DECODE_WORK`] for one decode: even a cap of 0 makes the decoder produce a chunk.
 pub const MIN_DECODE_WORK: usize = 16 << 10;
 /// The same bound for an export: the document is the person's own, so real comments may hold more than a
@@ -91,6 +94,8 @@ pub struct Budget {
     blobs: Cell<usize>,
     /// What is left of [`MAX_DECODE_WORK`].
     work: Cell<usize>,
+    /// What is left of [`MAX_AP_STRUCT`].
+    structs: Cell<usize>,
 }
 
 impl Budget {
@@ -99,7 +104,7 @@ impl Budget {
     }
 
     pub fn with_limit(bytes: usize) -> Budget {
-        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS), work: Cell::new(MAX_DECODE_WORK) }
+        Budget { left: Cell::new(bytes), gone: Cell::new(false), too_long: Cell::new(0), strings: RefCell::default(), long: RefCell::default(), numbers: RefCell::default(), blobs: Cell::new(MAX_BLOBS), work: Cell::new(MAX_DECODE_WORK), structs: Cell::new(MAX_AP_STRUCT) }
     }
 
     /// Charges `n` bytes of attachment or appearance data; false (nothing charged) when they are not there. Unlike
@@ -112,6 +117,22 @@ impl Budget {
             }
             None => false,
         }
+    }
+
+    /// Charges `n` bytes of appearance structure; false (nothing charged) when they are not there.
+    pub fn take_struct(&self, n: usize) -> bool {
+        match self.structs.get().checked_sub(n) {
+            Some(rest) => {
+                self.structs.set(rest);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Gives back what an appearance that was not kept had charged to [`MAX_BLOBS`].
+    pub fn restore_blobs(&self, left: usize) {
+        self.blobs.set(left.min(MAX_BLOBS));
     }
 
     /// What is left of the file's decode allowance: a decode is capped to it, and not tried at 0.

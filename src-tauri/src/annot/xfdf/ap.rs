@@ -154,6 +154,10 @@ impl Reader<'_> {
         if self.objs.len() >= MAX_OBJECTS {
             return Err(TOO_BIG);
         }
+        // Every comment reads its own copy of a font many share, so what is held is charged, not only the streams.
+        if !self.budget.take_struct(128 + o.dict.iter().map(|(k, v)| 40 + k.len() + val_cost(v)).sum::<usize>()) {
+            return Err(NO_ROOM);
+        }
         self.objs.push(o);
         let i = self.objs.len() - 1;
         if let Some(n) = num {
@@ -170,7 +174,9 @@ impl Reader<'_> {
         }
         let r = s.read_stream_capped(room);
         self.budget.spend_work(r.as_ref().map_or(room, Vec::len));
-        let b = r.map_err(|e| if e.is_stream_cap() { TOO_BIG } else { DAMAGED })?;
+        // When what is left of the file's allowance (not this appearance's own limit) stopped it, it is not "too big".
+        let tight = room < MAX_PACKAGE.saturating_sub(self.total);
+        let b = r.map_err(|e| if !e.is_stream_cap() { DAMAGED } else if tight { NO_ROOM } else { TOO_BIG })?;
         self.take(b.len())?;
         Ok(b)
     }
@@ -502,8 +508,28 @@ pub(super) fn read(o: &PdfObject, b: &Budget) -> Option<Result<Package, Why>> {
     let ap = dict_of(get(o, "AP"))?;
     let n = get(&ap, "N")?;
     let mut r = Reader { objs: Vec::new(), seen: HashMap::new(), budget: b, total: 0 };
-    Some(r.form(&n, 0).map(|root| Package { objs: r.objs, root }))
+    let blobs = b.blobs_left();
+    let got = r.form(&n, 0).map(|root| Package { objs: r.objs, root });
+    if got.is_err() {
+        // An appearance that is not kept does not use up the file's room for the ones that are.
+        b.restore_blobs(blobs);
+    }
+    Some(got)
 }
+
+/// An estimate of the memory a value takes.
+fn val_cost(v: &Val) -> usize {
+    match v {
+        Val::Int(_) | Val::Real(_) | Val::Bool(_) | Val::Ref(_) => 32,
+        Val::Name(n) => 32 + n.len(),
+        Val::Arr(a) => 32 + a.iter().map(val_cost).sum::<usize>(),
+        Val::Dict(d) => 32 + d.iter().map(|(k, v)| 40 + k.len() + val_cost(v)).sum::<usize>(),
+    }
+}
+
+/// The most an appearance may come to as the FDF file `<appearance>` holds (base64 of it stays under the reader's
+/// limit for one element). Export leaves out one over it, so an export never writes what import refuses.
+pub(super) const MAX_FDF: usize = 6 << 20;
 
 // ---- the content stream: which resources it names ----------------------------------------------
 
@@ -715,7 +741,10 @@ fn val_text(v: &Val, first: usize, out: &mut String) {
         Val::Int(i) => {
             let _ = write!(out, "{i}");
         }
-        Val::Real(r) => out.push_str(&super::n(*r)),
+        // Not `n`: it keeps four decimals, which turns a `/Matrix` of 0.00002 into 0.
+        Val::Real(r) => {
+            let _ = write!(out, "{r}");
+        }
         Val::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Val::Name(n) => out.push_str(&pdf_name(n)),
         Val::Arr(a) => {
@@ -779,7 +808,7 @@ pub(super) fn to_fdf(p: &Package) -> Vec<u8> {
 /// The appearance of an `<appearance>` element's text (`over`: it was longer than the reader's limit for it).
 pub(super) fn from_base64(text: &str, over: bool, b: &Budget) -> Result<Package, Why> {
     use base64::Engine as _;
-    if over || text.len() / 4 * 3 > MAX_PACKAGE + (64 << 10) {
+    if over || text.len() / 4 * 3 > MAX_FDF {
         return Err(TOO_BIG);
     }
     let t: String = text.chars().filter(|c| !c.is_whitespace()).collect();

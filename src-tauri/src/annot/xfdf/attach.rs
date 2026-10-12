@@ -26,6 +26,10 @@ pub(super) const EXTERNAL: Why = "attached file that is a link to a file outside
 pub(super) const OVER: Why = "attached file over 4 MB, or that unpacks to more than that";
 pub(super) const NO_ROOM: Why = "attached file past the limit of 10 MB for attached files and appearances in one file";
 pub(super) const DAMAGED: Why = "attached file that is damaged or not understood";
+/// A comment of the document that has this name keeps its own file.
+pub(super) const KEPT: Why = "attached file of a comment that is already in the document (its own file is kept)";
+/// The reasons an attachment itself is refused for.
+pub(super) const REFUSED: [Why; 4] = [EXTERNAL, OVER, NO_ROOM, DAMAGED];
 
 /// Longest name and description kept.
 const NAME_MAX: usize = 255;

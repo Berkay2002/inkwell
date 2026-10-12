@@ -78,14 +78,20 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
   images up to 16 megapixels (Flate and DCT as stored, ICC profiles replaced by their device space). Actions, `/AA`,
   `/OC`, metadata, patterns, shadings, inline images, soft masks of a graphics state, Type 3 and composite fonts are
   not carried; an appearance that needs one of them is refused as a whole. Every name its content uses must resolve in
-  the form's own `/Resources`. Streams are decoded under a cap (4 MB per appearance), so a bomb stops there.
+  the form's own `/Resources`. Streams are decoded under a cap (4 MB per appearance), so a bomb stops there. Per file
+  there is also an allowance of 256 MB of decoding (what a cap stopped counts, so one bomb shared by thousands of comments
+  is not inflated again for each) and 64 MB for what appearances hold in memory (a font many comments share is a copy
+  each); past either, the rest get Inkwell's own drawing and are counted.
 - **Attached files**: a FileAttachment comment carries its file in XFDF `<data mode="raw" encoding="hex">` (a
   `filtered` mode is Flate; ascii and base64 are read too) or FDF `/FS` with `/EF`. At most 4 MB each and 10 MB for all
   attachments and appearances of one file; a larger one is left out and counted (a comment whose file cannot be written is
   left out of an export with its replies; one that cannot be read is skipped on import). A file that is a link to
   another file is never followed or opened, and a name is display text only (no folder, no characters a file system
   refuses). Name, size, modification date, description and MIME type are kept. The document's own embedded files
-  (`/Names /EmbeddedFiles`) are not touched: the file lives in the comment.
+  (`/Names /EmbeddedFiles`) are not touched: the file lives in the comment. An import never replaces the file of a
+  comment that is already in the document (matched by name): the other fields update, and the report counts "its own
+  file is kept". A file stored with an image codec (JPEG, JPEG 2000, JBIG2, CCITT) is refused, since decoding it would
+  give pixels, not the file.
 - **Rich text**: read with the XML reader (no DOCTYPE), rebuilt from a whitelist (`p span b i u s br div ul ol li`,
   `style` properties for font, colour, alignment and spacing, `dir`); links lose their address, `script` and `style`
   go with their content. Never executed or fetched. Over 128 KB or 16 levels deep it is dropped and the plain
