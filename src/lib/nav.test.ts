@@ -18,6 +18,7 @@ vi.mock("./api", () => ({
   bookmarksList: vi.fn(),
   bookmarksHeadings: vi.fn(),
   linksList: vi.fn(),
+  linksAudit: vi.fn(),
   linksUrls: vi.fn(),
   linkCheckUrl: vi.fn(),
   linkOpenUrl: vi.fn(),
@@ -44,6 +45,8 @@ import {
   linkHint,
   linkState,
   locate,
+  pressFeedback,
+  SIGNED_LINKS,
   onlyProblems,
   rgbToHex,
   targetLabel,
@@ -262,7 +265,7 @@ describe("link actions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useNav.setState({ docs: {}, linkTool: "select" });
-    vi.mocked(api.linksList).mockResolvedValue({ rev: 0, links: [] });
+    vi.mocked(api.linksList).mockResolvedValue({ rev: 0, links: [], locked: null, signed: false });
   });
 
   it("adds a link, selects it and drops the pending rectangle", async () => {
@@ -297,6 +300,57 @@ describe("link actions", () => {
     await useNav.getState().makeFromUrls(1);
     expect(editLinks).toHaveBeenCalledWith(1, 0, { op: "fromUrls" });
     expect(useNav.getState().docs[1].notice).toBe("3 links made from web addresses.");
+  });
+
+  it("sets the highlight style of a link as one change and lists again", async () => {
+    vi.mocked(editLinks).mockResolvedValue(ok(edited(null, 0)));
+    await useNav.getState().loadLinks(1, 2);
+    vi.mocked(api.linksList).mockClear();
+    await useNav.getState().setLinkHighlight(1, 2, -3, "inset");
+    expect(editLinks).toHaveBeenCalledWith(1, 0, { op: "setHighlight", page: 2, id: -3, highlight: "inset" });
+    expect(api.linksList).toHaveBeenCalledWith(1, 2);
+  });
+
+  it("asks with the count before it removes every link, and removes nothing on Cancel", async () => {
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 7, external: 2, broken: 0, signed: false, rows: [] });
+    vi.mocked(message).mockResolvedValue("Cancel");
+    expect(await useNav.getState().removeAllLinks(1)).toBe(false);
+    expect(vi.mocked(message).mock.calls[0][0]).toMatch(/Remove all 7 links/);
+    expect(editLinks).not.toHaveBeenCalled();
+
+    vi.mocked(message).mockResolvedValue("Ok");
+    vi.mocked(editLinks).mockResolvedValue(ok(edited(null, 7)));
+    expect(await useNav.getState().removeAllLinks(1)).toBe(true);
+    expect(editLinks).toHaveBeenCalledWith(1, 0, { op: "removeAll" });
+    expect(vi.mocked(message).mock.invocationCallOrder[1]).toBeLessThan(vi.mocked(editLinks).mock.invocationCallOrder[0]);
+    expect(useNav.getState().docs[1].notice).toBe("7 links removed.");
+  });
+
+  it("repeats the signed warning in the confirm from the audit, with no page loaded", async () => {
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 2, external: 0, broken: 0, signed: true, rows: [] });
+    vi.mocked(message).mockResolvedValue("Cancel");
+    await useNav.getState().removeAllLinks(1);
+    expect(vi.mocked(message).mock.calls[0][0]).toContain(SIGNED_LINKS);
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 2, external: 0, broken: 0, signed: false, rows: [] });
+    await useNav.getState().removeAllLinks(1);
+    expect(vi.mocked(message).mock.calls[1][0]).not.toContain("signed");
+  });
+
+  it("says so, and asks nothing, when the document has no links", async () => {
+    vi.mocked(api.linksAudit).mockResolvedValue({ total: 0, external: 0, broken: 0, signed: false, rows: [] });
+    expect(await useNav.getState().removeAllLinks(1)).toBe(false);
+    expect(message).not.toHaveBeenCalled();
+    expect(editLinks).not.toHaveBeenCalled();
+    expect(useNav.getState().docs[1].notice).toMatch(/no links/);
+  });
+
+  it("shows the press the link asks for, and none for a link that does nothing", () => {
+    const page = { kind: "page", page: 1, at: null } as const;
+    for (const h of ["none", "invert", "outline", "inset"] as const) expect(pressFeedback(page, h)).toBe(h);
+    expect(pressFeedback({ kind: "uri", uri: "https://example.com/" }, "outline")).toBe("outline");
+    expect(pressFeedback({ kind: "file", name: "a.pdf", page: null }, "inset")).toBe("inset");
+    expect(pressFeedback({ kind: "other", what: "JavaScript" }, "invert")).toBe("none");
+    expect(pressFeedback({ kind: "broken", what: "gone" }, "invert")).toBe("none");
   });
 
   it("lists the page's links again when the document moved on", async () => {
