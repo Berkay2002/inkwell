@@ -200,6 +200,27 @@ fn a_packet_that_cannot_be_decoded_is_not_overwritten_by_a_property_change() {
 }
 
 #[test]
+fn a_packet_without_its_rdf_element_is_not_replaced_by_a_property_change() {
+    let h = fixture_doc("tb-props-xmp-cut");
+    // cut short: the closing tags are gone, and a property of another vocabulary is in what is left
+    let xml = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">               <rdf:Description rdf:about=\"\" xmlns:xmpRights=\"http://ns.adobe.com/xap/1.0/rights/\">               <xmpRights:UsageTerms>Keep this</xmpRights:UsageTerms>";
+    h.eng
+        .apply_custom(h.doc, "Add cut XMP".into(), EditSource::User, false, |d| {
+            let mut stm = d.add_stream(&mupdf::Buffer::from_bytes(xml.as_bytes())?, None, false)?;
+            stm.dict_put("Type", mupdf::pdf::PdfObject::new_name("Metadata")?)?;
+            stm.dict_put("Subtype", mupdf::pdf::PdfObject::new_name("XML")?)?;
+            d.catalog()?.dict_put("Metadata", stm)?;
+            Ok(Vec::new())
+        })
+        .unwrap();
+    let s = steps(&h);
+    let e = err_of(&h, "set_document_properties", json!({ "title": "New title" }));
+    assert!(e.contains("XMP metadata could not be read"), "{e}");
+    assert_eq!(steps(&h), s, "nothing was changed");
+    assert!(xmp_of(&h).contains("Keep this"), "the packet is as it was");
+}
+
+#[test]
 fn a_certified_document_takes_no_property_change_and_no_sanitize_and_a_signed_one_no_rewrite() {
     let h = fixture_doc("tb-cert-props");
     crate::ai::actions::tests::certify(&h, Some(2), None);

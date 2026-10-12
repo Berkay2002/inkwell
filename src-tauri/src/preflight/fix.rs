@@ -170,8 +170,8 @@ pub(crate) fn set_info_properties(doc: &mut PdfDocument, writes: &[(&str, String
 
 /// Brings the XMP packet in line with the document information after a property changed (the
 /// standards want the two to agree, and a reader that prefers XMP would otherwise show the old
-/// value). A document without a packet is left without one. A packet that is not UTF-8, or cannot be decoded, is
-/// refused, so the properties are never left silently disagreeing. Returns whether the packet was rewritten.
+/// value). A document without a packet is left without one. A packet that is not UTF-8, cannot be decoded, or has
+/// no RDF element is refused, so the properties are never left silently disagreeing. Returns whether the packet was rewritten.
 pub(crate) fn sync_xmp_with_info(doc: &mut PdfDocument) -> Result<bool> {
     let cat = doc.catalog()?;
     let Some(mut meta) = cat.get_dict("Metadata")?.filter(|m| m.is_stream().unwrap_or(false)) else { return Ok(false) };
@@ -184,6 +184,11 @@ pub(crate) fn sync_xmp_with_info(doc: &mut PdfDocument) -> Result<bool> {
         return Err(unreadable());
     }
     let old = String::from_utf8(bytes).map_err(|_| bad("the XMP metadata isn't UTF-8, so the properties aren't changed here; fix it in the source application"))?;
+    // A packet without its RDF element (cut short, or only partly decoded) would be replaced whole by `merge`, with
+    // whatever else it held; only a blank one is made from the properties alone.
+    if !old.trim().is_empty() && !(old.contains("<rdf:RDF") && old.contains("</rdf:RDF>")) {
+        return Err(unreadable());
+    }
     let info = doc.trailer()?.get_dict("Info")?.filter(|i| i.is_dict().unwrap_or(false));
     let props = check::info_props(info.as_ref());
     // A cleared property leaves nothing to mirror, so its old XMP value is taken out here.

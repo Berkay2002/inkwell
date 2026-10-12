@@ -388,6 +388,14 @@ fn page_changes_that_do_nothing_or_are_wrong_are_errors() {
     assert!(err_of(&h, "organize_pages", json!({ "action": "spin" })).contains("Unknown action"));
     assert!(err_of(&h, "delete_pages", json!({ "pages": [1, 2, 3] })).contains("at least one page"));
     assert!(err_of(&h, "delete_pages", json!({})).contains("pages"));
+    // a range or list that names no page is never "every page": a lone `to`, a `from` that is no number, a reversed range
+    for a in [json!({ "to": 2 }), json!({ "from": "x" }), json!({ "from": 3, "to": 1 }), json!({ "pages": [] }), json!({ "pages": "1" })] {
+        let mut rotate = json!({ "action": "rotate", "degrees": 90 });
+        rotate.as_object_mut().unwrap().extend(a.as_object().unwrap().clone());
+        assert!(err_of(&h, "organize_pages", rotate).contains("name no page"), "{a}");
+        assert!(err_of(&h, "delete_pages", a.clone()).contains("name no page"), "{a}");
+    }
+    assert!(err_of(&h, "organize_pages", json!({ "action": "move", "to": 2 })).contains("name no page"));
     assert_eq!((rev(&h), steps(&h)), (r, s));
 }
 
