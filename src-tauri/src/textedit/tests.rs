@@ -1658,3 +1658,18 @@ fn replace_one_on_a_rotated_page_finds_its_block() {
     assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
     assert_eq!(all_text(&eng, id), "north east south");
 }
+
+#[test]
+fn a_run_is_capped_stops_with_a_reason_and_is_still_one_step() {
+    let d = dir("replace-cap");
+    let line = format!("BT /F1 8 Tf 20 700 Td ({}) Tj ET", "x ".repeat(700));
+    let (eng, id, _) = open(&d, &pages_pdf(&[&line, &line, &line]));
+    let before = all_text(&eng, id);
+    let r = do_replace(&eng, id, &req("x", "y", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced as usize, super::replace::MAX_REPLACEMENTS, "{:?}", (r.replaced, &r.stopped));
+    assert!(r.stopped.as_deref().is_some_and(|s| s.contains("2000")), "{:?}", r.stopped);
+    assert_eq!(r.state.undo.as_deref(), Some("Replace \"x\" with \"y\""));
+    assert!(all_text(&eng, id).contains('y'));
+    eng.undo(id).unwrap();
+    assert_eq!(all_text(&eng, id), before);
+}

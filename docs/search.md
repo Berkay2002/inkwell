@@ -7,6 +7,9 @@ pdfcraft's `find_opts`, see `third_party/pdfcraft/INKWELL-NOTICE.txt`). The per-
 across files) and `store.ts` (`runSearch`, `stepHit`, `selectHit`, `stopSearch`).
 
 ## Find box and options
+- While Edit text is on, the box has a second row with **Replace with**, **Replace** and **Replace all**: the matches are
+  these (same query, case and whole words), and the text blocks that hold them are edited. See
+  [text-edit.md](text-edit.md) ("Find & Replace").
 - Ctrl+F opens the floating find box. Live search as you type (220 ms), Enter / Shift+Enter or F3 / Shift+F3 step.
 - Two chips sit in the box: **Aa** match case, **ab** whole words. The "…" menu holds **Ignore accents**, **Include
   comments**, **Include bookmarks**, **Include form fields** and **Advanced search…**. Options are kept for the next run

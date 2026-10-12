@@ -153,8 +153,7 @@ fn run(d: &mut PdfDocument, q: &Query, with: &str, at: Option<&ReplaceAt>, out: 
     let started = Instant::now();
     let mut touched = Vec::new();
     for page in range {
-        if out.replaced as usize >= MAX_REPLACEMENTS {
-            out.stopped = Some(format!("Stopped after {MAX_REPLACEMENTS} replacements. Search again to replace the rest."));
+        if out.stopped.is_some() {
             break;
         }
         if started.elapsed() > BUDGET {
@@ -205,7 +204,7 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     let found: Vec<Vec<(usize, usize)>> = text
         .iter()
         .zip(&blocks)
-        .map(|(t, b)| if b.issue == Some(text::Issue::Hidden) { Vec::new() } else { search::find_spans(&t.iter().collect::<String>(), q, room.max(1)) })
+        .map(|(t, b)| if b.issue == Some(text::Issue::Hidden) { Vec::new() } else { search::find_spans(&t.iter().collect::<String>(), q, room + 1) })
         .collect();
     // What Find lists on this page: the matches that sit in no one block are accounted for as skipped.
     let hits: Vec<search::Hit> = search::find_in_page(d, page, q)?.into_iter().filter(|h| h.source == Source::Text).collect();
@@ -283,11 +282,13 @@ fn replace_page(d: &mut PdfDocument, page: u32, q: &Query, with: &str, at: Optio
     let mut changed = false;
     for (bi, mut spans) in plan.into_iter().rev() {
         let left = MAX_REPLACEMENTS.saturating_sub(out.replaced as usize);
-        if left == 0 {
+        if spans.len() > left {
             out.stopped = Some(format!("Stopped after {MAX_REPLACEMENTS} replacements. Search again to replace the rest."));
+            spans.truncate(left);
+        }
+        if spans.is_empty() {
             break;
         }
-        spans.truncate(left);
         changed |= apply_block(d, page, bi, &blocks[bi], &spans, with, out);
     }
     Ok(changed)

@@ -13,6 +13,7 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 | `text_edit` | `doc, rev, page, index, change` | `{ state: EditState, fallback: Fallback \| null, fallbacks: Fallback[] }` |
 | `text_add` | `doc, rev, page, new` | `EditState` |
 | `text_fonts` | `doc` | `FontInfo[]` |
+| `text_replace` | `doc, rev, req` | `{ state, replaced, skipped, skippedCount, stopped, fallbacks, inserted }` |
 
 - Coordinates are page space as the viewer shows it (points, origin top left, `/Rotate` applied): the space of
   `page_text`. Offsets and widths in `change` are in that space too.
@@ -189,7 +190,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - A run whose text changed loses the original kerning (it uses the font's advances); unchanged runs keep theirs. Word
   spacing (`Tw`) is not kept: a left-aligned line that used it to space words comes out narrower (justified lines
   are spread again).
-- Text inside form XObjects is reported, not edited (it may be shared by several pages).
+- Text inside form XObjects is reported, not edited (it may be shared by several pages); Find & Replace skips it.
+- Find & Replace changes page text only; a run a match is in loses its original kerning, as in any text edit.
 - Fallback fonts are the standard 14 and the bundled faces (no system fonts). Characters outside the bundled sets
   (rare Han ideographs, other scripts such as Arabic, Devanagari or Thai) are refused with a message naming the first
   one. CJK text is set in its Simplified Chinese glyph forms; there is no complex shaping (no ligatures, no
@@ -211,6 +213,42 @@ Noto subsets, CJK included), wrapped to `width` when given, upright on rotated p
 page's contents with its own `q ... Q` and a `/TouchUp_TextEdit` marked-content tag. One undo step, "Add text on
 p. N"; unlike a rewrite it saves incrementally. The new box is listed as a block straight away and edited like any
 other.
+
+## Find & Replace
+
+Acrobat's Edit > Find & Replace, on top of the block edit (`textedit/replace.rs`, command `text_replace`).
+`req = { find, with, opts: { caseSensitive, wholeWords, ignoreAccents }, at?: { page, rect } }`. There is no new
+content-stream writer: every changed block goes through `rewrite_block`, so fonts, fallback and the
+`fallbacks` report are those of Edit text.
+
+- **Matching** is Find's own (`search::Query`, so case, whole words and accents mean the same), run over the runs of
+  each text block as Edit text reads them (`search::find_spans`). Comments, form-field values and bookmarks are never
+  replaced, whatever Find's options say. An empty `find` and a replacement with a line break are refused.
+- **Replace all** (`at` unset) plans each page from one reading of it and applies it from the last block to the first;
+  one `rewrite_block` per block, however many matches it holds. Runs a match does not touch keep their glyphs and
+  kerning; a match across runs puts the replacement in the style of the run it starts in. Nothing is searched again
+  after a replacement, so a replacement that contains the find text is set once and never loops. The whole run is
+  one undo step ("Replace "cat" with "dog""), saved like any text edit (a full rewrite; incremental when signed).
+- **Replace one** (`at` = the first rectangle of the current Find hit): the match is the nth hit of its block in
+  Find's list for the page, taken as the nth match in the block's text and checked against the words around it (a
+  shortcut: if it can't be placed the match is skipped with "use Replace all"). One undo step, "Replace text on p. N".
+  `inserted` is how many times the find text occurs in the replacement: the UI lands that many hits further on.
+- **Skipped, never forced**: a match Edit text refuses (Type 3, no ToUnicode, invisible text, vertical, encoding,
+  clipping text), a match across two blocks, text in a form XObject or converted to outlines, a block the replacement
+  would leave empty, and a block whose rewrite is refused (its text or a character no font can show) are left as they
+  are and listed as `{ page, text, reason: "skipped: …" }`; a block is rewritten whole or not at all. The first 200
+  are listed, `skippedCount` counts all. Text on a hidden layer is not offered by Find and is not counted.
+- **Locked**: a certified document is refused ("This document is certified…", nothing recorded); a signed one is saved
+  incrementally as Edit text is. A stale `rev` is `Stale`.
+- **Bounds**: at most 2,000 replacements and 20 seconds per run; past either it stops at a page boundary, keeps what
+  it did (still one step) and says so in `stopped`. Nothing is written when nothing was replaced.
+- **UI**: while Edit text is on, the Find bar has a second row: "Replace with", Replace, Replace all and the result
+  ("5 replaced, 2 skipped", which opens the list of what was skipped, with its page and reason). Replace goes on to
+  the next match. The controls say why they are off (certified document, no match, a comment or form hit selected).
+  Typed text in a block is sent first (`src/lib/replace.ts`).
+- **Tests**: `textedit::tests::replace_*` and its neighbours (replace all across pages as one undo, case and whole
+  word, a replacement holding the find text, replace one, runs, skips with reasons, certified and signed, a rotated
+  page, save and reopen), `search::tests::spans_*`, `src/lib/replace.test.ts`.
 
 ## The UI
 
