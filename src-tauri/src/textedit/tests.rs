@@ -2009,6 +2009,23 @@ fn a_justified_block_edited_in_one_line_keeps_the_others_and_stays_justified() {
 }
 
 #[test]
+fn blanks_typed_at_the_ends_and_a_retyped_line_in_a_short_block_keep_the_lines() {
+    let d = dir("edit-blanks-and-retyped");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    let before = line_boxes(&eng, id);
+    for t in ["One cat Two Three long hats here ", "One cat Two Three long hats here\n", " One cat Two Three long hats here"] {
+        set_text(&eng, id, 0, t);
+        let after = all_boxes(&eng, id);
+        assert!(after.len() == 3 && after.iter().zip(&before).all(|(a, b)| same_box(a, b)), "{t:?}: {after:?} vs {before:?}");
+    }
+    // One line retyped with more new words than the block has old ones: the other two lines are not touched.
+    set_text(&eng, id, 0, "One cat Two Four five six seven eight");
+    let after = all_boxes(&eng, id);
+    assert_eq!(page_lines(&eng, id)[..2], ["One cat", "Two"]);
+    assert!(same_box(&after[0], &before[0]) && same_box(&after[1], &before[1]), "{after:?} vs {before:?}");
+}
+
+#[test]
 fn a_block_edited_with_a_width_or_typed_over_is_laid_out_whole_as_before() {
     let d = dir("edit-reflow-asked");
     let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));

@@ -654,7 +654,7 @@ const MAX_EDIT_CHARS: usize = 20_000;
 /// None when the lines can't be told from the text, and the block is set as a whole (its lines wrapped to its
 /// widest, as before): a block of one line (it grows to the margin), a block that holds a line-end hyphen the
 /// edit doesn't cover, whose runs text is not the text the user was shown, whose lines have their own character
-/// spacing or scale, an edit that rewrites most of the words (a paragraph typed over, which reflows), or none.
+/// spacing or scale, or an edit that touches every line and rewrites most of the words (a paragraph typed over).
 pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
     let old = joined(b);
     if b.lines.len() < 2 || old.len() > MAX_EDIT_CHARS || b.text.chars().ne(old.iter().copied()) {
@@ -697,9 +697,9 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
             }
         }
     }
-    // Most of the words are new (or most are gone): a paragraph typed over, which is laid out again whole.
-    if hunks.is_empty() || matched * 2 < ow.len().min(nw.len()) {
-        return None;
+    // Nothing but blanks at the ends changed: every line stays as it was.
+    if hunks.is_empty() {
+        return keep_change(b, &[], &[], true).ok();
     }
     for h in &mut hunks {
         let [mut a, mut b, mut c, mut d] = *h;
@@ -732,6 +732,16 @@ pub(super) fn keep_edit(b: &Block, new: &str) -> Option<TextChange> {
         }
     }
     let spans: Vec<(usize, usize)> = merged.iter().map(|h| (ow[h[0]].0, ow[h[1] - 1].1 - 1)).collect();
+    // Most of the words are new (or most are gone) and each line is touched: a paragraph typed over, which is laid
+    // out again whole. A short block with one line retyped keeps the others.
+    let starts: Vec<usize> = std::iter::once(0).chain(b.breaks.iter().map(|&(p, _)| p + 1)).chain(b.joins.iter().copied()).collect();
+    let touched = |from: usize| {
+        let to = starts.iter().copied().filter(|&n| n > from).min().unwrap_or(old.len() + 1);
+        spans.iter().any(|&(s, e)| s < to && e >= from)
+    };
+    if matched * 2 < ow.len().min(nw.len()) && starts.iter().all(|&f| touched(f)) {
+        return None;
+    }
     // A line-end hyphen is dropped by the rewrite: only an edit that covers it may go through.
     if b.joins.iter().any(|&j| !spans.iter().any(|&(s, e)| s < j && e >= j)) {
         return None;
