@@ -454,6 +454,26 @@ fn an_unreadable_names_tree_leaves_a_name_unjudged() {
     assert!(other);
 }
 
+/// Setting a bookmark to the page its named destination already resolves to still replaces the name with an array.
+#[test]
+fn setting_a_named_bookmark_to_the_page_it_resolves_to_writes_an_explicit_destination() {
+    let d = dir("outline", "set_named_dest");
+    let (eng, id, _p) = open_fixture(&d, &Fixture { pages: 2, chapter_every: 1, ..Default::default() });
+    let first = list(&eng, id).unwrap().items[0].id;
+    eng.apply_custom(id, "Name destination".into(), EditSource::User, false, |d| {
+        let mut dests = d.new_dict()?;
+        dests.dict_put("n", dest_object(d, 0, None)?)?;
+        d.catalog()?.dict_put("Dests", dests)?;
+        walked(d)?.1.obj(first)?.dict_put("Dest", d.new_object_from_str("/n")?)?;
+        Ok(Vec::new())
+    })
+    .unwrap();
+    assert!(matches!(list(&eng, id).unwrap().items[0].dest, Dest::Page { page: 0, .. }));
+    go(&eng, id, BookmarkOp::SetDest { id: first, page: 0, at: None });
+    let explicit = eng.read_custom(id, |d| Ok(walked(d)?.1.obj(first)?.get_dict("Dest")?.is_some_and(|x| x.is_array().unwrap_or(false)))).unwrap();
+    assert!(explicit, "the bookmark still holds the name");
+}
+
 #[test]
 fn a_bookmark_to_a_missing_named_destination_is_broken() {
     let d = dir("outline", "broken");

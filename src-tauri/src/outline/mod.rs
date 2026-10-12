@@ -971,7 +971,9 @@ pub(crate) fn run(doc: &mut PdfDocument, op: &BookmarkOp) -> Result<Option<(Opti
             let dest = dest_object(doc, *page, *at)?;
             let now = dest_of(doc, &it, &mut HashMap::new(), &mut Names::default());
             if let Dest::Page { page: p, at: a } = now {
-                if p == *page && same_point(a, *at) && it.get_dict("A")?.is_none() {
+                // a name is never "already the same": MuPDF and Acrobat may send it elsewhere than the tree does
+                let explicit = it.get_dict("Dest")?.is_some_and(|d| d.is_array().unwrap_or(false));
+                if explicit && p == *page && same_point(a, *at) && it.get_dict("A")?.is_none() {
                     return Ok(None);
                 }
             }

@@ -565,6 +565,32 @@ fn a_named_destination_that_cannot_be_checked_is_told_apart_and_can_be_retargete
 }
 
 #[test]
+fn setting_a_named_link_to_the_page_it_resolves_to_writes_an_explicit_destination() {
+    // /Dests maps n to page 3 0 R; the link names it, once as /Dest and once as the /D of a GoTo
+    let cat = "/Dests << /n [3 0 R /Fit] >>";
+    let annots = vec![link_annot("/Dest /n"), link_annot("/A << /S /GoTo /D /n >>")];
+    let (eng, id, _, _d) = opened("set_named_target", &page_with_annots("", cat, &annots, &[]));
+    let links = list(&eng, id, 0).unwrap().links;
+    for l in &links {
+        assert!(matches!(l.target, Target::Page { page: 0, .. }), "{:?}", l.target);
+        go(&eng, id, LinkOp::SetTarget { page: 0, id: l.id, target: NewTarget::Page { page: 0, at: None } });
+    }
+    let kept = eng
+        .read_custom(id, |d| {
+            let page = d.find_page(0)?;
+            let annots = page.get_dict("Annots")?.unwrap();
+            let mut names = 0;
+            for i in 0..annots.len()? as i32 {
+                let a = annots.get_array(i)?.unwrap();
+                names += (!stored_dest_is_array(&a)) as u32;
+            }
+            Ok(names)
+        })
+        .unwrap();
+    assert_eq!(kept, 0, "a link still holds the name");
+}
+
+#[test]
 fn existing_launch_goto_remote_javascript_and_named_actions_survive_rect_and_border_edits() {
     let annots = vec![
         link_annot("/A << /S /Launch /F (readme.docx) >>"),
