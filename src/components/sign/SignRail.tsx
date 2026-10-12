@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { pickSave, pickSource } from "../../lib/api";
 import {
-  CERTIFY_LABEL, type Identity, LOCKED_REASON, type SignatureInfo, SOURCE_LABEL, STATUS, canSign, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
+  CERTIFY_LABEL, type Identity, type SignatureInfo, SOURCE_LABEL, STATUS, canSign, changeNote, idKey, locked, otherWarnings, outcome, pdfDate, picture, statusWord,
   signApi, signed, useSign,
 } from "../../lib/sign";
 import { type DocState, useStore } from "../../store";
@@ -66,7 +66,7 @@ function Sheet({ doc }: { doc: DocState }) {
       <Head title="Digital signature" />
       <div className="sg-body">
         {isLocked ? (
-          <p className="sg-callout">{LOCKED_REASON}</p>
+          <p className="sg-callout">{isLocked}</p>
         ) : !d.draft ? (
           <p className="sg-callout">
             <Icon name="nib" size={15} /> Drag a box on the page where the signature goes, or click an empty signature field.
@@ -143,7 +143,7 @@ function Sheet({ doc }: { doc: DocState }) {
             </button>
           )}
           <span className="grow" />
-          <button className="cm-btn primary sg-sign" disabled={!d.draft || !who || !!who.unusable || isLocked || s.signing} onClick={() => void sign()}>
+          <button className="cm-btn primary sg-sign" disabled={!d.draft || !who || !!who.unusable || !!isLocked || s.signing} onClick={() => void sign()}>
             {s.signing ? "Signing…" : "Sign"}
           </button>
         </div>

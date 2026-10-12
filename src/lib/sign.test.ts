@@ -89,9 +89,12 @@ describe("helpers", () => {
     expect(outcome([sig({})], false, true)).toBe("Saves the file with your other changes. Adds a new revision; the earlier signature stays valid.");
     expect(outcome([], true, false)).toMatch(/Locks the document/);
     // The document's level from sign_list, not a guess from the signatures.
-    expect(locked({ certify: 1 })).toBe(true);
-    expect(locked({ certify: 2 })).toBe(false);
-    expect(locked({ certify: null })).toBe(false);
+    expect(locked({ certify: 1, refused: null })).toBe(LOCKED_REASON);
+    expect(locked({ certify: 2, refused: null })).toBeNull();
+    expect(locked({ certify: null, refused: null })).toBeNull();
+    // The engine's own reason wins: a broken or unchecked signature is no certification.
+    const broken = "A signature in this file is broken, so Inkwell won't add another.";
+    expect(locked({ certify: null, refused: broken })).toBe(broken);
   });
 
   it("keeps placed pictures and signature boxes on the page", () => {
@@ -149,7 +152,7 @@ describe("sign store", () => {
     useSign.setState({ ids: [testId], idChoice: "s3", reason: "Lease signed", lock: true, picture: true, saved: [saved("a", "signature")], pick: { signature: "a" } });
     s().setDraft(1, { page: 3, rect: [300, 600, 500, 680] });
     const signedState = { ...state, rev: 5, dirty: false };
-    reply({ sign_document: signedState, sign_list: { certify: 1, signatures: [sig({ certify: 1 })], error: null } });
+    reply({ sign_document: signedState, sign_list: { refused: null, certify: 1, signatures: [sig({ certify: 1 })], error: null } });
     expect(await s().sign(1, null)).toBe(true);
     const call = inv.mock.calls.find((c) => c[0] === "sign_document")![1] as Record<string, unknown>;
     expect(call.id).toEqual({ kind: "session", handle: 3 });
@@ -165,7 +168,7 @@ describe("sign store", () => {
   it("signs an existing field by name and never certifies a signed document", async () => {
     useSign.setState({ ids: [testId], idChoice: "s3", lock: true });
     useSign.setState({ docs: { 1: { ...s().get(1), sigs: [sig({})], draft: { page: 0, rect: [0, 0, 1, 1], field: "Tenant" } } } });
-    reply({ sign_document: state, sign_list: { certify: null, signatures: [], error: null } });
+    reply({ sign_document: state, sign_list: { refused: null, certify: null, signatures: [], error: null } });
     await s().sign(1, "save-token");
     const call = inv.mock.calls.find((c) => c[0] === "sign_document")![1] as { options: Record<string, unknown>; to: string };
     expect(call.options.field).toBe("Tenant");
@@ -187,21 +190,21 @@ describe("sign store", () => {
   });
 
   it("shows the banner again when the number of signatures changes", async () => {
-    reply({ sign_list: { certify: null, signatures: [sig({})], error: null } });
+    reply({ sign_list: { refused: null, certify: null, signatures: [sig({})], error: null } });
     await s().refreshSigs(1, 1);
     s().hideBanner(1);
     await s().refreshSigs(1, 2);
     expect(s().get(1).bannerHidden).toBe(true);
-    reply({ sign_list: { certify: 2, signatures: [sig({}), sig({ field: "B" })], error: null } });
+    reply({ sign_list: { refused: null, certify: 2, signatures: [sig({}), sig({ field: "B" })], error: null } });
     await s().refreshSigs(1, 3);
     expect(s().get(1).bannerHidden).toBe(false);
     expect(s().get(1).certify).toBe(2);
   });
 
   it("keeps the level and says why when the signatures couldn't be checked, never 'not signed'", async () => {
-    reply({ sign_list: { certify: 1, signatures: [], error: "this document has more than 64 signatures, more than Inkwell checks" } });
+    reply({ sign_list: { refused: "too many", certify: 1, signatures: [], error: "this document has more than 64 signatures, more than Inkwell checks" } });
     await s().refreshSigs(1, 1);
-    expect(locked(s().get(1))).toBe(true);
+    expect(locked(s().get(1))).toBe("too many");
     expect(banner(s().get(1).sigs, s().get(1).sigsError)).toEqual({
       tone: "invalid",
       text: "The signatures could not be checked: this document has more than 64 signatures, more than Inkwell checks.",
@@ -212,6 +215,7 @@ describe("sign store", () => {
     inv.mockRejectedValue("the file could not be read");
     await s().refreshSigs(1, 1);
     expect(s().get(1).sigsError).toBe("the file could not be read");
+    expect(locked(s().get(1))).toBe("The signatures could not be checked: the file could not be read.");
     expect(banner(s().get(1).sigs, s().get(1).sigsError)).toEqual({ tone: "invalid", text: "The signatures could not be checked: the file could not be read." });
     inv.mockRejectedValue(undefined);
     await s().refreshSigs(1, 2);

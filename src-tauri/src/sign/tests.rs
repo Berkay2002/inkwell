@@ -1812,11 +1812,32 @@ fn a_signature_pointed_at_a_later_update_that_strips_its_lock_locks_every_field(
     assert!(u2.len() > u.len());
     assert!(!field(&infos(&u2), "Tenant").intact);
     assert_eq!(locked_fields(&u2), ["Witness", "Other"]);
-    // And what it allowed is unknown: no changes, so no new box either.
-    let p1 = "The document is certified with no changes allowed, so it can't be signed again.";
+    // And what it allowed is unknown: no new box either, saying it is broken (it is no certification).
+    let broken = "A signature in this file is broken, so Inkwell won't add another.";
     let l = pdf::list(&PdfDocument::from_bytes(&u2).unwrap(), &u2, &trust_tests).unwrap();
-    assert_eq!(l.certify, Some(1));
-    assert_eq!(pdf::sign(&u2, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err().to_string(), p1);
+    assert_eq!((l.certify, l.refused.as_deref()), (None, Some(broken)));
+    assert_eq!(pdf::sign(&u2, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err().to_string(), broken);
+    assert_eq!(field(&l.signatures, "Witness").refused.as_deref(), Some(broken));
+}
+
+#[test]
+fn a_signature_inkwell_cant_check_stops_new_ones_with_its_own_reason() {
+    let unchecked = "A signature in this file can't be checked, so Inkwell won't add another.";
+    // An x509.rsa_sha1 signature, a type Inkwell doesn't read: neither broken nor a certification.
+    let b = pdf::sign_with(&lease(), &ids().0, &SignRequest { field: Some("Tenant".into()), ..unseen() }, &mut |d, w| {
+        let mut v = w.get_dict("V").unwrap().unwrap();
+        v.dict_put("SubFilter", d.new_object_from_str("/adbe.x509.rsa_sha1").unwrap()).unwrap();
+    })
+    .unwrap();
+    let l = pdf::list(&PdfDocument::from_bytes(&b).unwrap(), &b, &trust_tests).unwrap();
+    assert!(!field(&l.signatures, "Tenant").intact);
+    assert_eq!((l.certify, l.refused.as_deref()), (None, Some(unchecked)));
+    assert_eq!(field(&l.signatures, "Witness").refused.as_deref(), Some(unchecked));
+    assert_eq!(pdf::sign(&b, &ids().1, &req(0, [72.0, 600.0, 280.0, 680.0])).unwrap_err().to_string(), unchecked);
+    // Next to a signature that checks out, nothing is refused.
+    let ok = lock_sign(&lease(), "Tenant", "", "");
+    let l = pdf::list(&PdfDocument::from_bytes(&ok).unwrap(), &ok, &trust_tests).unwrap();
+    assert_eq!((l.certify, l.refused), (None, None));
 }
 
 #[test]

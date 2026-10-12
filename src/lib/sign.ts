@@ -89,6 +89,9 @@ export interface SignatureInfo {
 /** `sign_list`: the document's DocMDP level as signing reads it (one that can't be read is 1), and every signature field. */
 export interface SignList {
   certify: number | null;
+  /** Why no signature can be added (the engine refuses every one with it): a P=1 level, or a signature in the file
+   *  that can't be checked or is broken. */
+  refused: string | null;
   signatures: SignatureInfo[];
   /** Why the signatures couldn't be checked (`signatures` is then empty). */
   error: string | null;
@@ -243,8 +246,9 @@ export const CERTIFY_LABEL: Record<number, string> = {
   3: "Certified · form filling, signing and comments allowed",
 };
 
-/** Whether a new signature may be added: a P=1 certification forbids it (the level the engine reads, from `sign_list`). */
-export const locked = (d: Pick<DocSign, "certify">) => d.certify === 1;
+/** Why no new signature may be added, if one may not: the engine's reason from `sign_list` (a P=1 level, or a signature
+ *  in the file that can't be checked or is broken), else a P=1 level set locally. */
+export const locked = (d: Pick<DocSign, "certify" | "refused">): string | null => d.refused ?? (d.certify === 1 ? LOCKED_REASON : null);
 
 export const LOCKED_REASON = "The document is certified with no changes allowed, so it can't be signed again.";
 
@@ -313,6 +317,8 @@ export interface DocSign {
   sigs: SignatureInfo[];
   /** The document's DocMDP level, as `sign_list` read it with `sigs`. */
   certify: number | null;
+  /** Why no signature can be added, from `sign_list`. */
+  refused: string | null;
   /** Why `sigs` couldn't be checked, from `sign_list`. */
   sigsError: string | null;
   /** The rev `sigs` were read at. */
@@ -322,7 +328,7 @@ export interface DocSign {
   error: string | null;
 }
 
-const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], certify: null, sigsError: null, sigsRev: -1, draft: null, bannerHidden: false, error: null });
+const fresh = (): DocSign => ({ focus: null, items: [], selected: null, sigs: [], certify: null, refused: null, sigsError: null, sigsRev: -1, draft: null, bannerHidden: false, error: null });
 
 const msg = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e));
 
@@ -468,12 +474,13 @@ export const useSign = create<SignStore>((set, get) => {
     },
     refreshSigs: async (doc, rev) => {
       try {
-        const { signatures: sigs, certify, error } = await signApi.list(doc);
+        const { signatures: sigs, certify, refused, error } = await signApi.list(doc);
         const before = signed(get().get(doc).sigs).length;
-        patch(doc, { sigs, certify, sigsError: error, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
+        patch(doc, { sigs, certify, refused, sigsError: error, sigsRev: rev, ...(signed(sigs).length !== before ? { bannerHidden: false } : {}) });
       } catch (e) {
         // Never null: an empty list without a reason reads as "no signatures".
-        patch(doc, { sigs: [], certify: null, sigsError: msg(e) || "the engine did not answer", sigsRev: rev });
+        const why = msg(e) || "the engine did not answer";
+        patch(doc, { sigs: [], certify: null, refused: `The signatures could not be checked: ${why}.`, sigsError: why, sigsRev: rev });
       }
     },
     select: (doc, selected) => patch(doc, { selected }),
