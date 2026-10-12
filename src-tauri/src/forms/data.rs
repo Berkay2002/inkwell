@@ -100,7 +100,8 @@ fn xfdf(fields: &[Out], file: &str) -> String {
     fn walk(name: &str, t: &Tree, o: &mut String) {
         let _ = write!(o, "<field name=\"{}\">", esc(name));
         if let Some(f) = t.leaf {
-            for v in &f.values {
+            // An empty field is written as an empty value (as JSON "" and FDF () are), so importing clears it.
+            for v in f.values.iter().map(String::as_str).chain(f.values.is_empty().then_some("")) {
                 let _ = write!(o, "<value>{}</value>", esc(v));
             }
         }
@@ -197,8 +198,9 @@ pub struct Parsed {
 }
 
 pub fn parse_json(bytes: &[u8]) -> Result<Parsed> {
-    // serde_json stops at 128 levels; the cap here is 64, and counting is cheap.
-    let (mut depth, mut in_str, mut esc_next) = (0usize, false, false);
+    // serde_json stops at 128 levels; the cap here is 64, and counting is cheap. Values are counted the same
+    // way (commas and openings) so a 32 MB file of tiny pairs is refused before anything is built from it.
+    let (mut depth, mut nodes, mut in_str, mut esc_next) = (0usize, 0usize, false, false);
     for &b in bytes {
         if in_str {
             match (esc_next, b) {
@@ -212,12 +214,17 @@ pub fn parse_json(bytes: &[u8]) -> Result<Parsed> {
                 b'"' => in_str = true,
                 b'[' | b'{' => {
                     depth += 1;
+                    nodes += 1;
                     if depth > MAX_DEPTH {
                         return Err(bad("This file is nested more than 64 levels deep, so Inkwell does not read it."));
                     }
                 }
                 b']' | b'}' => depth = depth.saturating_sub(1),
+                b',' => nodes += 1,
                 _ => {}
+            }
+            if nodes > MAX_NODES {
+                return Err(bad("This file has more than 100 000 values, so Inkwell does not read it."));
             }
         }
     }

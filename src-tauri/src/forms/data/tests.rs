@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::engine::fixture::{self, Fixture};
-use crate::forms::{FieldPatch, NewField, Opt, add_one, edit_one, list_all, put_name, set_value_one};
+use crate::forms::{FieldDto, FieldPatch, NewField, Opt, add_one, edit_one, list_all, put_name, set_value_one};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -96,7 +96,7 @@ fn every_field_kind_round_trips_through_fdf_xfdf_and_json_as_one_undo_step() {
         let r = import_one(&b, idb, &parsed, EditSource::User).unwrap();
         // "Frozen" is read-only and empty: unchanged is a no-op, never an error. Empty fields are unchanged.
         assert!(r.summary.skipped.iter().all(|k| k.name == "Frozen") && r.summary.skipped_total <= 1, "{ext}: {:?}", r.summary);
-        assert_eq!(r.summary.set, 5, "{ext}: {:?}", r.summary);
+        assert_eq!(r.summary.set, 6, "{ext}: {:?}", r.summary);
         assert!(!r.signed);
         assert_eq!(b.history(idb).unwrap().len(), steps + 1, "{ext}: one undo step");
         assert_eq!(snapshot(&b, idb), snapshot(&a, ida), "{ext}");
@@ -260,6 +260,8 @@ fn hostile_data_files_are_refused_or_read_harmlessly() {
     assert!(parse(b"{\"a\": ").is_err(), "truncated JSON");
     let laughs = "<?xml version=\"1.0\"?><!DOCTYPE l [<!ENTITY a \"aaaa\"><!ENTITY b \"&a;&a;&a;&a;\">]><xfdf xmlns=\"http://ns.adobe.com/xfdf/\"><fields><field name=\"x\"><value>&b;</value></field></fields></xfdf>";
     assert!(matches!(parse(laughs.as_bytes()), Err(EngineError::Invalid(_))));
+    let many = format!("{{{}}}", vec!["\"a\":1"; 100_050].join(","));
+    assert!(parse(many.as_bytes()).is_err(), "more than 100 000 values");
     let wide = format!("{{{}}}", (0..10_050).map(|i| format!("\"f{i}\": \"v\"")).collect::<Vec<_>>().join(","));
     let p = parse(wide.as_bytes()).unwrap();
     assert_eq!((p.fields.len(), p.over), (10_000, 50));
