@@ -41,6 +41,10 @@ fn is_password(e: &Entry) -> bool {
 /// Raw bytes of strings between 1 and 2 MB that one field's value may have decoded to be measured.
 const DECODE_BUDGET: usize = 8 << 20;
 
+/// Gray-zone decodes made on this thread: tests count them rather than time them.
+#[cfg(test)]
+thread_local!(static DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
 /// A string value, or one of an array's strings (as many as `values_of` reads), over 1 MB once decoded. The
 /// raw length decides when it can: a UTF-16 string decodes to at least half its bytes, so only one over twice
 /// the limit is surely over; one between is decoded (here) and its text measured, up to `DECODE_BUDGET` raw
@@ -59,7 +63,11 @@ fn string_over_limit(v: &PdfObject) -> bool {
             return true;
         }
         spent.set(spent.get() + n);
-        spent.get() > DECODE_BUDGET || text(o).is_some_and(|s| s.len() > MAX_STR)
+        spent.get() > DECODE_BUDGET || {
+            #[cfg(test)]
+            DECODES.with(|d| d.set(d.get() + 1));
+            text(o).is_some_and(|s| s.len() > MAX_STR)
+        }
     };
     if v.is_array().unwrap_or(false) {
         (0..v.len().unwrap_or(0).min(4096) as i32).any(|i| v.get_array(i).ok().flatten().is_some_and(|x| over(&x)))

@@ -498,8 +498,9 @@ fn a_list_of_one_shared_utf16_string_is_not_decoded_once_per_entry() {
     ];
     let d = dir("shared-utf16");
     let (eng, id, _) = open_bytes(&d, "s.pdf", &raw_pdf(&objs));
-    let t = std::time::Instant::now();
+    DECODES.with(|d| d.set(0));
     let (_, done) = export(&eng, id, Format::Json, "s.pdf").unwrap();
     assert_eq!(done.long_text, 1);
-    assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:?}", t.elapsed());
+    // The 8 MiB budget pays for four decodes of this string; the other 4092 entries are not decoded.
+    assert!(DECODES.with(|d| d.get()) <= 4, "decoded {} times", DECODES.with(|d| d.get()));
 }
