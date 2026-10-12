@@ -16,6 +16,11 @@ export interface CommentsSummary {
   added: number;
   updated: number;
   skipped: { reason: string; count: number }[];
+  /** Comments made without a part of the file (its appearance, rich text or attached file), with how many each. */
+  notes?: { reason: string; count: number }[];
+  /** Comments that now show the appearance the file gave, and attached files that were added. */
+  appearances?: number;
+  files?: number;
 }
 export interface CommentsImported {
   summary: CommentsSummary;
@@ -27,6 +32,11 @@ export interface CommentsExported {
   leftOut: number;
   /** Text entries left empty for being over 1 MB, which a file Inkwell reads cannot hold. */
   longText?: number;
+  /** Appearances (of picture stamps) and attached files written. */
+  appearances?: number;
+  files?: number;
+  /** Parts that could not be written, with how many each. */
+  notes?: { reason: string; count: number }[];
 }
 export interface FormSummary {
   set: number;
@@ -77,6 +87,10 @@ export function commentsImportText(s: CommentsSummary, signed: boolean): string 
   const parts: string[] = [];
   if (s.added) parts.push(`${s.added} added`);
   if (s.updated) parts.push(`${s.updated} updated`);
+  if (s.appearances) parts.push(`${plural(s.appearances, "appearance")} from the file`);
+  if (s.files) parts.push(`${plural(s.files, "attached file")}`);
+  const kept = (s.notes ?? []).reduce((n, r) => n + r.count, 0);
+  if (kept) parts.push(`${kept} made without part of the file (${s.notes?.map((r) => `${r.reason}: ${r.count}`).join("; ")})`);
   if (skipped) parts.push(`${skipped} skipped (${s.skipped.map((r) => `${r.reason}: ${r.count}`).join("; ")})`);
   const head = parts.length ? `Imported comments: ${parts.join(", ")}.` : "This file has no comments to import.";
   return signed && (s.added || s.updated) ? `${head} ${SIGNED_NOTE}` : head;
@@ -99,9 +113,12 @@ export function formImportText(s: FormSummary, signed: boolean): string {
 }
 
 export function commentsExportText(r: CommentsExported, file: string): string {
-  const left = r.leftOut ? ` ${plural(r.leftOut, "comment")} left out: measurements, and kinds the file cannot carry.` : "";
+  const left = r.leftOut ? ` ${plural(r.leftOut, "comment")} left out: measurements, attachments over their limit, and kinds the file cannot carry.` : "";
   const long = r.longText ? ` ${plural(r.longText, "text")} longer than 1 MB left empty.` : "";
-  return `Exported ${plural(r.count, "comment")} to ${file}.${left}${long}`;
+  const carried = [r.appearances ? plural(r.appearances, "appearance") : "", r.files ? plural(r.files, "attached file") : ""].filter(Boolean);
+  const wrote = carried.length ? ` Includes ${carried.join(" and ")}.` : "";
+  const notes = r.notes?.length ? ` Not written: ${r.notes.map((n) => `${n.reason}: ${n.count}`).join("; ")}.` : "";
+  return `Exported ${plural(r.count, "comment")} to ${file}.${wrote}${left}${long}${notes}`;
 }
 
 export function formExportText(r: FormExported, file: string): string {

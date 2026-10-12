@@ -190,6 +190,9 @@ pub struct Quantity {
     pub unit: String,
     /// The label as drawn and stored in `/Contents`: "25.00 ft".
     pub text: String,
+    /// A thing the user should know about how it was valued (a file's number format that could not be used).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 pub type P2 = [f64; 2];

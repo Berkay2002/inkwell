@@ -145,6 +145,10 @@ fn ops() -> Vec<(&'static str, bool, Op)> {
     .map(|_| ()));
     op!("measurement scale", false, |eng, _p, id| crate::measure::scale_set(eng, id, 0, &crate::measure::Scale::default(), user()).map(|_| ()));
     op!("rescale a measurement", true, |eng, _p, id| crate::measure::rescale(eng, id, 0, 12, &crate::measure::Scale::default(), user()).map(|_| ()));
+    op!("move a measurement point", true, |eng, _p, id| crate::measure::move_points(
+        eng, id, 0, 12, &[[20.0, 20.0], [90.0, 40.0]], user()
+    )
+    .map(|_| ()));
     op!("delete a measurement", true, |eng, _p, id| crate::annot::delete_many(eng, id, &[(0, 12)], user()).map(|_| ()));
     op!("mark an area for redaction", true, |eng, _p, id| crate::redact::app::mark_area(eng, id, 0, [10.0, 10.0, 80.0, 40.0], user()).map(|_| ()));
     op!("mark pages for redaction", true, |eng, _p, id| crate::redact::app::mark_pages(eng, id, &[1], user()).map(|_| ()));
