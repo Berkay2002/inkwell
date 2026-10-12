@@ -78,6 +78,6 @@ shell; an app-side list would need `SHAddToRecentDocs` and a decision about what
 
 ## Checking an installer
 
-`scripts/installer-check.ps1 -Msi <msi> -Pdf <copy1.pdf>,<copy2.pdf>` (elevated shell) installs, checks the list above,
+`scripts/installer-check.ps1 -Msi <msi> -Pdf '<copy1.pdf>;<copy2.pdf>'` (elevated shell) installs, checks the list above,
 launches the verb twice and checks for one running instance, uninstalls, and checks nothing is left. It never touches
 the default PDF app and uses a scratch data folder.

@@ -38,6 +38,7 @@
     "shortDescription": "A fast, private PDF app.",
     "longDescription": "Inkwell is a local, private PDF app for Windows: read, annotate, fill, edit, sign, convert and organise PDFs without an account or a network service.",
     "windows": {
+      "allowDowngrades": false,
       "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
       "wix": {
         "upgradeCode": "A7BB0957-BACE-46F2-A766-0F5C17191026",

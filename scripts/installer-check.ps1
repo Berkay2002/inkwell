@@ -1,12 +1,12 @@
 # Installs an Inkwell MSI, checks what it registered and that "Open with Inkwell" forwards to one running
 # instance, uninstalls, and checks nothing is left. Needs an elevated shell for the per-machine MSI.
-#   pwsh -File scripts/installer-check.ps1 -Msi <path to Inkwell_0.1.0_x64_en-US.msi> -Pdf a.pdf,b.pdf [-Desktop]
+#   pwsh -File scripts/installer-check.ps1 -Msi <path to Inkwell_0.1.0_x64_en-US.msi> -Pdf 'a.pdf;b.pdf' [-Desktop]
 # Works on copies you give it (-Pdf): never point it at real documents. It does not change the default PDF app
 # and uses a scratch INKWELL_DATA_DIR, so the user's recent list is not touched.
 # -User checks a per-user build (HKCU roots, the user's Start menu) instead of the per-machine one.
 param(
   [Parameter(Mandatory)][string]$Msi,
-  [string[]]$Pdf = @(),
+  [string]$Pdf = '', # copies of PDFs, separated by ;
   [switch]$Desktop,
   [switch]$User
 )
@@ -27,7 +27,16 @@ function Has($path, $name = $null) {
   if ($null -eq $name) { return $true }
   $null -ne (Get-Item -LiteralPath $path).GetValue($name, $null)
 }
-function UserChoice { (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf\UserChoice' -ErrorAction SilentlyContinue).ProgId }
+function ValueNames($path) {
+  $k = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+  if ($k) { ($k.GetValueNames() | Sort-Object) -join ',' } else { '' }
+}
+# Every value under the key where Windows keeps the user's PDF choice (UserChoice, UserChoiceLatest, Open with lists).
+function Choice {
+  $root = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf'
+  $keys = @(Get-Item $root -ErrorAction SilentlyContinue) + @(Get-ChildItem $root -Recurse -ErrorAction SilentlyContinue)
+  ($keys | ForEach-Object { $k = $_; $k.GetValueNames() | ForEach-Object { "$($k.Name)|$_|$($k.GetValue($_))" } }) -join ';'
+}
 function PdfDefault { (Get-Item "$classes\.pdf" -ErrorAction SilentlyContinue).GetValue('') }
 
 if (-not $User) {
@@ -36,13 +45,14 @@ if (-not $User) {
 }
 
 $before = [pscustomobject]@{
-  Choice = UserChoice; PdfDefault = PdfDefault
+  Choice = Choice; PdfDefault = PdfDefault
   SfaPdf = Test-Path "$classes\SystemFileAssociations\.pdf"
   SfaShell = Test-Path "$classes\SystemFileAssociations\.pdf\shell"
   PdfShell = Test-Path "$classes\.pdf\shell"
-  OpenWith = (Get-Item "$classes\.pdf\OpenWithProgids" -ErrorAction SilentlyContinue).GetValueNames() -join ','
+  OpenWith = ValueNames "$classes\.pdf\OpenWithProgids"
+  OpenWithKey = Test-Path "$classes\.pdf\OpenWithProgids"
 }
-"Before: default-app choice '$($before.Choice)', .pdf default '$($before.PdfDefault)'"
+"Before: .pdf default '$($before.PdfDefault)', $(@($before.Choice -split ';' | Where-Object { $_ }).Count) values under FileExts\.pdf"
 
 $msiArgs = @('/i', "`"$Msi`"", '/qn', '/norestart', '/l*v', "`"$log\install.log`"")
 if ($Desktop) { $msiArgs += 'DESKTOPSHORTCUT=1' }
@@ -64,18 +74,22 @@ Check (Has "$hive\SOFTWARE\RegisteredApplications" 'Inkwell') 'registered applic
 Check (Has "$hive\SOFTWARE\Inkwell\Capabilities\FileAssociations" '.pdf') 'capability .pdf'
 Check (Has "$classes\Applications\inkwell.exe\shell\open\command") 'Applications entry'
 Check (Has "$classes\SystemFileAssociations\.pdf\shell\Inkwell.Open\command") 'context-menu verb "Open with Inkwell"'
-Check ((UserChoice) -eq $before.Choice) "default PDF app untouched (UserChoice '$(UserChoice)')"
+Check ((Choice) -eq $before.Choice) 'default PDF app untouched (nothing changed under FileExts\.pdf)'
 Check ((PdfDefault) -eq $before.PdfDefault) ".pdf default value untouched ('$(PdfDefault)')"
 
-if ($Pdf.Count) {
+$pdfs = @($Pdf -split ';' | Where-Object { $_ })
+if ($pdfs.Count) {
+  # Scratch data dir: the user's recent list is not touched. Forwarding is off for scratch runs unless asked for.
   $env:INKWELL_DATA_DIR = Join-Path $log 'data'
   $env:INKWELL_SINGLE_INSTANCE = '1'
-  $files = $Pdf | ForEach-Object { (Resolve-Path $_).Path }
+  $files = $pdfs | ForEach-Object { (Resolve-Path $_).Path }
+  # ours: the processes that did not exist before (a path can show in 8.3 form, so it is not matched)
+  $known = @(Get-Process inkwell -ErrorAction SilentlyContinue).Id
   Start-Process -FilePath $files[0] -Verb 'Inkwell.Open'
   Start-Sleep 6
   $files | Select-Object -Skip 1 | ForEach-Object { Start-Process -FilePath $_ -Verb 'Inkwell.Open' }
   Start-Sleep 4
-  $procs = @(Get-Process inkwell -ErrorAction SilentlyContinue)
+  $procs = @(Get-Process inkwell -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id })
   Check ($procs.Count -eq 1) "one running instance for $($files.Count) launches ($($procs.Count) process)"
   # the window title is the active document: the last forwarded file opened last
   $title = ($procs | Select-Object -First 1).MainWindowTitle
@@ -92,7 +106,8 @@ Check ($p.ExitCode -eq 0) 'uninstall succeeded'
 Check (-not (Test-Path "$dir")) 'install folder gone'
 Check (-not (Test-Path "$startMenu\Inkwell.lnk")) 'Start-menu shortcut gone'
 Check (-not (Test-Path "$desktopDir\Inkwell.lnk")) 'desktop shortcut gone'
-Check (-not (Has "$hive\SOFTWARE\Inkwell")) 'HKLM/HKCU Software\Inkwell gone'
+Check (-not (Has "$hive\SOFTWARE\Inkwell")) 'Software\Inkwell gone'
+Check (-not (Has 'HKCU:\SOFTWARE\Inkwell')) 'HKCU Software\Inkwell (shortcut markers) gone'
 Check (-not (Has "$classes\Inkwell.PDF")) 'ProgId gone'
 Check (-not (Has "$classes\.pdf\OpenWithProgids" 'Inkwell.PDF')) 'Open with entry gone'
 Check (-not (Has "$hive\SOFTWARE\RegisteredApplications" 'Inkwell')) 'registered application gone'
@@ -101,7 +116,8 @@ Check (-not (Has "$classes\SystemFileAssociations\.pdf\shell\Inkwell.Open")) 've
 Check ((Test-Path "$classes\SystemFileAssociations\.pdf") -eq $before.SfaPdf) "SystemFileAssociations\.pdf back to how it was ($($before.SfaPdf))"
 Check ((Test-Path "$classes\SystemFileAssociations\.pdf\shell") -eq $before.SfaShell) "SystemFileAssociations\.pdf\shell back to how it was ($($before.SfaShell))"
 Check ((Test-Path "$classes\.pdf\shell") -eq $before.PdfShell) ".pdf\shell back to how it was ($($before.PdfShell))"
-Check (((Get-Item "$classes\.pdf\OpenWithProgids" -ErrorAction SilentlyContinue).GetValueNames() -join ',') -eq $before.OpenWith) 'Open with list back to how it was'
-Check ((UserChoice) -eq $before.Choice -and (PdfDefault) -eq $before.PdfDefault) 'default PDF app still untouched'
+Check ((ValueNames "$classes\.pdf\OpenWithProgids") -eq $before.OpenWith) 'Open with list back to how it was'
+Check ((Test-Path "$classes\.pdf\OpenWithProgids") -eq $before.OpenWithKey) ".pdf\OpenWithProgids key back to how it was ($($before.OpenWithKey))"
+Check ((Choice) -eq $before.Choice -and (PdfDefault) -eq $before.PdfDefault) 'default PDF app still untouched'
 "The user data folder is left in place by design: $env:APPDATA\app.inkwell.desktop"
 if ($fail) { "$fail check(s) FAILED"; exit 1 } else { 'all checks passed' }

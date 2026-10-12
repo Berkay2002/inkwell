@@ -10,6 +10,13 @@
     remembered for upgrades);
   - drop what Inkwell does not use: deep links, the elevated update task, extra binaries, the PATH feature.
 -->
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define Win64 = "yes" ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define Win64 = "no" ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Product
             Id="*"
@@ -118,6 +125,12 @@
                 <RemoveFolder Id="RemoveInstallDir" On="uninstall" />
             </Component>
 
+            <!-- The desktop-shortcut choice, for the next version's installer (HKLM: any user's upgrade sees it). -->
+            <Component Id="DesktopShortcutChoice" Guid="*" Win64="$(var.Win64)">
+                <Condition>DESKTOPSHORTCUT = "1"</Condition>
+                <RegistryValue Root="HKLM" Key="Software\Inkwell" Name="DesktopShortcut" Type="string" Value="1" KeyPath="yes" />
+            </Component>
+
             <Component Id="Path" Guid="{{path_component_guid}}" Win64="$(var.Win64)">
                 <File Id="Path" Source="{{main_binary_path}}" KeyPath="yes" Checksum="yes"/>
             </Component>
@@ -188,7 +201,10 @@
                     WorkingDirectory="INSTALLDIR">
                     <ShortcutProperty Key="System.AppUserModel.ID" Value="{{bundle_id}}"/>
                 </Shortcut>
-                <RegistryValue Root="HKLM" Key="Software\Inkwell" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes"/>
+                <!-- A shortcut's key path must be under HKCU (ICE38/43/57); the key goes with the component. -->
+                <RegistryKey Root="HKCU" Key="Software\Inkwell" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes"/>
+                </RegistryKey>
             </Component>
         </DirectoryRef>
 
@@ -201,7 +217,9 @@
                     Target="[!Path]"
                     Icon="ProductIcon"
                     WorkingDirectory="INSTALLDIR" />
-                <RegistryValue Root="HKLM" Key="Software\Inkwell" Name="DesktopShortcut" Type="string" Value="1" KeyPath="yes" />
+                <RegistryKey Root="HKCU" Key="Software\Inkwell" ForceDeleteOnUninstall="yes">
+                    <RegistryValue Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+                </RegistryKey>
             </Component>
         </DirectoryRef>
 
@@ -215,6 +233,7 @@
                 Display="expand"
                 Absent="disallow">
             <ComponentRef Id="RegistryEntries"/>
+            <ComponentRef Id="DesktopShortcutChoice"/>
             <ComponentRef Id="Path"/>
             <ComponentRef Id="ExplorerIntegration"/>
             <ComponentRef Id="ApplicationShortcut"/>
