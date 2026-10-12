@@ -5,7 +5,7 @@ import { useSheets } from "../lib/organizePlus";
 import { formatRange } from "../lib/pageRange";
 import { useTools } from "../lib/toolsStore";
 import type { DocState } from "../store";
-import type { MenuEntry } from "./Menu";
+import { type MenuEntry, MenuRow } from "./Menu";
 
 /** The page actions offered on a thumbnail (sidebar or Organize grid) for `pages` (0-based, sorted). */
 export function pageActions(
@@ -86,19 +86,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
         it === "sep" ? (
           <hr key={n} />
         ) : (
-          <button
-            key={n}
-            role="menuitem"
-            className={it.danger ? "danger" : undefined}
-            onClick={() => {
-              onClose();
-              it.onSelect();
-            }}
-          >
-            <span className="check" />
-            <span className="grow">{it.label}</span>
-            {it.hint && <span className="dim">{it.hint}</span>}
-          </button>
+          <MenuRow key={n} it={it} onDone={onClose} />
         ),
       )}
     </div>,

@@ -1673,8 +1673,14 @@ fn a_catalog_certification_that_allows_no_change_refuses_typing_scripts_resets_a
 
 #[test]
 fn a_certified_document_refuses_every_authoring_step_and_leaves_no_history() {
-    // Certified in the catalog (P 3, the loosest), and on a signature field (P 2).
-    for (name, catalog_p, field_p) in [("catalog", Some(3), None), ("signature", None, Some(2))] {
+    // Certified in the catalog (P 1, 2 and 3, the loosest), and on a signature field (P 2 and 3).
+    for (name, catalog_p, field_p) in [
+        ("catalog", Some(3), None),
+        ("catalog-p1", Some(1), None),
+        ("catalog-p2", Some(2), None),
+        ("signature", None, Some(2)),
+        ("signature-p3", None, Some(3)),
+    ] {
         let (eng, id, _) = script_form(&format!("author-certified-{name}"), &["A", "B"]);
         add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 200.0, 240.0, 240.0]));
         script(&eng, id, "A", "C", "event.value = 1;");
@@ -2035,6 +2041,949 @@ fn a_page_listed_many_times_in_kids_is_scanned_once_and_direct_entries_are_charg
         Ok(f) => panic!("{} fields listed", f.fields.len()),
     };
     assert!(err.contains("too large to edit safely"), "{err}");
+}
+
+// ---- layout tools (layout.rs) -------------------------------------------------------------------
+
+/// Page 1 is rotated a quarter turn and cropped (the crop box does not start at the origin): 732 x 572 points as
+/// shown. Page 2 is small (200 x 100).
+fn rotated_cropped_form() -> Vec<u8> {
+    pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [20 30 592 762] /Rotate 90 /Resources << /Font << /Helv 3 0 R >> >> >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << /Font << /Helv 3 0 R >> >> >>".to_string(),
+    ])
+}
+
+fn rotated_form(test: &str, fields: &[(&str, [f32; 4])]) -> (Arc<Engine>, DocId, String) {
+    let (eng, id, path) = open_bytes(test, rotated_cropped_form());
+    for (n, r) in fields {
+        add1(&eng, id, 0, nf(FieldKind::Text, n, *r));
+    }
+    (eng, id, path)
+}
+
+fn items_of(eng: &Engine, id: DocId, names: &[&str]) -> Vec<Item> {
+    names
+        .iter()
+        .map(|n| {
+            let f = field(eng, id, n);
+            (f.page, f.xref)
+        })
+        .collect()
+}
+
+fn rect_of_name(eng: &Engine, id: DocId, name: &str) -> [f32; 4] {
+    field(eng, id, name).rect
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 0.5
+}
+
+fn all_rects(eng: &Engine, id: DocId) -> Vec<(String, [f32; 4])> {
+    list_all(eng, id).unwrap().fields.into_iter().map(|f| (f.name, f.rect)).collect()
+}
+
+fn same_rects(a: &[(String, [f32; 4])], b: &[(String, [f32; 4])]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && (0..4).all(|i| near(x.1[i], y.1[i])))
+}
+
+const THREE: [(&str, [f32; 4]); 3] = [("A", [100.0, 100.0, 180.0, 120.0]), ("B", [300.0, 160.0, 340.0, 200.0]), ("C", [500.0, 300.0, 600.0, 330.0])];
+
+#[test]
+fn align_centre_distribute_and_match_size_work_in_page_space_each_one_undo_step() {
+    let (eng, id, path) = rotated_form("layout-geo", &THREE);
+    let ab = items_of(&eng, id, &["A", "B"]);
+    let abc = items_of(&eng, id, &["A", "B", "C"]);
+    let start = all_rects(&eng, id);
+
+    // The anchor is the last field picked.
+    let n = steps(&eng, id);
+    align_one(&eng, id, &abc, Edge::Left, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    let c = rect_of_name(&eng, id, "C");
+    for name in ["A", "B"] {
+        let r = rect_of_name(&eng, id, name);
+        assert!(near(r[0], c[0]), "{name}: left edge {r:?} vs anchor {c:?}");
+    }
+    assert!(near(rect_of_name(&eng, id, "A")[2] - rect_of_name(&eng, id, "A")[0], 80.0), "the width is kept");
+    assert!(near(c[0], 500.0) && near(c[1], 300.0), "the anchor stays: {c:?}");
+    eng.undo(id).unwrap();
+    assert!(same_rects(&all_rects(&eng, id), &start), "undo puts every field back exactly");
+    eng.redo(id).unwrap();
+
+    // Another anchor, another result (B last): right edges.
+    let bac = items_of(&eng, id, &["C", "A", "B"]);
+    align_one(&eng, id, &bac, Edge::Right, EditSource::User).unwrap();
+    let b = rect_of_name(&eng, id, "B");
+    assert!(near(rect_of_name(&eng, id, "A")[2], b[2]) && near(rect_of_name(&eng, id, "C")[2], b[2]));
+    // Top, bottom and the two centre lines.
+    align_one(&eng, id, &abc, Edge::Top, EditSource::User).unwrap();
+    assert!(near(rect_of_name(&eng, id, "A")[1], rect_of_name(&eng, id, "C")[1]));
+    align_one(&eng, id, &abc, Edge::Bottom, EditSource::User).unwrap();
+    assert!(near(rect_of_name(&eng, id, "B")[3], rect_of_name(&eng, id, "C")[3]));
+    align_one(&eng, id, &abc, Edge::HCenter, EditSource::User).unwrap();
+    let mid = |n: &str| (rect_of_name(&eng, id, n)[0] + rect_of_name(&eng, id, n)[2]) / 2.0;
+    assert!(near(mid("A"), mid("C")) && near(mid("B"), mid("C")));
+    align_one(&eng, id, &abc, Edge::VCenter, EditSource::User).unwrap();
+    let midy = |n: &str| (rect_of_name(&eng, id, n)[1] + rect_of_name(&eng, id, n)[3]) / 2.0;
+    assert!(near(midy("A"), midy("C")) && near(midy("B"), midy("C")));
+
+    // Aligned already: not a step.
+    let n = steps(&eng, id);
+    align_one(&eng, id, &abc, Edge::VCenter, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n);
+    assert!(align_one(&eng, id, &abc[..1], Edge::Left, EditSource::User).unwrap_err().to_string().contains("at least 2"));
+
+    // Same size as the anchor, then centred on the page (732 x 572).
+    match_size_one(&eng, id, &abc, Dim::Both, EditSource::User).unwrap();
+    for name in ["A", "B"] {
+        let (r, c) = (rect_of_name(&eng, id, name), rect_of_name(&eng, id, "C"));
+        assert!(near(r[2] - r[0], c[2] - c[0]) && near(r[3] - r[1], c[3] - c[1]), "{name}: {r:?} vs {c:?}");
+    }
+    center_one(&eng, id, &abc, Axis::Both, EditSource::User).unwrap();
+    let rs: Vec<[f32; 4]> = ["A", "B", "C"].iter().map(|n| rect_of_name(&eng, id, n)).collect();
+    let (x0, x1) = (rs.iter().map(|r| r[0]).fold(f32::MAX, f32::min), rs.iter().map(|r| r[2]).fold(f32::MIN, f32::max));
+    let (y0, y1) = (rs.iter().map(|r| r[1]).fold(f32::MAX, f32::min), rs.iter().map(|r| r[3]).fold(f32::MIN, f32::max));
+    let b = eng.read_custom(id, |d| { let b = d.load_pdf_page(0)?.bounds()?; Ok([b.x0, b.y0, b.x1, b.y1]) }).unwrap();
+    assert!(near((x0 + x1) / 2.0, (b[0] + b[2]) / 2.0) && near((y0 + y1) / 2.0, (b[1] + b[3]) / 2.0), "centred in {b:?}: {x0} {x1} {y0} {y1}");
+    assert!(near(b[2] - b[0], 732.0) && near(b[3] - b[1], 572.0), "the page as shown: {b:?}");
+
+    // A nudge moves the group and stops at the page edge.
+    let before = rect_of_name(&eng, id, "A");
+    nudge_one(&eng, id, &ab, 5.0, -3.0, EditSource::User).unwrap();
+    let after = rect_of_name(&eng, id, "A");
+    assert!(near(after[0], before[0] + 5.0) && near(after[1], before[1] - 3.0), "{before:?} {after:?}");
+    nudge_one(&eng, id, &abc, 100_000.0 / 20.0, 0.0, EditSource::User).unwrap();
+    let r = rect_of_name(&eng, id, "A");
+    assert!(r[2] <= b[2] + 0.5, "kept on the page: {r:?}");
+    let far = ["A", "B", "C"].iter().map(|n| rect_of_name(&eng, id, n)[2]).fold(f32::MIN, f32::max);
+    assert!(near(far, b[2]), "the group reached the edge: {far}");
+
+    // Saved, reopened with a fresh MuPDF: the same rectangles, and the raw /Rect is not the page-space one.
+    let now = all_rects(&eng, id);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(same_rects(&all_rects(&eng2, id2), &now));
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let raw: Vec<Vec<f32>> = page.widgets().map(|w| nums(&w.annotation().object().get_dict("Rect").unwrap().unwrap())).collect();
+    assert_eq!(raw.len(), 3);
+    for (r, (_, shown)) in raw.iter().zip(&now) {
+        assert!(r.iter().all(|v| v.is_finite()));
+        assert!((r[2] - r[0] - (shown[3] - shown[1])).abs() < 0.5, "a quarter turn swaps width and height: {r:?} vs {shown:?}");
+    }
+}
+
+#[test]
+fn every_geometry_tool_is_one_step_that_undoes_exactly_and_survives_save_and_reopen() {
+    type Op = fn(&Engine, DocId, &[Item]) -> Result<EditState>;
+    let ops: [(&str, Op); 8] = [
+        ("align left", |e, i, it| align_one(e, i, it, Edge::Left, EditSource::User)),
+        ("align vcenter", |e, i, it| align_one(e, i, it, Edge::VCenter, EditSource::User)),
+        ("centre both", |e, i, it| center_one(e, i, it, Axis::Both, EditSource::User)),
+        ("centre horizontal", |e, i, it| center_one(e, i, it, Axis::Horizontal, EditSource::User)),
+        ("distribute", |e, i, it| distribute_one(e, i, it, Axis::Horizontal, EditSource::User)),
+        ("same size", |e, i, it| match_size_one(e, i, it, Dim::Both, EditSource::User)),
+        ("same width", |e, i, it| match_size_one(e, i, it, Dim::Width, EditSource::User)),
+        ("nudge", |e, i, it| nudge_one(e, i, it, 7.0, -4.0, EditSource::User)),
+    ];
+    for (n, (what, op)) in ops.iter().enumerate() {
+        let (eng, id, path) = rotated_form(&format!("layout-exact-{n}"), &THREE);
+        let abc = items_of(&eng, id, &["A", "B", "C"]);
+        let start = all_rects(&eng, id);
+        let before = steps(&eng, id);
+        op(&eng, id, &abc).unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(steps(&eng, id), before + 1, "{what} is one step");
+        let done = all_rects(&eng, id);
+        assert!(!same_rects(&done, &start), "{what} changed something");
+        eng.save(id, None).unwrap();
+        let (eng2, id2) = reopen(&path);
+        assert!(same_rects(&all_rects(&eng2, id2), &done), "{what}: the saved file shows the same rectangles");
+        eng.undo(id).unwrap();
+        assert!(same_rects(&all_rects(&eng, id), &start), "{what}: undo puts every field back exactly");
+        eng.redo(id).unwrap();
+        assert!(same_rects(&all_rects(&eng, id), &done), "{what}: redo");
+    }
+}
+
+#[test]
+fn distribute_with_overlapping_fields_spans_to_the_furthest_edge_and_keeps_the_order() {
+    // A long field with two short ones inside its span: by leading edge the last is C, but A ends furthest.
+    let fields = [("A", [100.0, 100.0, 300.0, 120.0]), ("B", [110.0, 140.0, 150.0, 160.0]), ("C", [200.0, 180.0, 240.0, 200.0])];
+    let (eng, id, _) = rotated_form("layout-distribute-overlap", &fields);
+    let abc = items_of(&eng, id, &["A", "B", "C"]);
+    distribute_one(&eng, id, &abc, Axis::Horizontal, EditSource::User).unwrap();
+    let r = |n: &str| rect_of_name(&eng, id, n);
+    let (a, b, c) = (r("A"), r("B"), r("C"));
+    assert!(near(a[0], 100.0), "the first stays: {a:?}");
+    assert!(a[0] <= b[0] && b[0] <= c[0], "the order is kept: {a:?} {b:?} {c:?}");
+    assert!(near(b[0] - a[2], c[0] - b[2]), "the gaps are equal: {a:?} {b:?} {c:?}");
+    assert!(near(c[2], 300.0), "the span ends at the furthest edge, not at C's own: {c:?}");
+    assert!(near(b[2] - b[0], 40.0) && near(c[2] - c[0], 40.0), "no field is resized");
+}
+
+#[test]
+fn distribute_needs_three_fields_and_makes_the_gaps_equal() {
+    let (eng, id, _) = rotated_form(
+        "layout-distribute",
+        &[("A", [100.0, 100.0, 140.0, 120.0]), ("B", [160.0, 100.0, 260.0, 120.0]), ("C", [300.0, 100.0, 330.0, 120.0]), ("D", [500.0, 100.0, 560.0, 120.0])],
+    );
+    let two = items_of(&eng, id, &["A", "D"]);
+    let n = steps(&eng, id);
+    assert!(distribute_one(&eng, id, &two, Axis::Horizontal, EditSource::User).unwrap_err().to_string().contains("at least 3"));
+    assert_eq!(steps(&eng, id), n);
+    let all = items_of(&eng, id, &["D", "B", "A", "C"]);
+    distribute_one(&eng, id, &all, Axis::Horizontal, EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    let r = |n: &str| rect_of_name(&eng, id, n);
+    assert!(near(r("A")[0], 100.0) && near(r("D")[2], 560.0), "the outer two stay");
+    let gaps = [r("B")[0] - r("A")[2], r("C")[0] - r("B")[2], r("D")[0] - r("C")[2]];
+    assert!(gaps.iter().all(|g| near(*g, gaps[0])), "{gaps:?}");
+    assert!(distribute_one(&eng, id, &all, Axis::Both, EditSource::User).is_err());
+}
+
+#[test]
+fn layout_tools_refuse_a_certified_document_a_covered_field_and_a_signed_signature() {
+    for (name, catalog_p, field_p) in [
+        ("catalog-p1", Some(1), None),
+        ("catalog-p2", Some(2), None),
+        ("catalog-p3", Some(3), None),
+        ("signature-p2", None, Some(2)),
+        ("signature-p3", None, Some(3)),
+    ] {
+        let (eng, id, _) = script_form(&format!("layout-certified-{name}"), &["A", "B", "C"]);
+        add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+        let abc = items_of(&eng, id, &["A", "B", "C"]);
+        let a = items_of(&eng, id, &["A"]);
+        if let Some(p) = field_p {
+            sign(&eng, id, None, Some(p));
+        }
+        if let Some(p) = catalog_p {
+            certify_catalog(&eng, id, p);
+        }
+        let before = (steps(&eng, id), all_rects(&eng, id));
+        let src = || EditSource::User;
+        // The first is a no-op op on a fresh document (everything is left aligned already): still refused.
+        let refused = [
+            ("align", align_one(&eng, id, &abc, Edge::Left, src()).map(|_| ())),
+            ("align noop", align_one(&eng, id, &abc, Edge::Left, src()).map(|_| ())),
+            ("centre", center_one(&eng, id, &abc, Axis::Both, src()).map(|_| ())),
+            ("distribute", distribute_one(&eng, id, &abc, Axis::Vertical, src()).map(|_| ())),
+            ("match size", match_size_one(&eng, id, &abc, Dim::Both, src()).map(|_| ())),
+            ("nudge", nudge_one(&eng, id, &abc, 1.0, 1.0, src()).map(|_| ())),
+            ("nudge zero", nudge_one(&eng, id, &abc, 0.0, 0.0, src()).map(|_| ())),
+            ("duplicate", duplicate_one(&eng, id, a[0], &[1], src()).map(|_| ())),
+            ("copies", copies_one(&eng, id, a[0], 2, 2, (4.0, 4.0), src()).map(|_| ())),
+            ("rename", rename_one(&eng, id, a[0], "Renamed", false, src()).map(|_| ())),
+            ("rename same", rename_one(&eng, id, a[0], "A", false, src()).map(|_| ())),
+        ];
+        for (what, r) in refused {
+            let e = r.expect_err(&format!("{name}: {what} must be refused")).to_string();
+            assert!(e.contains("certified"), "{name}: {what}: {e}");
+        }
+        assert_eq!(before, (steps(&eng, id), all_rects(&eng, id)), "{name}: nothing changed and no step was made");
+    }
+}
+
+#[test]
+fn layout_tools_refuse_a_damaged_certification() {
+    // /P 9 is not a certification level: it counts as the strictest (1), not as none.
+    let (eng, id, _) = script_form("layout-damaged-p", &["A", "B"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, None, Some(9));
+    let ab = items_of(&eng, id, &["A", "B"]);
+    let before = (steps(&eng, id), all_rects(&eng, id));
+    let e = align_one(&eng, id, &ab, Edge::Right, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("certified"), "{e}");
+    let e = rename_one(&eng, id, ab[0], "Renamed", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("certified"), "{e}");
+    assert_eq!(before, (steps(&eng, id), all_rects(&eng, id)));
+}
+
+#[test]
+fn a_field_a_signature_covers_and_a_signed_signature_field_are_not_laid_out() {
+    let (eng, id, _) = script_form("layout-locked", &["Locked", "Free", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    let all = items_of(&eng, id, &["Locked", "Free", "Other"]);
+    // Unsigned: a signature field is laid out like any other.
+    let sig = items_of(&eng, id, &["Sig"]);
+    nudge_one(&eng, id, &sig, 4.0, 0.0, EditSource::User).unwrap();
+    sign(&eng, id, Some(("Include", &["Locked"])), None);
+    let before = (steps(&eng, id), all_rects(&eng, id));
+    let e = align_one(&eng, id, &all, Edge::Left, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("locked by a signature") && e.contains("Locked"), "{e}");
+    assert!(rename_one(&eng, id, all[0], "L2", false, EditSource::User).unwrap_err().to_string().contains("locked by a signature"));
+    let e = nudge_one(&eng, id, &sig, 4.0, 0.0, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("signed"), "{e}");
+    assert_eq!(before, (steps(&eng, id), all_rects(&eng, id)));
+    // The fields it does not cover still move.
+    align_one(&eng, id, &all[1..], Edge::Right, EditSource::User).unwrap();
+}
+
+#[test]
+fn a_rename_may_not_take_a_name_a_signature_covers_or_rewrite_a_calculation_it_locks() {
+    let (eng, id, _) = script_form("layout-lock-names", &["Free", "Sum", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    patch_field(&eng, id, "Sum", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Free".into()] }), ..Default::default() });
+    sign(&eng, id, Some(("Include", &["Reserved", "Sum"])), None);
+    let it = |n: &str| items_of(&eng, id, &[n])[0];
+    let n = steps(&eng, id);
+    let e = rename_one(&eng, id, it("Other"), "Reserved", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("covered by a signature"), "{e}");
+    let e = rename_one(&eng, id, it("Other"), "Reserved.Sub", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("covered by a signature"), "{e}");
+    // Sum is locked and lists Free: Free may not take another name (the list would have to follow), nor be copied.
+    let e = rename_one(&eng, id, it("Free"), "Free2", false, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("calculation of [ Sum ] is locked"), "{e}");
+    let e = copies_one(&eng, id, it("Free"), 1, 2, (6.0, 6.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("calculation of [ Sum ] is locked"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "Free").name, "Free");
+    match field(&eng, id, "Sum").calculate {
+        Calculate::Simple { fields, .. } => assert_eq!(fields, vec!["Free".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    // A name nothing covers is fine.
+    rename_one(&eng, id, it("Other"), "Elsewhere", false, EditSource::User).unwrap();
+}
+
+#[test]
+fn the_name_box_follows_the_same_rename_locks_as_the_layout_rename() {
+    let (eng, id, _) = script_form("name-box-locks", &["Free", "Sum", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    patch_field(&eng, id, "Sum", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Free".into()] }), ..Default::default() });
+    sign(&eng, id, Some(("Include", &["Reserved", "Sum"])), None);
+    let n = steps(&eng, id);
+    let name = |from: &str, to: &str| {
+        let w = field(&eng, id, from);
+        edit_one(&eng, id, w.page, w.xref, &FieldPatch { name: Some(to.into()), ..Default::default() }, EditSource::User).map_err(|e| e.to_string())
+    };
+    assert!(name("Other", "Reserved").unwrap_err().contains("covered by a signature"));
+    assert!(name("Free", "Free2").unwrap_err().contains("calculation of [ Sum ] is locked"));
+    // The field being renamed is guarded too: Sum is covered by the signature, and a signed signature field stays put.
+    assert!(name("Sum", "Total").unwrap_err().contains("locked by a signature"));
+    assert!(name("Sig", "Sig2").unwrap_err().contains("is signed"));
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "Free").name, "Free");
+    assert_eq!(field(&eng, id, "Sum").name, "Sum");
+    assert_eq!(field(&eng, id, "Sig").name, "Sig");
+    name("Other", "Elsewhere").unwrap();
+}
+
+#[test]
+fn the_name_box_takes_the_same_name_limits_as_the_layout_rename() {
+    let (eng, id, _) = script_form("name-box-limits", &["A", "B"]);
+    let n = steps(&eng, id);
+    let w = field(&eng, id, "A");
+    let name = |to: &str| edit_one(&eng, id, w.page, w.xref, &FieldPatch { name: Some(to.into()), ..Default::default() }, EditSource::User).map_err(|e| e.to_string());
+    assert!(name("Bad\u{1}Name").unwrap_err().contains("not a usable field name"));
+    assert!(name(&"x".repeat(513)).unwrap_err().contains("not a usable field name"));
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "A").name, "A");
+    name(&"x".repeat(512)).unwrap();
+}
+
+#[test]
+fn copies_may_not_take_a_name_a_signature_covers() {
+    let (eng, id, _) = script_form("copies-lock-names", &["Free", "Other"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, Some(("Include", &["Free.1"])), None);
+    let n = steps(&eng, id);
+    let a = items_of(&eng, id, &["Free"])[0];
+    let e = copies_one(&eng, id, a, 1, 3, (6.0, 6.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("[ Free.1 ] is covered by a signature"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step, nothing written");
+    assert_eq!(field(&eng, id, "Free").name, "Free");
+    // Another field's copies are not affected.
+    let o = items_of(&eng, id, &["Other"])[0];
+    copies_one(&eng, id, o, 1, 2, (6.0, 6.0), EditSource::User).unwrap();
+}
+
+#[test]
+fn layout_in_a_signed_document_is_saved_after_the_signed_bytes() {
+    let (eng, id, path) = script_form("layout-signed", &["A", "B"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, None, None);
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(eng2.read_custom(id2, |d| Ok(crate::outline::signed(d))).unwrap());
+    let ab = items_of(&eng2, id2, &["B", "A"]);
+    align_one(&eng2, id2, &ab, Edge::Right, EditSource::User).unwrap();
+    center_one(&eng2, id2, &ab, Axis::Horizontal, EditSource::User).unwrap();
+    eng2.save(id2, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the file was rewritten: the signature would no longer verify");
+}
+
+#[test]
+fn duplicate_copies_and_rename_in_a_signed_document_are_saved_after_the_signed_bytes() {
+    let (eng, id, path) = script_form("layout-signed-more", &["A", "B"]);
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [72.0, 400.0, 240.0, 440.0]));
+    sign(&eng, id, None, None);
+    eng.save(id, None).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert!(eng2.read_custom(id2, |d| Ok(crate::outline::signed(d))).unwrap());
+    let n = steps(&eng2, id2);
+    let a = items_of(&eng2, id2, &["A"])[0];
+    let b = items_of(&eng2, id2, &["B"])[0];
+    duplicate_one(&eng2, id2, a, &[1], EditSource::User).unwrap();
+    copies_one(&eng2, id2, b, 2, 2, (4.0, 4.0), EditSource::User).unwrap();
+    rename_one(&eng2, id2, a, "Renamed", false, EditSource::User).unwrap();
+    assert_eq!(steps(&eng2, id2), n + 3);
+    eng2.save(id2, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > original.len() && saved.starts_with(&original), "the file was rewritten: the signature would no longer verify");
+    let (eng3, id3) = reopen(&path);
+    assert_eq!(items_of(&eng3, id3, &["Renamed"]).len(), 1);
+}
+
+#[test]
+fn layout_tools_hold_their_caps() {
+    let (eng, id, _) = script_form("layout-caps", &["A", "B"]);
+    let a = items_of(&eng, id, &["A"])[0];
+    let n = steps(&eng, id);
+    let many: Vec<Item> = std::iter::repeat(a).take(1001).collect();
+    let e = align_one(&eng, id, &many, Edge::Left, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 1000"), "{e}");
+    let e = copies_one(&eng, id, a, 20, 26, (1.0, 1.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 500"), "{e}");
+    // 501 places is one over; 500 passes the cap (here nearly all of them run off the page and are skipped).
+    let e = copies_one(&eng, id, a, 3, 167, (1.0, 1.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 500"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step");
+    let (_, done) = copies_one(&eng, id, a, 2, 250, (900.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done, Copied { made: 1, skipped: 498 });
+    let n = steps(&eng, id);
+    let pages: Vec<u32> = (1..=2001).collect();
+    let e = duplicate_one(&eng, id, a, &pages, EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("at most 2000"), "{e}");
+    assert_eq!(steps(&eng, id), n, "no step");
+}
+
+fn form_fields_len(eng: &Engine, id: DocId) -> usize {
+    eng.read_custom(id, |d| Ok(get(&d.catalog()?.get_dict("AcroForm")?.unwrap(), "Fields").map_or(0, |f| f.len().unwrap_or(0)))).unwrap()
+}
+
+fn layout_form(test: &str) -> (Arc<Engine>, DocId, String) {
+    let (eng, id, path) = open(test);
+    let opts = vec![Opt { export: "se".into(), label: "Sweden".into() }, Opt { export: "no".into(), label: "Norway".into() }];
+    add1(&eng, id, 0, nf(FieldKind::Text, "Name", [72.0, 100.0, 272.0, 120.0]));
+    add1(&eng, id, 0, NewField { options: Some(opts), ..nf(FieldKind::Combo, "Country", [72.0, 140.0, 220.0, 160.0]) });
+    add1(&eng, id, 0, nf(FieldKind::Text, "Notes", [72.0, 180.0, 272.0, 240.0]));
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Agree", [72.0, 260.0, 86.0, 274.0]));
+    patch_field(&eng, id, "Notes", FieldPatch { multiline: Some(true), ..Default::default() });
+    (eng, id, path)
+}
+
+#[test]
+fn a_field_duplicated_to_other_pages_is_one_field_with_more_widgets() {
+    let (eng, id, path) = layout_form("layout-dup");
+    fill(&eng, id, "Name", text("Alice")).unwrap();
+    let before = all_rects(&eng, id);
+    let name = items_of(&eng, id, &["Name"])[0];
+    let n = steps(&eng, id);
+    duplicate_one(&eng, id, name, &[1], EditSource::User).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    let ws = widgets_named(&eng, id, "Name");
+    assert_eq!(ws.len(), 2, "{ws:?}");
+    assert_eq!(ws[0].node, ws[1].node, "one field");
+    assert_eq!((ws[0].page, ws[1].page), (0, 1));
+    assert!((0..4).all(|i| near(ws[0].rect[i], ws[1].rect[i])), "the same place");
+    assert!(ws.iter().all(|w| w.value == "Alice"), "one value: {ws:?}");
+    // Typing in one is typing in both.
+    fill(&eng, id, "Name", text("Bob")).unwrap();
+    assert!(widgets_named(&eng, id, "Name").iter().all(|w| w.value == "Bob"));
+    // Editing a property afterwards keeps the field's kind, flags and options (they moved to the parent).
+    for (nm, kind) in [("Country", FieldKind::Combo), ("Notes", FieldKind::Text)] {
+        let it = items_of(&eng, id, &[nm])[0];
+        duplicate_one(&eng, id, it, &[1], EditSource::User).unwrap();
+        assert_eq!(patch_field(&eng, id, nm, FieldPatch { required: Some(true), ..Default::default() }), 1);
+        let w = widgets_named(&eng, id, nm);
+        assert_eq!(w.len(), 2, "{nm}");
+        assert!(w.iter().all(|w| w.kind == kind && w.required), "{nm}: {w:?}");
+    }
+    assert!(widgets_named(&eng, id, "Notes").iter().all(|w| w.multiline));
+    assert_eq!(widgets_named(&eng, id, "Country")[0].options.len(), 2);
+    fill(&eng, id, "Country", text("no")).unwrap();
+    assert!(widgets_named(&eng, id, "Country").iter().all(|w| w.value == "no"));
+    // A check box: turning it on turns both widgets on.
+    let agree = items_of(&eng, id, &["Agree"])[0];
+    duplicate_one(&eng, id, agree, &[1], EditSource::User).unwrap();
+    fill(&eng, id, "Agree", FieldValue::Checked(true)).unwrap();
+    let a = widgets_named(&eng, id, "Agree");
+    assert_eq!(a.len(), 2);
+    assert!(a.iter().all(|w| w.checked), "{a:?}");
+    assert!(duplicate_one(&eng, id, name, &[0], EditSource::User).unwrap_err().to_string().contains("other page"));
+    assert!(duplicate_one(&eng, id, name, &[7], EditSource::User).unwrap_err().to_string().contains("no page 8"));
+
+    // Undo takes the widgets off again, exactly.
+    for _ in 0..9 {
+        eng.undo(id).unwrap();
+    }
+    assert!(same_rects(&all_rects(&eng, id), &before), "undo takes every widget off again");
+    for _ in 0..9 {
+        eng.redo(id).unwrap();
+    }
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let w = list_all(&eng2, id2).unwrap().fields;
+    assert_eq!(w.iter().filter(|f| f.name == "Name").count(), 2);
+    assert_eq!(w.iter().filter(|f| f.name == "Name" && f.page == 1).count(), 1);
+    assert!(w.iter().filter(|f| f.name == "Name").all(|f| f.value == "Bob"));
+    assert!(!ap_text(&path, "Name", None).is_empty());
+}
+
+/// The raw `/MK /R` and the `/MediaBox` width of the `/P` page of the widget named `name` on `page`.
+fn widget_turn_and_page(path: &str, page: u32, name: &str) -> (Option<i32>, Option<f32>) {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    for w in doc.load_pdf_page(page as i32).unwrap().widgets() {
+        if w.name().unwrap().as_deref() != Some(name) {
+            continue;
+        }
+        let o = w.annotation().object();
+        let r = o.get_dict("MK").unwrap().and_then(|m| m.get_dict("R").unwrap()).and_then(|r| r.as_int().ok());
+        let width = o.get_dict("P").unwrap().and_then(|p| p.get_dict("MediaBox").unwrap()).map(|b| nums(&b)[2]);
+        return (r, width);
+    }
+    panic!("no widget {name} on page {page}")
+}
+
+#[test]
+fn a_duplicate_names_its_page_and_turns_the_widget_with_the_difference_in_page_rotation() {
+    // Page 1 is rotated 90 (612 wide); page 2 is not (200 wide).
+    let (eng, id, path) = rotated_form("layout-dup-rot", &[("Down", [100.0, 100.0, 180.0, 120.0])]);
+    let set_turn = |name: &str, page: u32, r: i32| {
+        eng.apply_custom(id, "mk".into(), EditSource::User, false, |d| {
+            let entries = scan(d)?;
+            let e = entries.iter().find(|e| e.name == name && e.page == page).unwrap();
+            let mut w = d.new_indirect(e.xref, 0)?;
+            let mut mk = d.new_dict()?;
+            mk.dict_put("R", PdfObject::new_int(r)?)?;
+            w.dict_put("MK", mk)?;
+            Ok(vec![page])
+        })
+        .unwrap();
+    };
+    set_turn("Down", 0, 90);
+    let it = items_of(&eng, id, &["Down"])[0];
+    duplicate_one(&eng, id, it, &[1], EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(widget_turn_and_page(&path, 0, "Down").0, Some(90), "the original is as it was");
+    let (r, width) = widget_turn_and_page(&path, 1, "Down");
+    assert_eq!(r, Some(0), "90 on a page turned 90 is upright; on an unturned page it is 0");
+    assert_eq!(width, Some(200.0), "/P is the page it is on");
+
+    // The other way: from the plain page to the turned one.
+    add1(&eng, id, 1, nf(FieldKind::Text, "Up", [10.0, 10.0, 60.0, 30.0]));
+    set_turn("Up", 1, 0);
+    let up = items_of(&eng, id, &["Up"])[0];
+    duplicate_one(&eng, id, up, &[0], EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(widget_turn_and_page(&path, 0, "Up"), (Some(90), Some(612.0)));
+}
+
+#[test]
+fn layout_in_page_space_holds_on_every_page_rotation() {
+    // Inside the smaller side of the page as shown (572) whichever way it is turned.
+    const FIT: [(&str, [f32; 4]); 3] =
+        [("A", [50.0, 60.0, 130.0, 80.0]), ("B", [200.0, 200.0, 240.0, 240.0]), ("C", [400.0, 300.0, 480.0, 330.0])];
+    for rot in [0, 90, 180, 270] {
+        let bytes = pdf_of(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [20 30 592 762] /Rotate {rot} /Resources << /Font << /Helv 3 0 R >> >> >>"),
+        ]);
+        let (eng, id, path) = open_bytes(&format!("layout-rot-{rot}"), bytes);
+        for (n, r) in FIT {
+            add1(&eng, id, 0, nf(FieldKind::Text, n, r));
+        }
+        let (abc, ab) = (items_of(&eng, id, &["A", "B", "C"]), items_of(&eng, id, &["A", "B"]));
+        let start = all_rects(&eng, id);
+        // What the page shows: the rectangles come back as they were given, whatever the rotation.
+        for (n, r) in FIT {
+            assert!((0..4).all(|i| near(rect_of_name(&eng, id, n)[i], r[i])), "{rot}: {n}");
+        }
+        align_one(&eng, id, &abc, Edge::Left, EditSource::User).unwrap();
+        for n in ["A", "B"] {
+            assert!(near(rect_of_name(&eng, id, n)[0], 400.0), "{rot}: {n} on the anchor's left edge");
+        }
+        distribute_one(&eng, id, &abc, Axis::Vertical, EditSource::User).unwrap();
+        let (a, b, c) = (rect_of_name(&eng, id, "A"), rect_of_name(&eng, id, "B"), rect_of_name(&eng, id, "C"));
+        assert!(near(b[1] - a[3], c[1] - b[3]), "{rot}: equal gaps {a:?} {b:?} {c:?}");
+        let before = rect_of_name(&eng, id, "A");
+        nudge_one(&eng, id, &ab, 5.0, -3.0, EditSource::User).unwrap();
+        let after = rect_of_name(&eng, id, "A");
+        assert!(near(after[0], before[0] + 5.0) && near(after[1], before[1] - 3.0), "{rot}: nudge right and up as shown {before:?} {after:?}");
+        center_one(&eng, id, &abc, Axis::Both, EditSource::User).unwrap();
+        let bounds = eng.read_custom(id, |d| { let b = d.load_pdf_page(0)?.bounds()?; Ok([b.x0, b.y0, b.x1, b.y1]) }).unwrap();
+        let rs: Vec<[f32; 4]> = ["A", "B", "C"].iter().map(|n| rect_of_name(&eng, id, n)).collect();
+        let x = (rs.iter().map(|r| r[0]).fold(f32::MAX, f32::min) + rs.iter().map(|r| r[2]).fold(f32::MIN, f32::max)) / 2.0;
+        let y = (rs.iter().map(|r| r[1]).fold(f32::MAX, f32::min) + rs.iter().map(|r| r[3]).fold(f32::MIN, f32::max)) / 2.0;
+        assert!(near(x, (bounds[0] + bounds[2]) / 2.0) && near(y, (bounds[1] + bounds[3]) / 2.0), "{rot}: centred in {bounds:?}");
+        let swapped = rot == 90 || rot == 270;
+        assert!(near(bounds[2] - bounds[0], if swapped { 732.0 } else { 572.0 }), "{rot}: the page as shown {bounds:?}");
+        // Saved and reopened with a fresh MuPDF: the same rectangles; undone: the start.
+        let now = all_rects(&eng, id);
+        eng.save(id, None).unwrap();
+        let (eng2, id2) = reopen(&path);
+        assert!(same_rects(&all_rects(&eng2, id2), &now), "{rot}: reopened");
+        for _ in 0..4 {
+            eng.undo(id).unwrap();
+        }
+        assert!(same_rects(&all_rects(&eng, id), &start), "{rot}: undone exactly");
+    }
+}
+
+#[test]
+fn a_duplicated_widget_goes_on_its_own_page_when_pages_share_an_annots_array() {
+    let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Shared) /Rect [72 600 200 620] /F 4 /DA (/Helv 0 Tf 0 g) >>";
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 5 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 7 0 R >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 7 0 R >>".to_string(),
+        widget.to_string(),
+        "[6 0 R]".to_string(),
+    ]);
+    let (eng, id, _) = open_bytes("layout-dup-shared", bytes);
+    let w = items_of(&eng, id, &["Shared"])[0];
+    assert_eq!(w.0, 0);
+    duplicate_one(&eng, id, w, &[1], EditSource::User).unwrap();
+    let ws = widgets_named(&eng, id, "Shared");
+    assert_eq!(ws.len(), 2, "{ws:?}");
+    assert_eq!(ws.iter().filter(|f| f.page == 0).count(), 1, "the first page did not gain one");
+    assert_eq!(ws.iter().filter(|f| f.page == 1).count(), 1);
+}
+
+#[test]
+fn a_page_too_small_for_the_field_refuses_the_duplicate_and_radios_and_signatures_are_not_copied() {
+    let (eng, id, _) = rotated_form("layout-dup-small", &[("Wide", [100.0, 20.0, 400.0, 40.0])]);
+    add1(&eng, id, 0, nf(FieldKind::Radio, "Pick", [100.0, 60.0, 114.0, 74.0]));
+    add1(&eng, id, 0, nf(FieldKind::Signature, "Sig", [100.0, 100.0, 180.0, 130.0]));
+    let n = steps(&eng, id);
+    let e = duplicate_one(&eng, id, items_of(&eng, id, &["Wide"])[0], &[1], EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("does not fit on page 2"), "{e}");
+    assert!(duplicate_one(&eng, id, items_of(&eng, id, &["Pick"])[0], &[1], EditSource::User).unwrap_err().to_string().contains("radio"));
+    assert!(duplicate_one(&eng, id, items_of(&eng, id, &["Sig"])[0], &[1], EditSource::User).unwrap_err().to_string().contains("signature"));
+    assert!(copies_one(&eng, id, items_of(&eng, id, &["Pick"])[0], 2, 1, (2.0, 2.0), EditSource::User).is_err());
+    assert_eq!(steps(&eng, id), n);
+}
+
+#[test]
+fn copies_make_a_grid_named_after_the_field_clipped_to_the_page() {
+    let (eng, id, path) = rotated_form("layout-copies", &[("Cell", [100.0, 100.0, 160.0, 120.0]), ("Total", [100.0, 400.0, 200.0, 420.0])]);
+    patch_field(&eng, id, "Total", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Cell".into()] }), ..Default::default() });
+    let before = all_rects(&eng, id);
+    let n = steps(&eng, id);
+    let (state, done) = copies_one(&eng, id, items_of(&eng, id, &["Cell"])[0], 2, 3, (10.0, 6.0), EditSource::User).unwrap();
+    let _ = state;
+    assert_eq!(done, Copied { made: 5, skipped: 0 });
+    assert_eq!(steps(&eng, id), n + 1);
+    let names: Vec<String> = list_all(&eng, id).unwrap().fields.into_iter().map(|f| f.name).filter(|n| n.starts_with("Cell")).collect();
+    for i in 0..6 {
+        assert!(names.contains(&format!("Cell.{i}")), "{names:?}");
+    }
+    assert!(!names.contains(&"Cell".to_string()));
+    // Row by row, to the right and down, with the gaps between.
+    let r = |n: &str| rect_of_name(&eng, id, n);
+    assert!(near(r("Cell.0")[0], 100.0) && near(r("Cell.1")[0], 170.0) && near(r("Cell.2")[0], 240.0), "{:?}", r("Cell.1"));
+    assert!(near(r("Cell.3")[0], 100.0) && near(r("Cell.3")[1], 126.0), "{:?}", r("Cell.3"));
+    assert!(near(r("Cell.5")[2] - r("Cell.5")[0], 60.0));
+    // The calculation follows the original to its new name; the copies are independent fields.
+    match field(&eng, id, "Total").calculate {
+        Calculate::Simple { fields, .. } => assert_eq!(fields, vec!["Cell.0".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    fill(&eng, id, "Cell.2", text("7")).unwrap();
+    assert_eq!(field(&eng, id, "Cell.2").value, "7");
+    assert_eq!(field(&eng, id, "Cell.0").value, "");
+    assert_eq!(field(&eng, id, "Cell.4").value, "");
+    eng.undo(id).unwrap();
+    eng.undo(id).unwrap();
+    assert!(same_rects(&all_rects(&eng, id), &before), "undo takes the grid off and the name back");
+    assert_eq!(field(&eng, id, "Cell").name, "Cell");
+    eng.redo(id).unwrap();
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let back = list_all(&eng2, id2).unwrap().fields;
+    assert_eq!(back.iter().filter(|f| f.name.starts_with("Cell.")).count(), 6);
+    assert_eq!(back.iter().find(|f| f.name == "Cell.2").unwrap().value, "7");
+
+    // Nothing fits past the right edge: those places are skipped and said so; all of them skipped is an error.
+    let (_, done) = copies_one(&eng, id, items_of(&eng, id, &["Cell.5"])[0], 1, 4, (300.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done, Copied { made: 1, skipped: 2 });
+    let e = copies_one(&eng, id, items_of(&eng, id, &["Cell.4"])[0], 1, 2, (900.0, 0.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("no copy fits"), "{e}");
+}
+
+#[test]
+fn copies_of_a_field_node_with_one_widget_keep_its_format_on_the_original_and_every_copy() {
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [6 0 R] >>".to_string(),
+        "<< /FT /Tx /T (Amt) /V (5) /Kids [6 0 R] /AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"\", true);) >> >> >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /Parent 5 0 R /Rect [72 600 140 620] /F 4 /DA (/Helv 0 Tf 0 g) >>".to_string(),
+    ]);
+    let (eng, id, path) = open_bytes("layout-copies-node", bytes);
+    let amt = items_of(&eng, id, &["Amt"])[0];
+    let fmt = field(&eng, id, "Amt").format;
+    assert!(matches!(fmt, Format::Number { .. }), "{fmt:?}");
+    let (_, done) = copies_one(&eng, id, amt, 1, 3, (10.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done.made, 2);
+    for n in ["Amt.0", "Amt.1", "Amt.2"] {
+        assert_eq!(field(&eng, id, n).format, fmt, "{n} keeps the format");
+    }
+    assert_eq!(field(&eng, id, "Amt.0").value, "5", "the original keeps its value");
+    eng.undo(id).unwrap();
+    assert_eq!(field(&eng, id, "Amt").format, fmt);
+    eng.redo(id).unwrap();
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(field(&eng2, id2, "Amt.2").format, fmt);
+    assert_eq!(field(&eng2, id2, "Amt.0").format, fmt);
+}
+
+#[test]
+fn copies_leave_the_originals_shared_actions_alone() {
+    // /AA is an indirect dictionary; its /C is an action with no script, so the field still counts as copyable.
+    // /T is the leaf: the widgets are the kids 0, 1, 2 of the group Amt.
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Amt) /Rect [72 600 140 620] /F 4 /DA (/Helv 0 Tf 0 g) /AA 6 0 R >>".to_string(),
+        "<< /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"\", true);) >> /C << /S /ResetForm >> >>".to_string(),
+    ]);
+    let (eng, id, path) = open_bytes("layout-copies-shared-aa", bytes);
+    let amt = items_of(&eng, id, &["Amt"])[0];
+    let (_, done) = copies_one(&eng, id, amt, 1, 3, (10.0, 0.0), EditSource::User).unwrap();
+    assert_eq!(done.made, 2);
+    eng.save(id, None).unwrap();
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let mut seen = std::collections::BTreeMap::new();
+    for w in doc.load_pdf_page(0).unwrap().widgets() {
+        let o = w.annotation().object();
+        let aa = o.get_dict("AA").unwrap().expect("every widget keeps its actions");
+        let t = super::text(&o.get_dict("T").unwrap().unwrap()).unwrap();
+        seen.insert(t, (aa.get_dict("F").unwrap().is_some(), aa.get_dict("C").unwrap().is_some()));
+    }
+    let want: std::collections::BTreeMap<String, (bool, bool)> =
+        [("0", (true, true)), ("1", (true, false)), ("2", (true, false))].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    assert_eq!(seen, want, "the original keeps /F and /C, a copy has /F and no /C");
+}
+
+#[test]
+fn giving_a_field_a_second_widget_moves_only_the_fields_actions_up_and_keeps_the_widgets_triggers() {
+    let bytes = pdf_of(&[
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] >>".to_string(),
+        concat!(
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Amt) /V (5) /Rect [72 600 140 620] /F 4 /DA (/Helv 0 Tf 0 g) ",
+            "/AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, \"\", true);) >> ",
+            "/E << /S /JavaScript /JS (app.alert\\(\"in\"\\);) >> /Fo << /S /JavaScript /JS (app.beep\\(0\\);) >> >> >>"
+        )
+        .to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
+    ]);
+    let (eng, id, path) = open_bytes("layout-aa-split", bytes);
+    let amt = items_of(&eng, id, &["Amt"])[0];
+    let fmt = field(&eng, id, "Amt").format;
+    assert!(matches!(fmt, Format::Number { .. }), "{fmt:?}");
+    duplicate_one(&eng, id, amt, &[1], EditSource::User).unwrap();
+    assert!(widgets_named(&eng, id, "Amt").iter().all(|w| w.format == fmt), "the format is the field's, on both widgets");
+    eng.save(id, None).unwrap();
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let w = doc.load_pdf_page(0).unwrap().widgets().next().unwrap().annotation().object();
+    let keys = |o: &PdfObject| -> Vec<String> {
+        o.dict_iter().unwrap().filter_map(|kv| kv.ok()).filter_map(|(k, _)| super::text(&k)).collect()
+    };
+    let own = keys(&w.get_dict("AA").unwrap().expect("the widget keeps its triggers"));
+    assert!(own.contains(&"E".to_string()) && own.contains(&"Fo".to_string()) && !own.contains(&"F".to_string()), "{own:?}");
+    let up = keys(&w.get_dict("Parent").unwrap().unwrap().get_dict("AA").unwrap().expect("the field's actions"));
+    assert_eq!(up, vec!["F".to_string()]);
+}
+
+#[test]
+fn copies_are_refused_for_a_field_with_several_widgets_or_a_calculation() {
+    let (eng, id, _) = open_bytes("layout-copies-refused", shared_widgets_form());
+    let n = steps(&eng, id);
+    let sum = items_of(&eng, id, &["Sum"])[0];
+    let e = copies_one(&eng, id, sum, 2, 1, (4.0, 4.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("several widgets"), "{e}");
+    let (eng2, id2, _) = script_form("layout-copies-calc", &["Rent", "Total"]);
+    patch_field(&eng2, id2, "Total", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Rent".into()] }), ..Default::default() });
+    let e = copies_one(&eng2, id2, items_of(&eng2, id2, &["Total"])[0], 2, 1, (4.0, 4.0), EditSource::User).unwrap_err().to_string();
+    assert!(e.contains("calculated"), "{e}");
+    assert_eq!(steps(&eng, id), n);
+}
+
+#[test]
+fn rename_keeps_dotted_names_valid_and_merges_only_fields_of_one_kind() {
+    let (eng, id, path) = layout_form("layout-rename");
+    add1(&eng, id, 0, nf(FieldKind::Text, "Other", [72.0, 300.0, 200.0, 320.0]));
+    add1(&eng, id, 0, nf(FieldKind::Text, "Sum", [72.0, 340.0, 200.0, 360.0]));
+    patch_field(&eng, id, "Sum", FieldPatch { calculate: Some(Calculate::Simple { op: CalcOp::Sum, fields: vec!["Other".into()] }), ..Default::default() });
+    let it = |n: &str| items_of(&eng, id, &[n])[0];
+    let rename = |n: &str, to: &str, merge: bool| rename_one(&eng, id, it(n), to, merge, EditSource::User);
+    let top = form_fields_len(&eng, id);
+
+    // A new group, a second field into it, and the calculation follows.
+    let n = steps(&eng, id);
+    rename("Other", "Grp.Other", false).unwrap();
+    assert_eq!(steps(&eng, id), n + 1);
+    assert_eq!(field(&eng, id, "Grp.Other").kind, FieldKind::Text);
+    match field(&eng, id, "Sum").calculate {
+        Calculate::Simple { fields, .. } => assert_eq!(fields, vec!["Grp.Other".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(form_fields_len(&eng, id), top, "the field left /Fields for its group");
+    rename("Name", "Grp.Name", false).unwrap();
+    assert_eq!(form_fields_len(&eng, id), top - 1);
+    rename("Grp.Name", "Deep.er.Name", false).unwrap();
+    rename("Deep.er.Name", "Name", false).unwrap();
+    assert_eq!(form_fields_len(&eng, id), top, "the emptied groups are gone");
+    eng.undo(id).unwrap();
+    assert_eq!(field(&eng, id, "Deep.er.Name").name, "Deep.er.Name");
+    eng.redo(id).unwrap();
+
+    // Refusals: nothing changes and there is no step.
+    let n = steps(&eng, id);
+    let err = |n: &str, to: &str, merge: bool| rename(n, to, merge).unwrap_err().to_string();
+    assert!(err("Notes", "Name", false).contains("already exists"));
+    assert!(err("Notes", "Agree", true).contains("cannot take that name"), "different kinds never merge");
+    assert!(err("Name", "Grp", false).contains("group of fields"));
+    assert!(err("Name", "Notes.x", false).contains("no field can be named below"));
+    assert!(err("Name", "", false).contains("needs a name"));
+    assert!(err("Name", "a..b", false).contains("needs a name"));
+    assert!(err("Name", ".x", false).contains("needs a name"));
+    assert_eq!(steps(&eng, id), n);
+    // The same name is not a step.
+    rename("Name", "Name", false).unwrap();
+    assert_eq!(steps(&eng, id), n);
+
+    // Merge: same kind, with the target's value kept; one field of two widgets.
+    fill(&eng, id, "Name", text("Alice")).unwrap();
+    fill(&eng, id, "Notes", text("a note")).unwrap();
+    rename("Notes", "Name", true).unwrap();
+    let ws = widgets_named(&eng, id, "Name");
+    assert_eq!(ws.len(), 2, "{ws:?}");
+    assert_eq!(ws[0].node, ws[1].node);
+    assert!(ws.iter().all(|w| w.value == "Alice"), "{ws:?}");
+    assert!(widgets_named(&eng, id, "Notes").is_empty());
+    eng.undo(id).unwrap();
+    assert_eq!(widgets_named(&eng, id, "Notes").len(), 1);
+    assert_eq!(widgets_named(&eng, id, "Name").len(), 1);
+    eng.redo(id).unwrap();
+    // Editing a property of the merged field keeps it a text field.
+    assert_eq!(patch_field(&eng, id, "Name", FieldPatch { required: Some(true), ..Default::default() }), 1);
+    assert!(widgets_named(&eng, id, "Name").iter().all(|w| w.required && w.kind == FieldKind::Text));
+
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    let back = list_all(&eng2, id2).unwrap().fields;
+    assert_eq!(back.iter().filter(|f| f.name == "Name").count(), 2);
+    assert!(back.iter().any(|f| f.name == "Grp.Other"));
+}
+
+/// The appearance text and the `/AS` of every widget named `name`, on every page, as written to the file.
+fn widget_looks(path: &str, name: &str) -> Vec<(String, Option<String>)> {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let mut out = Vec::new();
+    for p in 0..doc.page_count().unwrap() {
+        for w in doc.load_pdf_page(p).unwrap().widgets() {
+            if w.name().unwrap().as_deref() != Some(name) {
+                continue;
+            }
+            let o = w.annotation().object();
+            let n = o.get_dict("AP").unwrap().and_then(|ap| ap.get_dict("N").unwrap());
+            let shown = match &n {
+                Some(n) if n.is_stream().unwrap_or(false) => String::from_utf8_lossy(&n.read_stream().unwrap()).into_owned(),
+                _ => String::new(),
+            };
+            let state = o.get_dict("AS").unwrap().and_then(|s| super::text(&s));
+            out.push((shown, state));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_merged_widget_is_redrawn_with_the_targets_value_and_a_check_boxes_state_follows_it() {
+    let (eng, id, path) = layout_form("layout-merge-look");
+    add1(&eng, id, 0, nf(FieldKind::Text, "Title", [72.0, 300.0, 272.0, 320.0]));
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Agree2", [100.0, 260.0, 114.0, 274.0]));
+    fill(&eng, id, "Title", text("Mr")).unwrap();
+    fill(&eng, id, "Name", text("Alice")).unwrap();
+    let it = |n: &str| items_of(&eng, id, &[n])[0];
+    rename_one(&eng, id, it("Title"), "Name", true, EditSource::User).unwrap();
+    // A checked box merged into an unchecked one is unchecked; the other way round it is checked.
+    fill(&eng, id, "Agree2", FieldValue::Checked(true)).unwrap();
+    rename_one(&eng, id, it("Agree2"), "Agree", true, EditSource::User).unwrap();
+    // Checked target, unchecked box merged into it: both show the on state, not Off.
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Tick", [140.0, 260.0, 154.0, 274.0]));
+    add1(&eng, id, 0, nf(FieldKind::Checkbox, "Tick2", [180.0, 260.0, 194.0, 274.0]));
+    fill(&eng, id, "Tick", FieldValue::Checked(true)).unwrap();
+    rename_one(&eng, id, it("Tick2"), "Tick", true, EditSource::User).unwrap();
+    eng.save(id, None).unwrap();
+    let ticks = widget_looks(&path, "Tick");
+    assert_eq!(ticks.len(), 2);
+    assert!(ticks.iter().all(|(_, s)| s.as_deref().is_some_and(|s| s != "Off")), "the merged box shows the on state: {ticks:?}");
+    assert!(widgets_named(&eng, id, "Tick").iter().all(|w| w.checked));
+    let names = widget_looks(&path, "Name");
+    assert_eq!(names.len(), 2);
+    assert!(names.iter().all(|(shown, _)| shown.contains("Alice")), "both widgets show the target's value: {names:?}");
+    let boxes = widget_looks(&path, "Agree");
+    assert_eq!(boxes.len(), 2);
+    assert!(boxes.iter().all(|(_, s)| s.as_deref() == Some("Off")), "the merged check box follows the target's /V: {boxes:?}");
+    assert!(widgets_named(&eng, id, "Agree").iter().all(|w| !w.checked));
+}
+
+#[test]
+fn renaming_a_calculated_field_into_a_group_keeps_its_place_in_the_calculation_order() {
+    let (eng, id, path) = script_form("layout-rename-co", &["X", "Y", "Z"]);
+    for (i, n) in ["X", "Y", "Z"].iter().enumerate() {
+        let calc = Calculate::Custom(format!("event.value = {i};"));
+        patch_field(&eng, id, n, FieldPatch { calculate: Some(calc), ..Default::default() });
+    }
+    let nodes = |names: &[&str]| names.iter().map(|n| field(&eng, id, n).node).collect::<Vec<_>>();
+    let order = nodes(&["X", "Y", "Z"]);
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, order);
+    let x = items_of(&eng, id, &["X"])[0];
+    rename_one(&eng, id, x, "Grp.X", false, EditSource::User).unwrap();
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, order, "X is first still");
+    // Out of the group again, and the middle one into another.
+    let gx = items_of(&eng, id, &["Grp.X"])[0];
+    rename_one(&eng, id, gx, "X", false, EditSource::User).unwrap();
+    let y = items_of(&eng, id, &["Y"])[0];
+    rename_one(&eng, id, y, "Other.Y", false, EditSource::User).unwrap();
+    assert_eq!(list_all(&eng, id).unwrap().calc_order, order);
+    eng.save(id, None).unwrap();
+    let (eng2, id2) = reopen(&path);
+    assert_eq!(list_all(&eng2, id2).unwrap().calc_order.len(), 3);
+}
+
+#[test]
+fn renaming_one_widget_of_a_field_renames_the_field() {
+    let (eng, id, _) = open_bytes("layout-rename-kids", shared_widgets_form());
+    let w = widgets_named(&eng, id, "agree");
+    assert_eq!(w.len(), 3);
+    rename_one(&eng, id, (w[1].page, w[1].xref), "consent", false, EditSource::User).unwrap();
+    assert_eq!(widgets_named(&eng, id, "consent").len(), 3);
+    assert!(widgets_named(&eng, id, "agree").is_empty());
 }
 
 #[test]
