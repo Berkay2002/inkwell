@@ -899,13 +899,12 @@ fn remove_all_links_takes_every_link_in_one_step_and_keeps_the_rest() {
     let has = |p: &str, m: &str| String::from_utf8_lossy(&std::fs::read(p).unwrap()).contains(m);
     let before: Vec<PageLinks> = (0..2).map(|p| list(&eng, id, p).unwrap()).collect();
     assert_eq!((before[0].links.len(), before[1].links.len()), (2, 2));
-    assert_eq!(audit(&eng, id).unwrap().total, 4);
+    assert_eq!(audit(&eng, id).unwrap().total, 3, "the link both pages list is one");
     let outline = crate::outline::list(&eng, id).unwrap().items.len();
     assert_eq!(outline, 1);
 
     let e = go(&eng, id, LinkOp::RemoveAll);
-    assert_eq!(e.count, 4, "as many as the audit counted: the shared one is on two pages");
-    assert_eq!(e.count, before.iter().map(|p| p.links.len() as u32).sum::<u32>());
+    assert_eq!(e.count, 3, "as many as the audit counted: the shared one is on two pages");
     assert_eq!(e.state.undo.as_deref(), Some("Remove all links"));
     for p in 0..2 {
         assert!(list(&eng, id, p).unwrap().links.is_empty(), "page {p}");
@@ -1086,4 +1085,27 @@ fn a_parent_tree_entry_that_is_not_the_links_own_stays_when_the_link_goes() {
         assert_eq!((nums, kids), (2, 2), "{name}: the entry and the element's content are untouched");
         assert!(list(&eng, id, 0).unwrap().links.is_empty());
     }
+}
+
+#[test]
+fn the_count_the_confirm_shows_is_the_count_remove_all_removes() {
+    // Object 5 is an `/Annots` array both pages share; it holds a link, a link with no rectangle, a link with a
+    // malformed one, an inline link, and the first link again.
+    let shared = format!(
+        "[ 6 0 R 7 0 R 8 0 R {INLINE} 6 0 R ]"
+    );
+    let more = vec![
+        shared,
+        link_annot("/Dest [3 0 R /Fit]"),
+        "<< /Type /Annot /Subtype /Link /Dest [3 0 R /Fit] >>".to_string(),
+        "<< /Type /Annot /Subtype /Link /Rect [1 2] /Dest [3 0 R /Fit] >>".to_string(),
+    ];
+    let bytes = two_page_doc("5 0 R", "5 0 R", "", &more);
+    let (eng, id, _, _d) = opened("count-agrees", &bytes);
+    let a = audit(&eng, id).unwrap();
+    assert_eq!(a.total, 4, "four links, the shared array and the repeat counted once, none skipped for its rectangle");
+    assert!(!a.signed);
+    let e = go(&eng, id, LinkOp::RemoveAll);
+    assert_eq!(e.count, a.total);
+    assert_eq!(audit(&eng, id).unwrap().total, 0);
 }

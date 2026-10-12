@@ -479,17 +479,34 @@ pub struct LinkAudit {
     pub total: u32,
     pub external: u32,
     pub broken: u32,
+    /// The document is signed: a change to its links is saved after the signature.
+    pub signed: bool,
     /// The first of the broken ones.
     pub rows: Vec<AuditRow>,
 }
 
+/// The `/Annots` array of `page` has not been looked at yet (one that two pages share is read once).
+fn fresh_array(page: &PdfObject, arrays: &mut HashSet<i32>) -> Result<bool> {
+    match page.get_dict("Annots")? {
+        Some(a) if a.is_indirect()? => Ok(arrays.insert(a.as_indirect()?)),
+        _ => Ok(true),
+    }
+}
+
+/// Counts every link annotation once, whatever pages list it and however many arrays hold it, and whether or not
+/// it has a usable rectangle: the number "Remove all links" asks with is the number it removes.
 pub fn audit(eng: &Engine, doc: DocId) -> Result<LinkAudit> {
     eng.read_custom(doc, |d| {
-        let mut out = LinkAudit::default();
+        let mut out = LinkAudit { signed: crate::outline::signed(d), ..Default::default() };
         let mut names = Names::default();
+        let (mut arrays, mut seen) = (HashSet::new(), HashSet::new());
         for page in 0..d.page_count()?.max(0) as u32 {
-            for l in read_page_with(d, page, 0, &mut names)?.links {
-                out.total += 1;
+            if !fresh_array(&d.find_page(page as i32)?, &mut arrays)? {
+                continue;
+            }
+            let counted: HashSet<i32> = page_annots(d, page)?.links.iter().map(|(id, _)| *id).filter(|id| *id < 0 || seen.insert(*id)).collect();
+            out.total += counted.len() as u32;
+            for l in read_page_with(d, page, 0, &mut names)?.links.into_iter().filter(|l| counted.contains(&l.id)) {
                 match l.target {
                     Target::Uri { .. } => out.external += 1,
                     Target::Broken { what } => {
@@ -1040,8 +1057,8 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
                 return Ok(None);
             }
             let mut pages = Vec::new();
-            // Links as the pages list them (what the audit counts and the confirm showed): an object that two
-            // pages list is two, though its structure entry and its object are dealt with once.
+            // Links as the audit counts them: once each, however many pages and arrays list one (an `/Annots` that
+            // two pages share is emptied by the first, so the second finds none).
             let mut count = 0;
             let mut objects = Vec::new();
             let mut seen = HashSet::new();
@@ -1050,9 +1067,11 @@ fn run(doc: &mut PdfDocument, doc_path: &str, op: &LinkOp) -> Result<Option<Done
                 if links.is_empty() {
                     continue;
                 }
-                count += links.len() as u32;
-                for (id, a) in links.iter().filter(|(id, _)| *id > 0) {
-                    if seen.insert(*id) {
+                for (id, a) in &links {
+                    if *id < 0 {
+                        count += 1;
+                    } else if seen.insert(*id) {
+                        count += 1;
                         leave_structure(doc, a, *id)?;
                         objects.push(*id);
                     }
