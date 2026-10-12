@@ -157,12 +157,12 @@ interface FormsStore {
   toggle: (doc: number, ref: Ref) => void;
   /** Replaces the picked fields (a marquee); `add` keeps the ones already picked. */
   pickMany: (doc: number, refs: Ref[], add?: boolean) => void;
-  /** Which layout dialog the rail shows. */
-  dialog: "duplicate" | "copies" | null;
-  setDialog: (d: "duplicate" | "copies" | null) => void;
-  /** The field whose name is being edited in the Fields list (F2, double-click, the context menu). */
-  renaming: Ref | null;
-  setRenaming: (r: Ref | null) => void;
+  /** Which layout dialog the rail shows, and for which document. */
+  dialog: { doc: number; kind: "duplicate" | "copies" } | null;
+  setDialog: (doc: number, kind: "duplicate" | "copies" | null) => void;
+  /** The field whose name is being edited in the Fields list (F2, double-click, the context menu), and its document. */
+  renaming: (Ref & { doc: number }) | null;
+  setRenaming: (doc: number, r: Ref | null) => void;
   align: (doc: number, edge: AlignEdge) => Promise<void>;
   center: (doc: number, axis: LayoutAxis) => Promise<void>;
   distribute: (doc: number, axis: LayoutAxis) => Promise<void>;
@@ -323,9 +323,9 @@ export const useForms = create<FormsStore>((set, get) => {
       setPicked(doc, [...had.filter((h) => !refs.some((r) => samePick(r, h))), ...refs]);
     },
     dialog: null,
-    setDialog: (dialog) => set({ dialog }),
+    setDialog: (doc, kind) => set({ dialog: kind ? { doc, kind } : null }),
     renaming: null,
-    setRenaming: (renaming) => set({ renaming }),
+    setRenaming: (doc, r) => set({ renaming: r ? { doc, page: r.page, xref: r.xref } : null }),
     align: async (doc, edge) => {
       await run(doc, () => formsApi.align(doc, pairs(doc), edge), (s) => s);
     },

@@ -157,7 +157,7 @@ export function FormsPanel({ doc }: { doc: DocState }) {
       if (e.key === "F2") {
         if (cur.length === 1) {
           e.preventDefault();
-          fm().setRenaming(cur[0]);
+          fm().setRenaming(id, cur[0]);
         }
       } else if (batch.push(e.key, e.shiftKey)) {
         e.preventDefault();
@@ -298,7 +298,7 @@ export function FormsPanel({ doc }: { doc: DocState }) {
 
 function Row({ doc, f, all, active, follow, onOpen }: { doc: number; f: Field; all: Field[]; active: boolean; follow: boolean; onOpen: () => void }) {
   const ref = useRef<HTMLButtonElement>(null);
-  const renaming = useForms((s) => s.renaming && samePick(s.renaming, f));
+  const renaming = useForms((s) => s.renaming?.doc === doc && samePick(s.renaming, f));
   useEffect(() => {
     // While preparing, the properties above the list stay in view; only the fill list follows the page.
     if (active && follow) ref.current?.scrollIntoView({ block: "nearest" });
@@ -311,7 +311,7 @@ function Row({ doc, f, all, active, follow, onOpen }: { doc: number; f: Field; a
       ref={ref}
       className={`fm-row${active ? " on" : ""}`}
       onClick={(e) => (authoring && (e.metaKey || e.shiftKey || e.ctrlKey) ? fm().toggle(doc, { page: f.page, xref: f.xref }) : onOpen())}
-      onDoubleClick={() => authoring && fm().setRenaming({ page: f.page, xref: f.xref })}
+      onDoubleClick={() => authoring && fm().setRenaming(doc, { page: f.page, xref: f.xref })}
       title={authoring ? `${KIND_LABEL[f.kind]}. Double-click or F2 to rename.` : KIND_LABEL[f.kind]}
     >
       <Icon name={FIELD_ICON[f.kind]} size={15} />
@@ -402,7 +402,7 @@ function RenameRow({ doc, f, all }: { doc: number; f: Field; all: Field[] }) {
     input.current?.focus();
     input.current?.select();
   }, []);
-  const done = () => fm().setRenaming(null);
+  const done = () => fm().setRenaming(doc, null);
   const save = async (mergeInto: boolean) => {
     const c = renameCheck(all, f, text);
     if (c.kind === "same") return done();
@@ -452,12 +452,12 @@ function RenameRow({ doc, f, all }: { doc: number; f: Field; all: Field[] }) {
 function LayoutTools({ doc, pageCount, picked, fields, certified }: {
   doc: number; pageCount: number; picked: { page: number; xref: number }[]; fields: Field[]; certified: boolean;
 }) {
-  const dialog = useForms((s) => s.dialog);
+  const dialog = useForms((s) => (s.dialog?.doc === doc ? s.dialog.kind : null));
   const [note, setNote] = useState<string | null>(null);
   const anchor = anchorOf(picked);
   const anchorField = anchor ? fields.find((f) => samePick(f, anchor)) : null;
   // A dialog belongs to the field it was opened for.
-  useEffect(() => fm().setDialog(null), [anchor?.page, anchor?.xref]);
+  useEffect(() => fm().setDialog(doc, null), [doc, anchor?.page, anchor?.xref]);
   return (
     <section className="fm-props" aria-label="Layout">
       <h3>
@@ -507,7 +507,7 @@ function DuplicateDialog({ doc, pageCount, onDone }: { doc: number; pageCount: n
   const go = async () => {
     if (!pages || pages.length === 0) return;
     if (await fm().duplicate(doc, pages)) {
-      fm().setDialog(null);
+      fm().setDialog(doc, null);
       onDone(`Added to ${pages.length} page${pages.length === 1 ? "" : "s"}. It is still one field: filling one fills them all.`);
     }
   };
@@ -518,12 +518,12 @@ function DuplicateDialog({ doc, pageCount, onDone }: { doc: number; pageCount: n
         <input value={text} placeholder="2, 4-6" autoFocus onChange={(e) => setText(e.target.value)} onKeyDown={(e) => {
           e.stopPropagation();
           if (e.key === "Enter") void go();
-          else if (e.key === "Escape") fm().setDialog(null);
+          else if (e.key === "Escape") fm().setDialog(doc, null);
         }} />
       </label>
       <div className="fm-actions">
         <button className="fm-btn primary" disabled={!pages || pages.length === 0} onClick={() => void go()}>Duplicate</button>
-        <button className="fm-btn" onClick={() => fm().setDialog(null)}>Cancel</button>
+        <button className="fm-btn" onClick={() => fm().setDialog(doc, null)}>Cancel</button>
       </div>
     </div>
   );
@@ -543,7 +543,7 @@ function CopiesDialog({ doc, onDone }: { doc: number; onDone: (note: string) => 
     if (!valid) return;
     const note = await fm().copies(doc, r, c, Number(gapX), Number(gapY));
     if (note) {
-      fm().setDialog(null);
+      fm().setDialog(doc, null);
       onDone(note);
     }
   };
@@ -553,7 +553,7 @@ function CopiesDialog({ doc, onDone }: { doc: number; onDone: (note: string) => 
       <input inputMode="decimal" value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === "Enter") void go();
-        else if (e.key === "Escape") fm().setDialog(null);
+        else if (e.key === "Escape") fm().setDialog(doc, null);
       }} />
     </label>
   );
@@ -570,7 +570,7 @@ function CopiesDialog({ doc, onDone }: { doc: number; onDone: (note: string) => 
       </p>
       <div className="fm-actions">
         <button className="fm-btn primary" disabled={!valid} onClick={() => void go()}>Create</button>
-        <button className="fm-btn" onClick={() => fm().setDialog(null)}>Cancel</button>
+        <button className="fm-btn" onClick={() => fm().setDialog(doc, null)}>Cancel</button>
       </div>
     </div>
   );

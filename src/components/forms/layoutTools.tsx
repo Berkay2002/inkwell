@@ -38,15 +38,15 @@ export const LAYOUT_GROUPS: LayoutAction[][] = [
   [distribute("horizontal", "Distribute horizontally", "distributeH"), distribute("vertical", "Distribute vertically", "distributeV")],
   [size("width", "Same width", "sameWidth"), size("height", "Same height", "sameHeight"), size("both", "Same size", "sameSize")],
   [
-    { id: "duplicate", label: "Duplicate on other pages…", icon: "duplicate", op: "duplicate", run: () => openDialog("duplicate") },
-    { id: "copies", label: "Create multiple copies…", icon: "copies", op: "copies", run: () => openDialog("copies") },
+    { id: "duplicate", label: "Duplicate on other pages…", icon: "duplicate", op: "duplicate", run: (d) => openDialog(d, "duplicate") },
+    { id: "copies", label: "Create multiple copies…", icon: "copies", op: "copies", run: (d) => openDialog(d, "copies") },
   ],
 ];
 
 /** The dialogs live in the rail. */
-function openDialog(d: "duplicate" | "copies") {
+function openDialog(doc: number, d: "duplicate" | "copies") {
   fm().setOpen(true);
-  fm().setDialog(d);
+  fm().setDialog(doc, d);
 }
 
 /** Whether the document is certified: no layout tool is offered then, and the rail says why. */
@@ -72,7 +72,7 @@ export function layoutMenu(doc: number, picked: Pick[], fields: Field[], certifi
     disabled: layoutReason("rename", picked, fields, certified) ?? undefined,
     onSelect: () => {
       fm().setOpen(true);
-      fm().setRenaming(anchor ?? null);
+      fm().setRenaming(doc, anchor ?? null);
     },
   });
   out.push({

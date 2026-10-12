@@ -179,6 +179,21 @@ describe("layout actions in the store", () => {
     expect(await useForms.getState().rename(1, p(1), "B", false)).toBe("A check box named B already exists.");
   });
 
+  it("the open dialog and the field being renamed belong to their document", () => {
+    const st = useForms.getState();
+    st.setDialog(1, "copies");
+    st.setRenaming(1, p(3));
+    expect(useForms.getState().dialog).toEqual({ doc: 1, kind: "copies" });
+    expect(useForms.getState().renaming).toEqual({ doc: 1, page: 0, xref: 3 });
+    // Another document's panel reads nothing from them.
+    expect(useForms.getState().dialog?.doc === 2).toBe(false);
+    expect(useForms.getState().renaming?.doc === 2).toBe(false);
+    st.setDialog(2, null);
+    st.setRenaming(2, null);
+    expect(useForms.getState().dialog).toBeNull();
+    expect(useForms.getState().renaming).toBeNull();
+  });
+
   it("nudge goes out once with the summed distance", async () => {
     await setup();
     useForms.getState().select(1, p(2));
