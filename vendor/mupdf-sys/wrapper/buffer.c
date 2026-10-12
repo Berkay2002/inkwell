@@ -38,3 +38,10 @@ fz_buffer *mupdf_buffer_from_base64(fz_context *ctx, const char *s, mupdf_error_
 {
     TRY_CATCH(fz_buffer*, NULL, fz_new_buffer_from_base64(ctx, s, strlen(s)));
 }
+
+/* Inkwell: CCITT Group 4 of a 1-bit bitmap (rows padded to bytes, 1 = white, 0 = black: PDF's DeviceGray 1bpc
+   with the default Decode, and /BlackIs1 false). Used to write cleaned-up scanned pages back as G4. */
+fz_buffer *mupdf_buffer_ccitt_g4(fz_context *ctx, const unsigned char *data, int columns, int rows, size_t stride, mupdf_error_t **errptr)
+{
+    TRY_CATCH(fz_buffer*, NULL, fz_compress_ccitt_fax_g4(ctx, data, columns, rows, (ptrdiff_t)stride));
+}

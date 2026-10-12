@@ -79,7 +79,7 @@ impl Recognizer for Stub {
         std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
         let words = [("Invoice", [72.0, 100.0, 120.0, 114.0]), ("Total", [126.0, 100.0, 166.0, 114.0])];
         Ok(RawPage {
-            lines: vec![RawLine { words: words.iter().map(|(t, r)| RawWord { text: t.to_string(), rect: *r }).collect() }],
+            lines: vec![RawLine { words: words.iter().map(|(t, r)| RawWord { text: t.to_string(), rect: *r, conf: None }).collect() }],
             angle_deg: None,
         })
     }
@@ -101,6 +101,9 @@ fn req(doc: DocId) -> OcrRequest {
         languages: vec![],
         force: false,
         backend: BackendChoice::Windows,
+        style: ocr::Style::Searchable,
+        dpi: None,
+        font: ocr::FontPref::Auto,
         save_to: None,
     }
 }
@@ -386,4 +389,171 @@ fn a_cancel_before_the_job_registers_is_not_lost() {
     assert!(g.cancel.load(Ordering::Relaxed));
     drop(g);
     assert!(!jobs.begin(7).cancel.load(Ordering::Relaxed));
+}
+
+/// A one-page scan: a 150 dpi 8-bit gray picture over the whole Letter page. `marker` sits in the
+/// picture's bytes (uncompressed) so a test can tell whether those pixels are still in a file.
+fn image_pdf(marker: &[u8], catalog_extra: &str) -> Vec<u8> {
+    let (w, h) = (1275usize, 1650usize);
+    let mut px = vec![255u8; w * h];
+    // Two dark blocks where the stub reads "Invoice" and "Total".
+    for (x0, x1) in [(72usize, 120usize), (126, 166)] {
+        for y in 100..114 {
+            for x in x0..x1 {
+                px[y * w + x] = 20;
+            }
+        }
+    }
+    px[(h - 4) * w..(h - 4) * w + marker.len()].copy_from_slice(marker);
+    let content = b"q 612 0 0 792 0 0 cm /Im0 Do Q";
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offs = Vec::new();
+    let mut obj = |out: &mut Vec<u8>, head: String, body: Option<&[u8]>| {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{head}\n", offs.len()).as_bytes());
+        if let Some(b) = body {
+            out.extend_from_slice(b"stream\n");
+            out.extend_from_slice(b);
+            out.extend_from_slice(b"\nendstream\n");
+        }
+        out.extend_from_slice(b"endobj\n");
+    };
+    obj(&mut out, format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>"), None);
+    obj(&mut out, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), None);
+    obj(
+        &mut out,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>".into(),
+        None,
+    );
+    obj(&mut out, format!("<< /Length {} >>", content.len()), Some(content));
+    obj(
+        &mut out,
+        format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>", px.len()),
+        Some(&px),
+    );
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offs.len() + 1).as_bytes());
+    for o in &offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offs.len() + 1).as_bytes(),
+    );
+    out
+}
+
+const MARKER: [u8; 48] = *b"inkwell-marker-0123456789-the-old-scan-pixels-xy";
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+fn open_bytes(d: &Path, name: &str, bytes: Vec<u8>) -> (Arc<Engine>, DocId, String) {
+    let p = d.join(name);
+    std::fs::write(&p, bytes).unwrap();
+    let path = p.to_string_lossy().into_owned();
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    (eng, id, path)
+}
+
+#[test]
+fn editable_text_replaces_the_picture_in_the_file_and_undo_brings_it_back() {
+    let d = dir("editable");
+    let (eng, id, path) = open_bytes(&d, "scan.pdf", image_pdf(&MARKER, ""));
+    assert!(contains(&std::fs::read(&path).unwrap(), &MARKER));
+
+    let r = OcrRequest { style: ocr::Style::Editable, dpi: Some(160), ..req(id) };
+    assert_eq!(options_for(&eng, &r).unwrap().dpi, 150, "any other dpi snaps to the nearest offered one");
+    let out = run_ocr(&eng, &r, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    let ed = out.report.editable.as_ref().expect("an editable-text report");
+    assert_eq!(ed.pages_converted, 1, "{ed:?}");
+    assert!(ed.words_converted >= 2, "{ed:?}");
+    assert_eq!(out.state.unwrap().undo.as_deref(), Some("Recognize text as editable text (1 page)"));
+    let text = text_of(&eng, id, 0);
+    assert!(text.contains("Invoice") && text.contains("Total"), "{text:?}");
+
+    // Saved, the file no longer carries the replaced pixels (the old picture is not just hidden)...
+    eng.save(id, None).unwrap();
+    assert!(!contains(&std::fs::read(&path).unwrap(), &MARKER));
+
+    // ...and one undo is the whole original page again, picture and all.
+    let st = eng.undo(id).unwrap();
+    assert!(text_of(&eng, id, 0).is_empty());
+    assert!(st.dirty);
+    eng.save(id, None).unwrap();
+    assert!(contains(&std::fs::read(&path).unwrap(), &MARKER));
+    assert_eq!(eng.history(id).unwrap().len(), 2);
+}
+
+#[test]
+fn a_signed_field_without_the_flag_and_a_certification_are_both_seen() {
+    let d = dir("signed-field");
+    // A signature field with a value but no /SigFlags: only the field tree shows the file is signed.
+    let field = "/AcroForm << /Fields [ << /FT /Sig /T (Sig1) /V << /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Contents <00> >> >> ] >>";
+    let (eng, id, _) = open_bytes(&d, "field.pdf", image_pdf(&MARKER, field));
+    for style in [ocr::Style::Editable, ocr::Style::Cleaned] {
+        let e = run_ocr(&eng, &OcrRequest { style, ..req(id) }, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(e.0, ocr::SIGNED, "{style:?}");
+    }
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+    let out = run_ocr(&eng, &req(id), None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(out.report.warnings.iter().any(|w| w.contains("signed")), "{:?}", out.report.warnings);
+
+    // A certified one takes nothing, not even the searchable layer.
+    let cert = "/Perms << /DocMDP << /Type /Sig /Filter /Adobe.PPKLite /Contents <00>                 /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 1 >> >> ] >> >>";
+    let (eng, id, _) = open_bytes(&d, "cert.pdf", image_pdf(&MARKER, cert));
+    for style in [ocr::Style::Searchable, ocr::Style::Cleaned, ocr::Style::Editable] {
+        let e = run_ocr(&eng, &OcrRequest { style, ..req(id) }, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(e.0, ocr::CERTIFIED, "{style:?}");
+        let e = ocr_preview(&eng, &OcrRequest { style, ..req(id) }, 0, 400, &Stub::new(), &AtomicBool::new(false)).err().expect("refused");
+        assert_eq!(e.0, ocr::CERTIFIED, "preview {style:?}");
+    }
+    let to = d.join("copy.pdf");
+    let e = run_ocr(&eng, &req(id), Some(&to), &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(e.0, ocr::CERTIFIED, "a copy is refused too");
+    assert!(!to.exists());
+    let st = eng.edit_state(id).unwrap();
+    assert!(!st.dirty && st.undo.is_none());
+}
+
+#[test]
+fn a_cancel_while_the_pictures_are_written_leaves_the_document_as_it_was() {
+    for style in [ocr::Style::Editable, ocr::Style::Cleaned] {
+        let d = dir(&format!("cancel-apply-{style:?}"));
+        let (eng, id, path) = open_bytes(&d, "scan.pdf", image_pdf(&MARKER, ""));
+        let cancel = AtomicBool::new(false);
+        let writing = AtomicU32::new(0);
+        let on = |p: ocr::Progress| {
+            if p.writing {
+                // The first page is being written: the user presses Cancel.
+                writing.fetch_add(1, Ordering::SeqCst);
+                cancel.store(true, Ordering::SeqCst);
+            }
+        };
+        let e = run_ocr(&eng, &OcrRequest { style, ..req(id) }, None, &Stub::new(), &on, &cancel).unwrap_err();
+        assert_eq!(e.0, "cancelled", "{style:?}");
+        assert!(writing.load(Ordering::SeqCst) > 0, "the apply stage reports its pages ({style:?})");
+        let st = eng.edit_state(id).unwrap();
+        assert!(!st.dirty && st.undo.is_none(), "{style:?}: no step was made");
+        assert!(text_of(&eng, id, 0).is_empty(), "{style:?}: nothing was added");
+        eng.save(id, None).unwrap();
+        assert!(contains(&std::fs::read(&path).unwrap(), &MARKER), "{style:?}: the picture is still there");
+    }
+}
+
+#[test]
+fn a_signed_document_is_not_changed_by_the_picture_styles() {
+    let d = dir("editable-signed");
+    let (eng, id, _) = open_bytes(&d, "signed.pdf", image_pdf(&MARKER, "/AcroForm << /SigFlags 3 /Fields [] >>"));
+    for style in [ocr::Style::Editable, ocr::Style::Cleaned] {
+        let r = OcrRequest { style, ..req(id) };
+        let e = run_ocr(&eng, &r, None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(e.0, ocr::SIGNED);
+    }
+    let st = eng.edit_state(id).unwrap();
+    assert!(!st.dirty && st.undo.is_none());
+    // The searchable image style only adds an invisible layer and says the signature will not validate.
+    let out = run_ocr(&eng, &req(id), None, &Stub::new(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    assert!(!out.report.warnings.is_empty());
 }

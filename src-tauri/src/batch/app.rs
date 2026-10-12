@@ -11,11 +11,11 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, Window};
 
 use super::action::{Action, Issue};
-use super::run::{self, BatchError, Event, Report};
+use super::run::{self, BatchError, Event, Preview, Report};
 use super::steps::Env;
 use super::store::{self, Store, StoreError};
 use crate::engine::Engine;
-use crate::paths::Paths;
+use crate::paths::{FileRef, Paths};
 use crate::tools::paths::ToolPaths;
 use crate::tools::{Jobs, ToolError};
 
@@ -120,6 +120,55 @@ pub async fn batch_export(window: Window, reg: Reg<'_>, action: Action, save_to:
 pub async fn batch_validate(app: AppHandle, eng: Eng<'_>, tess: Tess<'_>, action: Action) -> Result<Vec<Issue>, ToolError> {
     let env = env_of(&app, eng.inner(), tess.tesseract());
     blocking(move || Ok(action.validate(&env))).await
+}
+
+/// The most PDFs a folder gives a batch (a run is one file at a time; a longer list is a job for a script).
+const FOLDER_MAX: usize = 500;
+
+/// What a folder holds for a batch: `folder` is an open token of a directory (`pick_search_folder`), the
+/// PDFs in it come back as open tokens, in order, at most [`FOLDER_MAX`]. `capped` says the list was cut.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderFiles {
+    pub files: Vec<FileRef>,
+    pub capped: bool,
+}
+
+#[tauri::command]
+pub async fn batch_folder_files(window: Window, reg: Reg<'_>, folder: String, recursive: bool) -> Result<FolderFiles, ToolError> {
+    let dir = PathBuf::from(reg.open(window.label(), &folder).map_err(|e| ToolError(e.to_string()))?);
+    blocking(move || {
+        if !dir.is_dir() {
+            return Err(ToolError(format!("{} is not a folder.", dir.display())));
+        }
+        let mut l = crate::search::files::list_pdfs(&dir, recursive, &std::sync::atomic::AtomicBool::new(false));
+        let capped = l.capped || l.files.len() > FOLDER_MAX;
+        l.files.truncate(FOLDER_MAX);
+        let reg = window.state::<Paths>();
+        let files = l.files.into_iter().map(|p| reg.issue_open(window.label(), p.to_string_lossy().into_owned())).collect();
+        Ok(FolderFiles { files, capped })
+    })
+    .await
+}
+
+/// A dry run over the files (open tokens): per file, whether it would run or be skipped and why, and the
+/// names it would write. Writes nothing, spends no token and starts no job. A folder result is chosen
+/// when the run starts, so the preview does not take one.
+#[tauri::command]
+pub async fn batch_preview(
+    window: Window,
+    app: AppHandle,
+    eng: Eng<'_>,
+    reg: Reg<'_>,
+    tess: Tess<'_>,
+    action: Action,
+    files: Vec<String>,
+) -> Result<Preview, ToolError> {
+    let label = window.label().to_string();
+    let paths: Vec<PathBuf> =
+        files.iter().map(|t| reg.open(&label, t).map(PathBuf::from)).collect::<Result<_, _>>().map_err(|e| ToolError(e.to_string()))?;
+    let env = env_of(&app, eng.inner(), tess.tesseract());
+    blocking(move || Ok(run::preview(&action, &paths, &env)?)).await
 }
 
 /// Runs `action` over the files (open tokens). `folder`: a `pick_folder` token, needed when the output
