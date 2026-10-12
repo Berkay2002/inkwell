@@ -44,7 +44,8 @@ document: pages, resources, fonts and streams are read and written as MuPDF obje
 - Each `text_edit` is one edit-core step (`Engine::apply_removing`): one undo step labelled "Edit text on p. N",
   "Format text …", "Move text …" or "Resize text box …", kept by Save, recorded in history. A document with text
   edits is saved as a full, garbage-collected rewrite (not an incremental update), so the old text is not left in the
-  file's bytes.
+  file's bytes A signed document is the exception:
+  its save stays incremental (the signed bytes are not rewritten, the old text stays in the file) and the UI says so.
 - `fallbacks: { font, embedded, reason }[]` when a run's font could not show its text (the UI's yellow `!`), one per
   font used instead; `reason` names the original font and the first character it lacks. `fallback` is the first.
 
