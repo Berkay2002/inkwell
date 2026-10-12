@@ -124,7 +124,7 @@ file the user must pick (picture marks, insert image, merge).
 
 Tests (after merging main 0a03617, which brought the Claude provider and the shared `gate.rs`):
 
-- `cargo test --lib` full suite, `cargo test --lib ai::` 161 passed, `pnpm tsc --noEmit` clean, `pnpm vitest run`
+- `cargo test --lib` full suite 1269 passed, 0 failed, 7 ignored; `ai::` 161 passed; `pnpm tsc --noEmit` clean, `pnpm vitest run`
   711 passed (46 files), debug exe built from the merged tree.
 
 Live, through the real app (debug exe, scratch data dir, a copy of `docs/study/samples/redact-source.pdf`,
