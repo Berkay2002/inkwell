@@ -4,6 +4,7 @@
 //! `add_watermark`, `add_background`, `place_tagged`, `remove_marks`, `marks_present`), rebuilt on
 //! MuPDF's object API.
 
+use super::fit::{self, foreign_sections, may_have_foreign, set_shrink, text_bands};
 use super::geometry::{M, View, n};
 use super::text::{Measure, face, first_undrawable, literal, undrawable_message};
 use super::{AddRequest, Background, Bates, Date, Mark, MarkKind, Picture, Rgb, Style, Watermark, bates_fits, bates_text, expand};
@@ -51,7 +52,7 @@ pub(super) fn contents_list(page: &PdfObject) -> Result<Vec<PdfObject>> {
     Ok(out)
 }
 
-fn set_contents(doc: &PdfDocument, page: &mut PdfObject, list: Vec<PdfObject>) -> Result<()> {
+pub(super) fn set_contents(doc: &PdfDocument, page: &mut PdfObject, list: Vec<PdfObject>) -> Result<()> {
     let mut a = doc.new_array_with_capacity(list.len() as i32 + 1)?;
     for o in list {
         a.array_push(o)?;
@@ -61,16 +62,16 @@ fn set_contents(doc: &PdfDocument, page: &mut PdfObject, list: Vec<PdfObject>) -
 }
 
 /// The `/PCMark` tag in a content stream's dictionary: a mark kind, or `Wrap` for the q/Q wrapper.
-fn tag_of(o: &PdfObject) -> Option<String> {
+pub(super) fn tag_of(o: &PdfObject) -> Option<String> {
     let v = o.get_dict("PCMark").ok().flatten()?;
     v.as_name().ok().map(|n| String::from_utf8_lossy(&n).into_owned())
 }
 
-fn is_wrap(o: &PdfObject) -> bool {
+pub(super) fn is_wrap(o: &PdfObject) -> bool {
     tag_of(o).as_deref() == Some("Wrap")
 }
 
-fn add_stream(doc: &mut PdfDocument, bytes: &[u8], tag: &str, spec: Option<&str>) -> Result<PdfObject> {
+pub(super) fn add_stream(doc: &mut PdfDocument, bytes: &[u8], tag: &str, spec: Option<&str>) -> Result<PdfObject> {
     let mut dict = doc.new_dict()?;
     dict.dict_put("PCMark", name(tag)?)?;
     if let Some(s) = spec {
@@ -102,7 +103,8 @@ fn place(doc: &mut PdfDocument, index: u32, tag: &str, content: &[u8], behind: b
                 }
             }
             let (opens, closes) = q_balance(&data);
-            let open = add_stream(doc, format!("{}q %Inkwell\n", "q\n".repeat(opens)).as_bytes(), "Wrap", None)?;
+            // `q %Inkwell` comes first: a shrink `cm` goes right after it, below the balancing `q`s a stray `Q` pops.
+            let open = add_stream(doc, format!("q %Inkwell\n{}", "q\n".repeat(opens)).as_bytes(), "Wrap", None)?;
             let close = add_stream(doc, format!("{}Q %Inkwell\n", "Q\n".repeat(closes)).as_bytes(), "Wrap", None)?;
             // Marks behind the page stay outside the wrapper.
             let split = list.iter().position(|o| tag_of(o).is_none()).unwrap_or(list.len());
@@ -539,7 +541,7 @@ fn spec_mark(mark: &Mark) -> Mark {
     }
 }
 
-fn check_pages(pages: &[u32], count: u32) -> Result<Vec<u32>> {
+pub(super) fn check_pages(pages: &[u32], count: u32) -> Result<Vec<u32>> {
     let set: BTreeSet<u32> = pages.iter().copied().collect();
     if set.is_empty() {
         return Err(invalid("no pages selected"));
@@ -660,6 +662,9 @@ pub fn add(doc: &mut PdfDocument, req: &AddRequest) -> Result<Vec<u32>> {
                 let font = shared.font(doc, i, &hf.style)?;
                 if let Some(content) = text_marks(&mut m, &view, MarkKind::HeaderFooter, &texts, &hf.style, &hf.margins, &font) {
                     place(doc, i, MarkKind::HeaderFooter.tag(), &content, false, spec)?;
+                    if hf.shrink {
+                        fit::apply_shrink(doc, i, MarkKind::HeaderFooter, text_bands(&texts, &hf.style, &hf.margins))?;
+                    }
                 }
             }
         }
@@ -671,6 +676,9 @@ pub fn add(doc: &mut PdfDocument, req: &AddRequest) -> Result<Vec<u32>> {
                 let font = shared.font(doc, i, &b.style)?;
                 if let Some(content) = text_marks(&mut m, &view, MarkKind::Bates, &texts, &b.style, &b.margins, &font) {
                     place(doc, i, MarkKind::Bates.tag(), &content, false, spec)?;
+                    if b.shrink {
+                        fit::apply_shrink(doc, i, MarkKind::Bates, text_bands(&texts, &b.style, &b.margins))?;
+                    }
                 }
             }
         }
@@ -883,7 +891,7 @@ fn inline_sections(data: &[u8]) -> Vec<(String, Range<usize>)> {
     out
 }
 
-fn has_tag(data: &[u8]) -> bool {
+pub(super) fn has_tag(data: &[u8]) -> bool {
     data.windows(6).any(|w| w == b"PCMark")
 }
 
@@ -1021,6 +1029,11 @@ pub fn remove(doc: &mut PdfDocument, kind: MarkKind, pages: &[u32]) -> Result<us
             kept.retain(|o| !is_wrap(o));
         }
         if changed || kept.len() != before {
+            // What these marks asked of the page's scale goes with them (the others' stays as it was).
+            if matches!(kind, MarkKind::HeaderFooter | MarkKind::Bates) {
+                let view = View::of(&doc.load_pdf_page(i as i32)?)?;
+                kept = set_shrink(doc, kept, &view, kind, None)?;
+            }
             set_contents(doc, &mut page, kept)?;
             clean_resources(doc, i)?;
         }
@@ -1042,18 +1055,40 @@ pub struct KindInfo {
     pub mark: Option<serde_json::Value>,
 }
 
+/// A kind of mark another app made (found by its marked content, not by our tag): only Remove.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignInfo {
+    pub kind: MarkKind,
+    /// 0-based pages carrying it.
+    pub pages: Vec<u32>,
+    /// The pages where a section cannot be cut out without changing the rest of the page.
+    pub stuck: Vec<u32>,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Info {
     pub kinds: Vec<KindInfo>,
+    pub foreign: Vec<ForeignInfo>,
+    /// 0-based pages with comments, links or form fields: a shrink does not move them.
+    pub annotated: Vec<u32>,
+    pub signed: bool,
+    /// A certified document is left as it is: Add, Update and Remove are refused.
+    pub certified: bool,
 }
 
 /// Which marks the document has, on which pages, and the settings they were made with.
 pub fn info(doc: &PdfDocument) -> Result<Info> {
     let count = doc.page_count()?.max(0);
     let mut found: Vec<KindInfo> = Vec::new();
+    let mut foreign: Vec<ForeignInfo> = Vec::new();
+    let mut annotated: Vec<u32> = Vec::new();
     for i in 0..count {
         let page = doc.find_page(i)?;
+        if page.get_dict("Annots")?.is_some_and(|a| a.is_array().unwrap_or(false) && a.len().unwrap_or(0) > 0) {
+            annotated.push(i as u32);
+        }
         // (kind, the settings it was made with when its stream says)
         let mut seen: Vec<(MarkKind, Option<serde_json::Value>)> = Vec::new();
         for s in contents_list(&page)? {
@@ -1071,6 +1106,24 @@ pub fn info(doc: &PdfDocument) -> Result<Info> {
                     for (t, _) in inline_sections(&data) {
                         if let Some(kind) = MarkKind::from_tag(&t) {
                             seen.push((kind, None));
+                        }
+                    }
+                }
+                if may_have_foreign(&data) {
+                    for f in foreign_sections(&data) {
+                        let pos = match foreign.iter().position(|k| k.kind == f.kind) {
+                            Some(p) => p,
+                            None => {
+                                foreign.push(ForeignInfo { kind: f.kind, pages: vec![], stuck: vec![] });
+                                foreign.len() - 1
+                            }
+                        };
+                        let k = &mut foreign[pos];
+                        if k.pages.last() != Some(&(i as u32)) {
+                            k.pages.push(i as u32);
+                        }
+                        if !f.clean && k.stuck.last() != Some(&(i as u32)) {
+                            k.stuck.push(i as u32);
                         }
                     }
                 }
@@ -1093,7 +1146,8 @@ pub fn info(doc: &PdfDocument) -> Result<Info> {
             }
         }
     }
-    Ok(Info { kinds: found })
+    let certified = crate::outline::certified(doc).map_or(true, |c| c.is_some());
+    Ok(Info { kinds: found, foreign, annotated, signed: crate::outline::signed(doc), certified })
 }
 
 // ---- Bates numbering across files -------------------------------------------------------------------

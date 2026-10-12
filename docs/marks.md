@@ -1,7 +1,7 @@
 # Page marks: header & footer, watermark, background, Bates numbering
 
 Code: `src-tauri/src/marks/` (`mod.rs` the types and the `<<…>>` tokens, `apply.rs` the writer, reader and Bates
-files, `geometry.rs` display space, `text.rs` fonts and widths, `app.rs` the commands, `tests.rs`), the edit-core
+files, `geometry.rs` display space, `fit.rs` the shrink and other apps' marks, `text.rs` fonts and widths, `app.rs` the commands, `tests.rs`), the edit-core
 hooks in `src-tauri/src/engine/edit.rs`, UI in `src/components/MarksPanel.tsx`, `src/components/MarkPreview.tsx`,
 `src/lib/marksStore.ts` and `src/components/marks.css`. Screens: `docs/screens/marks/` (`node
 scripts/marks-shots.mjs`). Study of Acrobat's marks: `docs/study/15-page-marks.md` (not observed). Design round:
@@ -30,6 +30,10 @@ scripts/marks-shots.mjs`). Study of Acrobat's marks: `docs/study/15-page-marks.m
   remove makes the save a full rewrite so the replaced content is gone from the file. Remove also takes out the
   `IWH…` fonts, `IWGS…` graphics states, `IWPic…` pictures and `IWOC…` layer names that no content uses any
   more (the group goes with the last watermark).
+- **Shrink pages to fit the margins** (header & footer and Bates): the page's content is scaled down so the
+  marks do not sit on top of it, see "Shrink" below.
+- **Other apps' marks**: a header, footer, watermark or background that another app wrote is listed in "Has:" as
+  "Header/footer from another app" and so on, with Remove only (no Update: there are no settings to read back).
 - **Preview**: `MarkPreview` draws the open tab over every affected page as SVG inside the page's own space (zoom
   and rotation apply), with the same margins, baselines and fitted size as the engine. Text slots are outlined
   with a dashed accent so it reads as a preview. A picture is shown as a labelled box (its pixels are not read
@@ -91,10 +95,59 @@ maps that to user space, so the same numbers hold on rotated and cropped pages (
   are not touched. An input that is open in Inkwell is refused (its unsaved changes would be left out of the
   copy): save and close it first. A failure after the first copy names the copies already written.
 
+## Shrink (`fit.rs`)
+- The box is the page less the bands the marks use: top = top margin + the height of the lines in the three top
+  slots (0 when they are empty), bottom likewise, left and right = the left and right margins as set. The scale is
+  `s = min(1, (h − top − bottom) / h, (w − left − right) / w)`, never up, and the content is centred in the box.
+  The left and right margins are read literally, so the default 72 pt on a Letter page gives about 0.76 (the
+  page shrinks in both directions, not only down). `s < 0.1` is refused ("The margins leave too little room…").
+- Written as one section in the opening `q %Inkwell` wrapper stream, before the balancing `q`s so a stray `Q` in
+  the page's content cannot undo it: `/Artifact <</PCMark /Shrink /HeaderFooter [t b l r] /Bates [t b l r]>> BDC`,
+  the `cm` (display space scaled and moved, mapped through `View::matrix`, so `/Rotate` and crop boxes work), a
+  clip `x y w h re W n` to the visible area (what a crop box hid stays hidden), `EMC`. The dictionary lists, per
+  kind of mark, the bands it asked for; the `cm` is rebuilt from the largest of each band whenever a mark is added,
+  updated or removed. `Update` keeps it (the checkbox comes back from `/IWSpec`), unticking it gives the page back,
+  and removing the last mark that asked for it takes the section out, and the wrapper with it when no mark on top
+  is left (the content stream is then the original bytes). The entries are also read from a merged stream (a text
+  edit or autotagging rewrote the page's streams).
+- Comments, links and form fields are **not** moved (their rectangles are page-level): the sheet says "Comments
+  and links keep their place." when a selected page has annotations (`info().annotated`). The preview does not
+  show the shrink.
+- Tests: `shrink_puts_the_content_between_the_bands_on_every_rotation_and_box`,
+  `shrink_with_nothing_to_clear_does_not_scale_up`, `shrink_clips_to_the_visible_area`,
+  `shrink_survives_unbalanced_content_and_a_stray_q`, `update_keeps_the_shrink_and_unticking_it_gives_the_page_back`,
+  `removing_the_mark_takes_the_cm_and_the_wrapper_out`, `two_kinds_share_the_page_and_each_removal_recomputes_it`,
+  `a_shrink_is_found_again_after_the_streams_were_merged`, `margins_that_leave_no_room_are_refused`.
+
+## Other apps' marks (`fit.rs`)
+- Found by the marked content alone (no `/PCMark`): `/Artifact <</Type /Pagination /Subtype …>> BDC … EMC` with
+  Header, Footer or PageNum (header/footer), Watermark (watermark), Bates (Bates numbering) or no subtype
+  (header/footer); and `/Artifact <</Type /Background …>>` (background). `LineNum`, `Redaction` and unknown
+  subtypes, `/Layout`, `/Page` artifacts and untagged content are never touched. Marked content that carries our
+  `/PCMark` is ours and is not listed twice.
+- Remove cuts exactly `BDC … EMC`, balanced (nested `BDC`/`BMC`/`EMC` inside are part of it), when the section is
+  clean: `q`/`Q` and `BT`/`ET` balance inside it and it has no `cm` at depth 0 (its drawing cannot change the
+  state the page's own content continues in). A section that is not clean, or whose `BDC` and `EMC` are in
+  different streams, is left and counted as "stuck" (the row says so); when every page is stuck the step is
+  refused with a sentence and nothing changes. Certified documents are refused, signed ones stay incremental.
+- Known limits: colour, `gs` and `Tf` set at depth 0 inside a cut section would have leaked into the following
+  content in the original too, so they are left as they were written (not tracked); property lists given by
+  name (`/Artifact /MC0 BDC`) are not read; sections inside Form XObjects are not handled; marks only in
+  Acrobat's `/PieceInfo` are not seen.
+- Tests: `another_apps_header_is_found_and_cut_and_the_body_stays`,
+  `another_apps_watermark_and_background_are_their_own_rows`,
+  `a_section_that_cannot_be_cut_cleanly_is_left_and_reported`, `our_marks_and_another_apps_do_not_mix`.
+
+## Certified and signed
+Both new paths follow the rule of the other marks: a certified document refuses Add, Update and Remove
+("This document is certified…", the controls are disabled with that reason, `info().certified`), a signed one
+keeps the save incremental (`apply_custom(…, false)`) and the panel says the signature will show the change
+(`info().signed`). Tests: `a_certified_document_refuses_the_shrink_and_the_removal_of_another_apps_marks`,
+`a_signed_document_keeps_its_signed_bytes_through_a_shrink_and_a_removal`.
+
 ## Not done
-- **Shrink document to avoid overlap**: not built (needs the content's extents; margins are the control instead).
-- **`/PieceInfo`** in Acrobat's own format: unknown, see the study. Marks made by Acrobat are not recognised by
-  Update/Remove here (only streams tagged `/PCMark`); the other way round Acrobat sees ours as page content.
+- **`/PieceInfo`** in Acrobat's own format: unknown, see the study. Marks made by other apps are found by their marked
+  content (Remove only, see above); Acrobat's own files were not checked, the other way round Acrobat sees ours as page content.
 - Picture sources are PNG, JPEG (and what MuPDF decodes) or a PDF page; no clipboard source. Update of a picture
   mark asks for the picture again (the file only remembers its name).
 - Dates are taken when the button is pressed; a file is not re-dated later.

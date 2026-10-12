@@ -675,7 +675,15 @@ export interface MarkPicture {
 export type SixTexts = [string, string, string, string, string, string];
 
 export type PageMark =
-  | { kind: "headerFooter"; text: SixTexts; style: MarkStyle; margins: [number, number, number, number]; startNumber: number }
+  | {
+      kind: "headerFooter";
+      text: SixTexts;
+      style: MarkStyle;
+      margins: [number, number, number, number];
+      startNumber: number;
+      /** Scale the page's content down to fit between the margins. Files made before this had none. */
+      shrink?: boolean;
+    }
   | {
       kind: "watermark";
       text: string;
@@ -699,6 +707,7 @@ export type PageMark =
       slot: number;
       style: MarkStyle;
       margins: [number, number, number, number];
+      shrink?: boolean;
     };
 
 export interface MarkDate {
@@ -730,12 +739,30 @@ export interface BatesFileResult {
   last: number;
 }
 
-export const marksInfo = (doc: number) => invoke<{ kinds: MarkKindInfo[] }>("marks_info", { doc });
+/** A mark another app made (found by its marked content): it can only be removed. */
+export interface ForeignMarkInfo {
+  kind: MarkKind;
+  pages: number[];
+  /** The pages where it cannot be cut out without changing the rest of the page. */
+  stuck: number[];
+}
+
+export interface MarksInfo {
+  kinds: MarkKindInfo[];
+  foreign: ForeignMarkInfo[];
+  /** 0-based pages with comments, links or fields: a shrink does not move them. */
+  annotated: number[];
+  signed: boolean;
+  /** Certified: Add, Update and Remove are refused. */
+  certified: boolean;
+}
+
+export const marksInfo = (doc: number) => invoke<MarksInfo>("marks_info", { doc });
 /** One undo step: Add, or Update when `replace`. */
 export const marksAdd = (doc: number, request: MarkRequest) => invoke<EditState>("marks_add", { doc, request });
 /** One undo step; all pages when `pages` is omitted. */
-export const marksRemove = (doc: number, kind: MarkKind, pages?: number[]) =>
-  invoke<EditState>("marks_remove", { doc, kind, pages: pages ?? null });
+export const marksRemove = (doc: number, kind: MarkKind, pages?: number[], foreign?: boolean) =>
+  invoke<EditState>("marks_remove", { doc, kind, pages: pages ?? null, foreign: foreign ?? false });
 /** Writes numbered copies of the files (open tokens) into a folder (`pickFolder` token); the originals stay as they are. */
 export const marksBatesFiles = (request: { files: string[]; bates: Extract<PageMark, { kind: "bates" }>; date: MarkDate; folder: string }) =>
   invoke<BatesFileResult[]>("marks_bates_files", { request: { ...request, bates: stripKind(request.bates) } });

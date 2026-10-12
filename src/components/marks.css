@@ -42,6 +42,13 @@
 .mk-has-row .tl-link:disabled {
   opacity: 0.45;
 }
+.mk-has-other {
+  flex-wrap: wrap;
+}
+.mk-has-note {
+  flex-basis: 100%;
+  margin: 0;
+}
 .mk-slots {
   display: flex;
   flex-direction: column;

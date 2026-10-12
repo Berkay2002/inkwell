@@ -17,7 +17,11 @@ fn dir(test: &str) -> PathBuf {
 
 /// One page, `extra` page keys (`/Rotate 90`, a crop box…), the word "Body" in the middle.
 fn one_page(extra: &str) -> Vec<u8> {
-    let content = "BT /F1 12 Tf 250 400 Td (Body) Tj ET";
+    page_with(extra, "BT /F1 12 Tf 250 400 Td (Body) Tj ET")
+}
+
+/// One page with `content` as its only stream (Helvetica is /F1).
+fn page_with(extra: &str, content: &str) -> Vec<u8> {
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
@@ -653,4 +657,405 @@ fn the_file_remembers_a_picture_by_its_name_only() {
     let found = info(&PdfDocument::from_bytes(&bytes).unwrap()).unwrap();
     let mark = found.kinds[0].mark.clone().unwrap();
     assert_eq!(mark["picture"]["file"], "logo.png");
+}
+
+// ---- shrink to fit the margins ----------------------------------------------------------------------
+
+/// Words in the four corners of the user-space box `[x0, y0, x1, y1]`, 12 pt, a little inside it.
+fn corners(b: [f64; 4]) -> String {
+    let [x0, y0, x1, y1] = b;
+    let at = |x: f64, y: f64, t: &str| format!("BT /F1 12 Tf {x} {y} Td ({t}) Tj ET\n");
+    [at(x0 + 4.0, y0 + 5.0, "LL"), at(x0 + 4.0, y1 - 15.0, "UL"), at(x1 - 24.0, y0 + 5.0, "LR"), at(x1 - 24.0, y1 - 15.0, "UR")].concat()
+}
+
+/// A header and a footer text, so both bands are used.
+fn top_and_bottom(shrink: bool) -> HeaderFooter {
+    let mut h = HeaderFooter::default();
+    h.text[1] = "TC".into();
+    h.text[4] = "BC".into();
+    h.shrink = shrink;
+    h
+}
+
+fn inside(b: Rect, bounds: [f32; 4], what: &str) {
+    let [l, t, r, d] = bounds;
+    assert!(b.x0 >= l - 2.0 && b.x1 <= r + 2.0 && b.y0 >= t - 2.0 && b.y1 <= d + 2.0, "{what}: {b:?} is not inside {bounds:?}");
+}
+
+/// Dark pixels of the page at 72 dpi inside `[x0, y0, x1, y1]` (page pixels, y down).
+fn ink_in(doc: &PdfDocument, page: i32, [x0, y0, x1, y1]: [usize; 4]) -> usize {
+    let pm = doc.load_page(page).unwrap().to_pixmap(&Matrix::new_scale(1.0, 1.0), &Colorspace::device_gray(), false, false).unwrap();
+    let (w, n) = (pm.width() as usize, pm.n() as usize);
+    let s = pm.samples();
+    let mut count = 0;
+    for y in y0..y1.min(pm.height() as usize) {
+        for x in x0..x1.min(w) {
+            if s[(y * w + x) * n] < 200 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// How many of the page's streams' bytes say `needle`.
+fn stream_count(doc: &PdfDocument, page: i32, needle: &str) -> usize {
+    let p = doc.find_page(page).unwrap();
+    super::apply::contents_list(&p)
+        .unwrap()
+        .iter()
+        .map(|s| String::from_utf8_lossy(&s.read_stream().unwrap()).matches(needle).count())
+        .sum()
+}
+
+#[test]
+fn shrink_puts_the_content_between_the_bands_on_every_rotation_and_box() {
+    // (page keys, the visible box in user space, display width, display height)
+    let cases = [
+        ("", [0.0, 0.0, 612.0, 792.0], 612.0, 792.0),
+        ("/Rotate 90", [0.0, 0.0, 612.0, 792.0], 792.0, 612.0),
+        ("/Rotate 270", [0.0, 0.0, 612.0, 792.0], 792.0, 612.0),
+        ("/CropBox [50 60 450 700]", [50.0, 60.0, 450.0, 700.0], 400.0, 640.0),
+        ("/Rotate 90 /CropBox [50 60 450 700]", [50.0, 60.0, 450.0, 700.0], 640.0, 400.0),
+    ];
+    for (extra, visible, w, h) in cases {
+        let mut doc = PdfDocument::from_bytes(&page_with(extra, &corners(visible))).unwrap();
+        let unshrunk = reopened(&doc);
+        add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+        let doc = reopened(&doc);
+        // the top and bottom bands: margin + one line; left and right: the margins
+        let band: [f32; 4] = [72.0, 48.0, (w - 72.0) as f32, (h - 48.0) as f32];
+        for name in ["LL", "UL", "LR", "UR"] {
+            inside(word(&doc, name), band, &format!("{extra:?} {name}"));
+        }
+        // it kept the page size and the text above and below does not touch the content
+        assert_eq!(doc.load_page(0).unwrap().bounds().unwrap().width() as f64, w, "{extra:?}");
+        assert!(word(&doc, "TC").y1 <= word(&doc, "UL").y0 + 1.0, "{extra:?}: header over the content");
+        assert!(word(&doc, "BC").y0 >= word(&doc, "LL").y1 - 1.0, "{extra:?}: footer over the content");
+        // never up: a corner word that already fits does not grow
+        let before = word(&unshrunk, "UL");
+        let after = word(&doc, "UL");
+        assert!(after.x1 - after.x0 <= before.x1 - before.x0 + 0.01, "{extra:?}: scaled up");
+        // the page's own text is still read first
+        assert!(!text_of(&doc, 0).trim_start().starts_with("TC"), "{extra:?}");
+    }
+}
+
+#[test]
+fn shrink_with_nothing_to_clear_does_not_scale_up() {
+    // margins of 0 and one line of text at the bottom: the box is the page less 12 pt.
+    let mut h = HeaderFooter::default();
+    h.text[4] = "BC".into();
+    h.margins = [0.0, 0.0, 0.0, 0.0];
+    h.shrink = true;
+    let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    let before = word(&reopened(&doc), "UR");
+    add(&mut doc, &req(Mark::HeaderFooter(h), vec![0])).unwrap();
+    let doc = reopened(&doc);
+    // scaled by (792 - 12) / 792 and no more: width is not a constraint with margins of 0
+    let ratio = (word(&doc, "UR").x1 - word(&doc, "UR").x0) / (before.x1 - before.x0);
+    assert!((0.97..=0.995).contains(&ratio), "{ratio}");
+    // the word boxes include the font's ascent and descent (the footer's sits half off the page
+    // with a margin of 0), so allow for them; the glyphs are 8 pt apart
+    assert!(word(&doc, "BC").y0 >= word(&doc, "LL").y1 - 4.0);
+}
+
+#[test]
+fn shrink_clips_to_the_visible_area() {
+    // a big word outside the crop box but inside the media box
+    let content = "BT /F1 36 Tf 10 10 Td (OUTSIDE) Tj ET BT /F1 12 Tf 200 300 Td (IN) Tj ET";
+    let src = page_with("/CropBox [100 100 500 700]", content);
+    let plain = PdfDocument::from_bytes(&src).unwrap();
+    assert_eq!(ink_in(&plain, 0, [0, 0, 70, 600]), 0, "outside the crop box nothing shows");
+    let mut doc = PdfDocument::from_bytes(&src).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let doc = reopened(&doc);
+    // scaled in without the clip it would land in the left margin (x < 72)
+    assert_eq!(ink_in(&doc, 0, [0, 0, 70, 600]), 0, "what the crop box hid is still hidden");
+    assert!(text_of(&doc, 0).contains("IN"));
+}
+
+#[test]
+fn shrink_survives_unbalanced_content_and_a_stray_q() {
+    for content in ["Q Q ", "q 1 0 0 1 100 100 cm "] {
+        let src = page_with("", &format!("{content}{}", corners([0.0, 0.0, 612.0, 792.0])));
+        let mut doc = PdfDocument::from_bytes(&src).unwrap();
+        add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+        let doc = reopened(&doc);
+        if content.starts_with('Q') {
+            inside(word(&doc, "UL"), [72.0, 48.0, 540.0, 744.0], "a stray Q does not undo the shrink");
+            inside(word(&doc, "LR"), [72.0, 48.0, 540.0, 744.0], "a stray Q does not undo the shrink");
+        }
+        // the marks are where they were asked for either way
+        near(word(&doc, "TC").y0, 36.0, "TC top");
+    }
+}
+
+#[test]
+fn update_keeps_the_shrink_and_unticking_it_gives_the_page_back() {
+    let src = page_with("", &corners([0.0, 0.0, 612.0, 792.0]));
+    let mut doc = PdfDocument::from_bytes(&src).unwrap();
+    let original = reopened(&doc);
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let first = word(&reopened(&doc), "UL");
+    // the file remembers it asked for the shrink
+    let spec = info(&doc).unwrap().kinds[0].mark.clone().unwrap();
+    assert_eq!(spec["shrink"], true);
+
+    let mut changed = top_and_bottom(true);
+    changed.text[1] = "NEW".into();
+    let mut r = req(Mark::HeaderFooter(changed.clone()), vec![0]);
+    r.replace = true;
+    add(&mut doc, &r).unwrap();
+    let again = reopened(&doc);
+    let second = word(&again, "UL");
+    near(second.x0, first.x0, "scaled once, not twice (x)");
+    near(second.y0, first.y0, "scaled once, not twice (y)");
+    assert_eq!(stream_count(&again, 0, "PCMark /Shrink"), 1);
+
+    // Update with the box unticked: the content is where it was
+    changed.shrink = false;
+    let mut r = req(Mark::HeaderFooter(changed), vec![0]);
+    r.replace = true;
+    add(&mut doc, &r).unwrap();
+    let off = reopened(&doc);
+    assert_eq!(stream_count(&off, 0, "PCMark /Shrink"), 0);
+    let (a, b) = (word(&off, "UL"), word(&original, "UL"));
+    near(a.x0, b.x0, "unshrunk x");
+    near(a.y0, b.y0, "unshrunk y");
+}
+
+#[test]
+fn removing_the_mark_takes_the_cm_and_the_wrapper_out() {
+    let content = corners([0.0, 0.0, 612.0, 792.0]);
+    let mut doc = PdfDocument::from_bytes(&page_with("", &content)).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let wm = Watermark { text: "COPY".into(), ..Watermark::default() };
+    add(&mut doc, &req(Mark::Watermark(wm), vec![0])).unwrap();
+    assert_eq!(stream_count(&doc, 0, "PCMark /Shrink"), 1);
+    let shrunk = word(&reopened(&doc), "UL");
+
+    // a mark of another kind on top leaves the header's shrink alone
+    remove(&mut doc, MarkKind::Watermark, &[0]).unwrap();
+    near(word(&reopened(&doc), "UL").y0, shrunk.y0, "the watermark's removal does not undo the shrink");
+    assert_eq!(stream_count(&doc, 0, "PCMark /Shrink"), 1);
+
+    // the last mark that asked: the page content is the original bytes again, in the original stream
+    assert_eq!(remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), 1);
+    let page = doc.find_page(0).unwrap();
+    let list = super::apply::contents_list(&page).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].read_stream().unwrap(), content.as_bytes());
+    assert_eq!(info(&doc).unwrap(), Info::default());
+}
+
+#[test]
+fn two_kinds_share_the_page_and_each_removal_recomputes_it() {
+    let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let both = word(&reopened(&doc), "UL");
+    let b = Bates { shrink: true, ..Bates::default() };
+    add(&mut doc, &req(Mark::Bates(b), vec![0])).unwrap();
+    // the Bates number is in the bottom band the footer already keeps clear
+    near(word(&reopened(&doc), "UL").y0, both.y0, "same bands, same place");
+    // the header and footer go: the Bates number's bottom band alone is left (no top band any more)
+    remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap();
+    let bates_only = reopened(&doc);
+    assert!(word(&bates_only, "UL").y0 < both.y0 - 4.0, "the top band is no longer kept clear: the content moved up");
+    inside(word(&bates_only, "LL"), [72.0, 0.0, 540.0, 792.0 - 48.0], "bottom band still kept");
+    // the Bates mark goes too: the original page
+    remove(&mut doc, MarkKind::Bates, &[0]).unwrap();
+    assert_eq!(stream_count(&doc, 0, "PCMark"), 0);
+    near(word(&reopened(&doc), "UL").x0, 4.0, "original");
+}
+
+#[test]
+fn a_shrink_is_found_again_after_the_streams_were_merged() {
+    let mut doc = PdfDocument::from_bytes(&page_with("", &corners([0.0, 0.0, 612.0, 792.0]))).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap();
+    let first = word(&reopened(&doc), "UL");
+    merge_streams(&mut doc, 0);
+    // Update on the merged page: the old section is cut, not scaled on top of
+    let mut r = req(Mark::HeaderFooter(top_and_bottom(true)), vec![0]);
+    r.replace = true;
+    add(&mut doc, &r).unwrap();
+    let again = reopened(&doc);
+    near(word(&again, "UL").y0, first.y0, "scaled once");
+    // the merged stream's own section was cut: one in the page, in the wrapper
+    assert_eq!(stream_count(&again, 0, "PCMark /Shrink"), 1);
+    remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap();
+    assert_eq!(stream_count(&doc, 0, "PCMark /Shrink"), 0);
+    near(word(&reopened(&doc), "UL").x0, 4.0, "original");
+}
+
+#[test]
+fn margins_that_leave_no_room_are_refused() {
+    let mut doc = PdfDocument::from_bytes(&one_page("")).unwrap();
+    let mut h = top_and_bottom(true);
+    h.margins = [400.0, 400.0, 72.0, 72.0];
+    match add(&mut doc, &req(Mark::HeaderFooter(h), vec![0])) {
+        Err(EngineError::Invalid(m)) => assert!(m.contains("too little room"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---- marks other apps made ---------------------------------------------------------------------------
+
+const FOREIGN: &str = "BT /F1 12 Tf 250 400 Td (Body) Tj ET\n\
+/Artifact <</Type /Pagination /Subtype /Header /Attached [/Top]>> BDC\n\
+BT /F1 10 Tf 72 760 Td (ForeignHeader) Tj ET\n\
+EMC\n\
+/Artifact <</Type /Pagination /Subtype /Footer>> BDC\n\
+q BT /F1 10 Tf 72 20 Td /Span <</Lang (en-US)>> BDC (ForeignFooter) Tj EMC ET Q\n\
+EMC\n\
+/Artifact <</Type /Layout /Subtype /Header>> BDC\n\
+BT /F1 10 Tf 72 700 Td (LayoutKeep) Tj ET\n\
+EMC\n\
+/Artifact <</Type /Pagination /Subtype /LineNum>> BDC\n\
+BT /F1 10 Tf 20 600 Td (LineKeep) Tj ET\n\
+EMC\n";
+
+fn foreign_of(doc: &PdfDocument, kind: MarkKind) -> Option<ForeignInfo> {
+    info(doc).unwrap().foreign.into_iter().find(|f| f.kind == kind)
+}
+
+#[test]
+fn another_apps_header_is_found_and_cut_and_the_body_stays() {
+    let mut doc = PdfDocument::from_bytes(&page_with("", FOREIGN)).unwrap();
+    let i = info(&doc).unwrap();
+    assert!(i.kinds.is_empty(), "not ours: no Update for it");
+    assert_eq!(foreign_of(&doc, MarkKind::HeaderFooter).unwrap().pages, [0]);
+    assert!(foreign_of(&doc, MarkKind::HeaderFooter).unwrap().stuck.is_empty());
+    assert!(foreign_of(&doc, MarkKind::Watermark).is_none() && foreign_of(&doc, MarkKind::Background).is_none());
+
+    // both the header and the footer (one with marked content nested in it) go, nothing else
+    assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (2, 0));
+    let doc = reopened(&doc);
+    let text = text_of(&doc, 0);
+    assert!(text.contains("Body") && text.contains("LayoutKeep") && text.contains("LineKeep"), "{text:?}");
+    assert!(!text.contains("ForeignHeader") && !text.contains("ForeignFooter"), "{text:?}");
+    assert_eq!(stream_count(&doc, 0, "/Type /Layout"), 1);
+    assert!(foreign_of(&doc, MarkKind::HeaderFooter).is_none());
+    // removing again finds nothing
+    let mut doc = doc;
+    assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (0, 0));
+}
+
+#[test]
+fn another_apps_watermark_and_background_are_their_own_rows() {
+    let content = "BT /F1 12 Tf 250 400 Td (Body) Tj ET\n\
+/Artifact <</Type /Pagination /Subtype /Watermark>> BDC BT /F1 40 Tf 100 300 Td (SECRET) Tj ET EMC\n\
+/Artifact <</Type /Background>> BDC q 1 0 0 rg 0 0 100 100 re f Q EMC\n";
+    let mut doc = PdfDocument::from_bytes(&page_with("", content)).unwrap();
+    assert!(foreign_of(&doc, MarkKind::HeaderFooter).is_none());
+    assert!(foreign_of(&doc, MarkKind::Watermark).is_some() && foreign_of(&doc, MarkKind::Background).is_some());
+    assert_eq!(remove_foreign(&mut doc, MarkKind::Watermark, &[0]).unwrap(), (1, 0));
+    assert!(!text_of(&doc, 0).contains("SECRET") && text_of(&doc, 0).contains("Body"));
+    assert!(foreign_of(&doc, MarkKind::Background).is_some(), "the background was not the asked kind");
+}
+
+#[test]
+fn a_section_that_cannot_be_cut_cleanly_is_left_and_reported() {
+    let cases = [
+        // no end in this stream
+        ("no EMC", "/Artifact <</Type /Pagination /Subtype /Header>> BDC BT /F1 10 Tf 72 760 Td (Stuck) Tj ET\n"),
+        // a q that is never closed inside it would leak into what follows
+        ("open q", "/Artifact <</Type /Pagination /Subtype /Header>> BDC q BT /F1 10 Tf 72 760 Td (Stuck) Tj ET EMC\n"),
+        // a cm outside q...Q would move what follows
+        ("bare cm", "/Artifact <</Type /Pagination /Subtype /Header>> BDC 1 0 0 1 5 5 cm BT /F1 10 Tf 72 760 Td (Stuck) Tj ET EMC\n"),
+        // a text object that ends outside
+        ("open BT", "/Artifact <</Type /Pagination /Subtype /Header>> BDC BT /F1 10 Tf 72 760 Td (Stuck) Tj EMC ET\n"),
+    ];
+    for (what, bad) in cases {
+        let mut doc = PdfDocument::from_bytes(&page_with("", &format!("BT /F1 12 Tf 250 400 Td (Body) Tj ET\n{bad}"))).unwrap();
+        let row = foreign_of(&doc, MarkKind::HeaderFooter).unwrap_or_else(|| panic!("{what}: not listed"));
+        assert_eq!((row.pages.clone(), row.stuck.clone()), (vec![0], vec![0]), "{what}");
+        assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (0, 1), "{what}");
+        assert!(text_of(&doc, 0).contains("Stuck"), "{what}: it was left in the page");
+        assert!(foreign_of(&doc, MarkKind::HeaderFooter).is_some(), "{what}: still listed");
+    }
+    // one that is clean next to one that is not: the clean one goes, the other is reported
+    let both = format!(
+        "{FOREIGN}/Artifact <</Type /Pagination /Subtype /Watermark>> BDC q BT /F1 10 Tf 72 500 Td (WM) Tj ET\n"
+    );
+    let mut doc = PdfDocument::from_bytes(&page_with("", &both)).unwrap();
+    assert_eq!(remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap(), (2, 0));
+    assert_eq!(remove_foreign(&mut doc, MarkKind::Watermark, &[0]).unwrap(), (0, 1));
+}
+
+#[test]
+fn our_marks_and_another_apps_do_not_mix() {
+    let mut doc = PdfDocument::from_bytes(&page_with("", FOREIGN)).unwrap();
+    add(&mut doc, &req(Mark::HeaderFooter(hf(5, "Ours <<1>>")), vec![0])).unwrap();
+    let i = info(&doc).unwrap();
+    assert_eq!(i.kinds.len(), 1);
+    assert_eq!(foreign_of(&doc, MarkKind::HeaderFooter).unwrap().pages, [0]);
+    // removing ours leaves the other app's; removing the other app's leaves ours
+    remove(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap();
+    assert!(text_of(&doc, 0).contains("ForeignHeader") && !text_of(&doc, 0).contains("Ours"));
+    add(&mut doc, &req(Mark::HeaderFooter(hf(5, "Ours <<1>>")), vec![0])).unwrap();
+    remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap();
+    assert!(!text_of(&doc, 0).contains("ForeignHeader") && text_of(&doc, 0).contains("Ours 1"));
+}
+
+#[test]
+fn an_annotated_page_is_listed_so_the_shrink_can_say_its_comments_stay() {
+    let doc = PdfDocument::from_bytes(&page_with("/Annots [ << /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (n) >> ]", "")).unwrap();
+    assert_eq!(info(&doc).unwrap().annotated, [0]);
+    let plain = PdfDocument::from_bytes(&one_page("")).unwrap();
+    assert!(info(&plain).unwrap().annotated.is_empty());
+}
+
+// ---- signed and certified documents -------------------------------------------------------------------
+
+fn signed_with(content: &str, certified: bool) -> Vec<u8> {
+    use crate::outline::tests::{doc_mdp, raw_pdf, sig_value};
+    let perms = if certified {
+        format!("/Perms << /DocMDP << /Type /Sig /Reference [ {} ] >> >>", doc_mdp("/TransformParams << /P 1 >>"))
+    } else {
+        String::new()
+    };
+    raw_pdf(&[
+        format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /SigFlags 3 /Fields [6 0 R] >> {perms} >>"),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        format!("<< /FT /Sig /T (S) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] {} >>", sig_value("")),
+    ])
+}
+
+#[test]
+fn a_certified_document_refuses_the_shrink_and_the_removal_of_another_apps_marks() {
+    let mut doc = PdfDocument::from_bytes(&signed_with(FOREIGN, true)).unwrap();
+    assert!(info(&doc).unwrap().certified);
+    for e in [
+        add(&mut doc, &req(Mark::HeaderFooter(top_and_bottom(true)), vec![0])).unwrap_err(),
+        remove_foreign(&mut doc, MarkKind::HeaderFooter, &[0]).unwrap_err(),
+    ] {
+        assert!(matches!(&e, EngineError::Invalid(m) if m.contains("certified")), "{e:?}");
+    }
+    assert!(text_of(&doc, 0).contains("ForeignHeader"), "nothing was changed");
+}
+
+#[test]
+fn a_signed_document_keeps_its_signed_bytes_through_a_shrink_and_a_removal() {
+    use crate::outline::tests::open_bytes;
+    let d = dir("signed-fit");
+    let bytes = signed_with(FOREIGN, false);
+    let (eng, id, path) = open_bytes(&d, "a.pdf", &bytes);
+    assert!(eng.read_custom(id, |d| Ok(info(d)?.signed)).unwrap());
+    let m = req(Mark::HeaderFooter(top_and_bottom(true)), vec![0]);
+    eng.apply_custom(id, "Add header and footer to p. 1".into(), EditSource::User, false, |doc| add(doc, &m)).unwrap();
+    eng.apply_removing(id, "Remove header and footer from another app".into(), EditSource::User, |doc| {
+        remove_foreign(doc, MarkKind::HeaderFooter, &[0])?;
+        Ok(vec![0])
+    })
+    .unwrap();
+    eng.save(id, None).unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    assert!(saved.len() > bytes.len() && saved.starts_with(&bytes), "the signed bytes are the start of the saved file");
+    let doc = PdfDocument::from_bytes(&saved).unwrap();
+    assert!(!text_of(&doc, 0).contains("ForeignHeader"));
+    assert_eq!(stream_count(&doc, 0, "PCMark /Shrink"), 1);
 }
