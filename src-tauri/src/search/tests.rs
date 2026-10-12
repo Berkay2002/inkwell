@@ -1,7 +1,7 @@
 //! The find options, snippets, comments, fields and bookmarks, the engine events, and folder search
 //! (listing, caps, cancel), on small PDFs built here.
 
-use super::files::{list_pdfs, list_picked, search_file, FilesEvent, FolderSearches, Skip, PER_FILE, TOTAL};
+use super::files::{list_pdfs, search_file, FilesEvent, FolderSearches, Skip, PER_FILE, TOTAL};
 use super::*;
 use crate::engine::{DocId, Engine, SearchEvent};
 use std::path::{Path, PathBuf};
@@ -668,6 +668,7 @@ fn listing_stops_when_cancelled_and_leaves_out_cloud_only_files() {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+        use super::files::list_picked;
         let cloud = d.join("cloud.pdf");
         std::fs::write(&cloud, plain(&[vec!["notice in the cloud"]])).unwrap();
         let wide: Vec<u16> = cloud.as_os_str().encode_wide().chain(Some(0)).collect();

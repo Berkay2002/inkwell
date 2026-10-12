@@ -9,7 +9,9 @@
 //! string that is shown has its invisible and control characters taken out.
 
 use crate::organize::attach::{self, AttachKind, Attachment, Texts, capped_string, entry_ids, find_entry, stream_of, strip_invisible, tree};
-use crate::organize::{Result, bad, get, put_int, put_name, put_str};
+use crate::organize::{Result, bad, get, put_int, put_str};
+#[cfg(test)]
+use crate::organize::put_name;
 use crate::search::fold_text;
 use mupdf::pdf::{PdfDocument, PdfObject};
 use serde::Serialize;

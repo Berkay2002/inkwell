@@ -840,4 +840,4 @@ pub fn report_bytes(eng: &Engine, doc: DocId, profile: Profile, pdf: bool, date:
 
 #[allow(unused_imports)]
 pub(crate) use a11y::Progress as CheckProgress;
-pub(crate) use fix::{set_info_properties, sync_xmp_with_info};
+pub(crate) use fix::set_info_properties;

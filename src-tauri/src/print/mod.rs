@@ -41,7 +41,9 @@ mod tests;
 mod tests_layouts;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(windows)]
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 

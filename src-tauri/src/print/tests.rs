@@ -3,6 +3,7 @@
 //! that driver skips them with a note.
 
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::sync::atomic::AtomicBool;
 
 use super::layout::*;
