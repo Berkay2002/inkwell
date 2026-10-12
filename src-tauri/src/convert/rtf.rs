@@ -84,9 +84,8 @@ fn char_fmt(size: f64, bold: bool, italic: bool, cf: &str) -> String {
 }
 
 /// A table: a row per detected row, single grey borders on every cell, cell edges from the grid (measured
-/// from the left margin), the same padding of short rows as the Word writer. `brk` is `\pagebb` when the
-/// table starts a page (on the first cell).
-fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, brk: &str, out: &mut String) {
+/// from the left margin), the same padding of short rows as the Word writer.
+fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, out: &mut String) {
     let left = t.cols.first().copied().unwrap_or(0.0);
     let mut edges = t.cols.clone();
     edges.push(t.rect[2]);
@@ -97,7 +96,7 @@ fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, brk: &str, out: &mut String
         right.push((((e - left) * 20.0).round() as i64).clamp(prev + 60, prev + 31680));
     }
     let border = |side: &str| format!("\\clbrdr{side}\\brdrs\\brdrw10\\brdrcf1");
-    for (ri, row) in t.rows.iter().enumerate() {
+    for row in &t.rows {
         out.push_str("\\trowd\\trgaph108\\trleft0");
         let mut column = 0;
         for c in row {
@@ -111,9 +110,8 @@ fn table(t: &Table, cf: &dyn Fn([f64; 3]) -> String, brk: &str, out: &mut String
             let _ = write!(out, "{}{}{}{}\\cellx{x}", border("t"), border("l"), border("b"), border("r"));
         }
         out.push('\n');
-        for (ci, c) in row.iter().enumerate() {
-            let brk = if ri == 0 && ci == 0 { brk } else { "" };
-            let _ = write!(out, "\\pard\\plain\\intbl{brk}{} {}\\cell", char_fmt(c.size, c.bold, c.italic, &cf(c.color)), text(&c.text));
+        for c in row {
+            let _ = write!(out, "\\pard\\plain\\intbl{} {}\\cell", char_fmt(c.size, c.bold, c.italic, &cf(c.color)), text(&c.text));
         }
         for _ in used..right.len() {
             out.push_str("\\pard\\plain\\intbl\\cell");
@@ -165,14 +163,20 @@ pub fn rtf(pages: &[Page], title: &str) -> Rtf {
     // document must not end inside one), as in the Word writer.
     let mut after_table = false;
     // A page break is `\pagebb` on the first paragraph of the next page (an `\page` of its own would leave an
-    // empty paragraph at the top of it). Two breaks in a row are a blank page: its own empty paragraph.
+    // empty paragraph at the top of it); before a table it needs an empty paragraph, as a cell cannot carry it.
+    // Two breaks in a row are a blank page: its own empty paragraph.
     let mut page_break = false;
     for it in items {
-        if after_table && matches!(it, Item::Table(_)) {
-            s.push_str("{\\pard\\plain\\par}\n");
+        let mut brk = if !matches!(it, Item::PageBreak) && std::mem::take(&mut page_break) { "\\pagebb" } else { "" };
+        if matches!(it, Item::Table(_)) {
+            // Rows next to rows are one table to a reader, and \pagebb must not sit in a cell: a table that
+            // follows a table or starts a page gets a paragraph of its own in front (carrying the break).
+            if after_table || !brk.is_empty() {
+                let _ = writeln!(s, "{{\\pard\\plain{brk}\\par}}");
+            }
+            brk = "";
         }
         after_table = matches!(it, Item::Table(_));
-        let brk = if !matches!(it, Item::PageBreak) && std::mem::take(&mut page_break) { "\\pagebb" } else { "" };
         match &it {
             Item::Para(b, lvl) => {
                 let style = match lvl {
@@ -184,7 +188,7 @@ pub fn rtf(pages: &[Page], title: &str) -> Rtf {
                 let fmt = char_fmt(b.size, b.bold && style.is_empty(), b.italic, &cf(b.color));
                 let _ = writeln!(s, "{{\\pard\\plain{brk}\\sa120{style}{fmt} {}\\par}}", text(&b.text));
             }
-            Item::Table(t) => table(t, &cf, brk, &mut s),
+            Item::Table(t) => table(t, &cf, &mut s),
             Item::Img(im) => {
                 if image_bytes + im.bytes.len() > MAX_IMAGE_BYTES || !picture(im, text_w, brk, &mut s) {
                     skipped += 1;

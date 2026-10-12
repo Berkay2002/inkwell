@@ -408,6 +408,27 @@ fn rtf_grey_text_keeps_its_colour_and_a_blank_page_stays_a_page() {
 }
 
 #[test]
+fn rtf_a_table_after_a_page_break_is_a_separate_table_and_the_break_is_not_in_a_row() {
+    use super::rtf::rtf;
+    let grid = |y: f64| -> Vec<flow::Block> {
+        (0..6).map(|i| model_block(&format!("t{i}"), 72.0 + 100.0 * (i % 3) as f64, y - 20.0 * (i / 3) as f64, 11.0, false, [0.0; 3])).collect()
+    };
+    let page = |blocks| flow::Page { width: 612.0, height: 792.0, blocks, images: vec![] };
+    let r = rtf(&[page(grid(700.0)), page(grid(700.0))], "t");
+    let toks = rtf_tokens(&r.text);
+    assert_eq!(word_count(&toks, "trowd"), 4, "{}", r.text);
+    // Between the first table's last \row and the second \trowd: a paragraph outside any table with the break.
+    assert!(r.text.contains("\\row\n{\\pard\\plain\\pagebb\\par}\n\\trowd"), "{}", r.text);
+    // No \pagebb inside a row: every row text, from \trowd to \row, is free of it.
+    for row in r.text.split("\\trowd").skip(1) {
+        let row = &row[..row.find("\\row").unwrap()];
+        assert!(!row.contains("pagebb") && row.contains("\\intbl"), "{row}");
+    }
+    assert_eq!(word_count(&toks, "pagebb"), 1);
+    assert!(balanced(&toks));
+}
+
+#[test]
 fn rtf_pictures_over_the_cap_are_skipped_and_counted() {
     use super::rtf::{rtf, MAX_IMAGE_BYTES};
     let mut big = model_png();
