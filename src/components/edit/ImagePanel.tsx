@@ -346,6 +346,12 @@ function Format({ id, target, image, cropping, locked }: { id: number; target: I
           {dpi > 0 ? ` · ${dpi} ppi` : ""}
           {image.kind === "inline" ? " · inline" : ""}
         </span>
+        {image.inForm && image.inForm.length > 0 && (
+          <>
+            <br />
+            <span className="dim">Inside form {image.inForm.join(" › ")}. A form that other pages or places also draw is copied for this one first.</span>
+          </>
+        )}
       </p>
       {cropping && crop ? (
         <div className="ie-crop-rail">

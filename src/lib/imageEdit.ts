@@ -491,6 +491,10 @@ function queued<T>(doc: number, f: () => Promise<T>): Promise<T> {
 
 const STALE = "The page changed under that change, so it was not applied. Try it again.";
 
+/** The rail's note after a change: the page moved under it, or the engine's warning (a picture left its form's frame). */
+const noticeOf = (r: { kind: string; value?: { warning?: string | null } }): string | null =>
+  r.kind === "stale" ? STALE : r.kind === "ok" ? (r.value?.warning ?? null) : null;
+
 const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 /**
@@ -596,9 +600,9 @@ export const useImageEdit = create<Store>((set, get) => {
       };
       const found = r.kind === "ok" ? items.map((it) => find(it.b, it.change)) : items.map((it) => find(it.b, { op: "move", dx: 0, dy: 0 }));
       const mine = found.flatMap((m) => (m ? [m.index] : []));
-      if (mine.length === 0) patchDoc(doc, { selected: null, crop: null, notice: r.kind === "stale" ? STALE : null });
+      if (mine.length === 0) patchDoc(doc, { selected: null, crop: null, notice: noticeOf(r) });
       else {
-        patchDoc(doc, { selected: { page: pageNo, index: mine[mine.length - 1] }, extra: mine.slice(0, -1), crop: null, notice: r.kind === "stale" ? STALE : null });
+        patchDoc(doc, { selected: { page: pageNo, index: mine[mine.length - 1] }, extra: mine.slice(0, -1), crop: null, notice: noticeOf(r) });
       }
       return r.kind === "ok";
     } finally {
@@ -651,7 +655,7 @@ export const useImageEdit = create<Store>((set, get) => {
       }
       const box = expectedBox(image, change);
       const same = box ? closestImage(box, fresh.images) : null;
-      patchDoc(doc, { selected: same ? { page: ref.page, index: same.index } : null, crop: null, notice: null });
+      patchDoc(doc, { selected: same ? { page: ref.page, index: same.index } : null, crop: null, notice: noticeOf(r) });
       return true;
     } finally {
       applying.delete(doc);

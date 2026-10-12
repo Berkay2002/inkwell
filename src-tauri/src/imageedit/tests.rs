@@ -1160,3 +1160,522 @@ fn pictures_that_share_a_soft_mask_copy_it_once_and_share_it_in_the_clip() {
     // The clip holds both pictures and one mask: no more objects than that and its own page tree.
     assert!(clipped_doc.count_objects().unwrap() <= 8, "{} objects", clipped_doc.count_objects().unwrap());
 }
+
+// ---- pictures inside form XObjects -------------------------------------------------------------
+
+fn raw_obj(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut v = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    v.extend_from_slice(data);
+    v.extend_from_slice(b"\nendstream");
+    v
+}
+
+/// A solid red 2 × 2 picture.
+fn red() -> Vec<u8> {
+    raw_obj("/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8", &[255, 0, 0].repeat(4))
+}
+
+fn form(extra: &str, content: &str) -> Vec<u8> {
+    raw_obj(&format!("/Type /XObject /Subtype /Form {extra}"), content.as_bytes())
+}
+
+/// A file of `pages` (extra page dictionary entries, content), 612 × 792 each, and `rest` objects numbered from
+/// `3 + 2 * pages`: page i is object `3 + 2i`, its content `4 + 2i`.
+fn forms_file(catalog: &str, pages: &[(&str, &str)], rest: Vec<Vec<u8>>) -> Vec<u8> {
+    let kids: String = (0..pages.len()).map(|i| format!("{} 0 R ", 3 + 2 * i)).collect();
+    let mut objs = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>").into_bytes(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {} >>", pages.len()).into_bytes(),
+    ];
+    for (i, (page, content)) in pages.iter().enumerate() {
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {page} /Contents {} 0 R >>", 4 + 2 * i).into_bytes());
+        objs.push(raw_obj("", content.as_bytes()));
+    }
+    objs.extend(rest);
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+const FM0: &str = "/Resources << /XObject << /Fm0 5 0 R >> >>";
+
+/// One page draws form 5 at (50, 100); the form draws picture 6 at (20,30)-(120,80) of its own space, so the
+/// picture's box is (70,130)-(170,180) in user space and (70,612)-(170,662) as seen.
+fn one_form() -> Vec<u8> {
+    forms_file(
+        "",
+        &[(FM0, "q 1 0 0 1 50 100 cm /Fm0 Do Q")],
+        vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 6 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()],
+    )
+}
+
+/// Two pages draw the same form 7 (each at its own place), which holds picture 8.
+fn two_pages_one_form() -> Vec<u8> {
+    let res = "/Resources << /XObject << /Fm0 7 0 R >> >>";
+    forms_file(
+        "",
+        &[(res, "q 1 0 0 1 50 100 cm /Fm0 Do Q"), (res, "q 1 0 0 1 200 300 cm /Fm0 Do Q")],
+        vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 8 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()],
+    )
+}
+
+fn page_images(eng: &Engine, id: DocId, page: u32) -> Vec<ImageBlock> {
+    blocks(eng, id, page).unwrap().images
+}
+
+fn edit_on(eng: &Engine, id: DocId, page: u32, index: u32, c: ImageChange) -> Result<ImageEdited> {
+    edit(eng, id, rev(eng, id), page, Some(index), &c, EditSource::User)
+}
+
+/// The document as saved and reopened.
+fn saved(eng: &Engine, id: DocId, path: &str) -> mupdf::pdf::PdfDocument {
+    eng.save(id, None).unwrap();
+    mupdf::pdf::PdfDocument::open(path).unwrap()
+}
+
+/// Object number a page's `/XObject` entry `name` points at.
+fn entry(doc: &mupdf::pdf::PdfDocument, page: i32, name: &str) -> i32 {
+    let res = doc.find_page(page).unwrap().get_dict_inheritable("Resources").unwrap().unwrap();
+    get(&res, "XObject").and_then(|x| get(&x, name)).and_then(|o| o.as_indirect().ok()).unwrap_or(0)
+}
+
+fn text_of(doc: &mupdf::pdf::PdfDocument, num: i32) -> String {
+    String::from_utf8_lossy(&doc.new_indirect(num, 0).unwrap().read_stream().unwrap()).into_owned()
+}
+
+fn content_of(doc: &mupdf::pdf::PdfDocument, page: i32) -> String {
+    let p = doc.find_page(page).unwrap();
+    page_streams(&p).unwrap().into_iter().map(|(_, d)| String::from_utf8_lossy(&d).into_owned()).collect::<Vec<_>>().join("\n")
+}
+
+/// How many form XObjects a file holds.
+fn forms_in(path: &str) -> usize {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    (1..doc.count_objects().unwrap() as i32)
+        .filter(|i| {
+            let Ok(Some(r)) = doc.new_indirect(*i, 0).unwrap().resolve() else { return false };
+            r.is_dict().unwrap_or(false) && get(&r, "Subtype").and_then(|s| s.as_name().ok()).as_deref() == Some(b"Form")
+        })
+        .count()
+}
+
+/// The box of the non-white pixels of a page as rendered, page space, at four pixels to the point.
+fn rendered_box(path: &str, page: i32) -> [f32; 4] {
+    let doc = mupdf::pdf::PdfDocument::open(path).unwrap();
+    let pm = doc.load_page(page).unwrap().to_pixmap(&mupdf::Matrix::new_scale(4.0, 4.0), &mupdf::Colorspace::device_rgb(), false, false).unwrap();
+    let (w, h, n) = (pm.width() as usize, pm.height() as usize, pm.n() as usize);
+    let s = pm.samples();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            let p = &s[(y * w + x) * n..(y * w + x) * n + 3];
+            if p != [255, 255, 255] {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    [x0 as f32 / 4.0, y0 as f32 / 4.0, x1 as f32 / 4.0, y1 as f32 / 4.0]
+}
+
+#[test]
+fn a_picture_in_a_form_used_once_is_listed_and_moved_in_the_form_itself() {
+    let d = dir("form-once");
+    let (eng, id, path) = open(&d, &one_form());
+    let l = list(&eng, id);
+    assert_eq!(l.len(), 1);
+    assert_eq!((l[0].kind, l[0].in_form.clone(), l[0].editable, l[0].name.as_deref()), (ImageKind::XObject, vec!["Fm0".to_string()], true, Some("Im0")));
+    assert!(near(l[0].rect, [70.0, 612.0, 170.0, 662.0]), "{:?}", l[0].rect);
+    assert!(near(rendered_box(&path, 0), l[0].rect), "{:?}", rendered_box(&path, 0));
+    let r = change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 20.0 });
+    assert_eq!(r.state.undo.as_deref(), Some("Move image on p. 1"));
+    assert!(r.warning.is_none());
+    let l = list(&eng, id);
+    assert!(near(l[0].rect, [80.0, 632.0, 180.0, 682.0]), "{:?}", l[0].rect);
+    // The page still draws the form under its own name: the form was edited where it is.
+    assert_eq!(l[0].in_form, ["Fm0"]);
+    let doc = saved(&eng, id, &path);
+    assert_eq!(content_of(&doc, 0).trim(), "q 1 0 0 1 50 100 cm /Fm0 Do Q");
+    assert_eq!(forms_in(&path), 1);
+    assert!(near(rendered_box(&path, 0), l[0].rect), "{:?} {:?}", rendered_box(&path, 0), l[0].rect);
+    // One undo step puts it back.
+    eng.undo(id).unwrap();
+    assert!(near(list(&eng, id)[0].rect, [70.0, 612.0, 170.0, 662.0]));
+}
+
+#[test]
+fn moving_a_picture_in_a_shared_form_copies_the_form_and_leaves_the_other_page_alone() {
+    let d = dir("form-shared");
+    let (eng, id, path) = open(&d, &two_pages_one_form());
+    let (p1, p2) = (page_images(&eng, id, 0), page_images(&eng, id, 1));
+    assert!(near(p1[0].rect, [70.0, 612.0, 170.0, 662.0]), "{:?}", p1[0].rect);
+    assert!(near(p2[0].rect, [220.0, 412.0, 320.0, 462.0]), "{:?}", p2[0].rect);
+    let before = {
+        let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+        (content_of(&doc, 1), entry(&doc, 1, "Fm0"), text_of(&doc, 7))
+    };
+    let r = edit_on(&eng, id, 0, 0, ImageChange::Move { dx: 30.0, dy: 0.0 }).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Move image on p. 1"));
+    let (n1, n2) = (page_images(&eng, id, 0), page_images(&eng, id, 1));
+    assert!(near(n1[0].rect, [100.0, 612.0, 200.0, 662.0]), "{:?}", n1[0].rect);
+    assert_eq!(n2, p2, "the other page's pictures are as they were");
+    // Page 1 now names a copy; page 2 still names the form.
+    assert_eq!(n1[0].in_form, ["IwForm0"]);
+    assert_eq!(n2[0].in_form, ["Fm0"]);
+    let doc = saved(&eng, id, &path);
+    assert_eq!(forms_in(&path), 2);
+    assert_eq!(content_of(&doc, 1), before.0);
+    assert_eq!(text_of(&doc, entry(&doc, 1, "Fm0")), before.2);
+    assert_ne!(entry(&doc, 0, "IwForm0"), 0);
+    assert_eq!(entry(&doc, 0, "Fm0"), 0, "page 1 no longer names the shared form");
+    assert!(near(rendered_box(&path, 0), n1[0].rect), "{:?}", rendered_box(&path, 0));
+    assert!(near(rendered_box(&path, 1), p2[0].rect), "{:?}", rendered_box(&path, 1));
+    // The whole thing is one step.
+    eng.undo(id).unwrap();
+    assert_eq!(page_images(&eng, id, 0), p1);
+    assert_eq!(before.1, entry(&mupdf::pdf::PdfDocument::open(&path).unwrap(), 1, "Fm0").max(before.1));
+}
+
+#[test]
+fn nested_forms_with_matrices_list_the_box_that_is_rendered() {
+    let d = dir("form-nested");
+    let img = red();
+    let outer = form("/BBox [0 0 600 600] /Matrix [0.5 0 0 0.5 10 20] /Resources << /XObject << /Fm1 6 0 R >> >>", "q 1 0 0 1 100 100 cm /Fm1 Do Q");
+    let inner = form(
+        "/BBox [-500 -500 500 500] /Matrix [0.866 0.5 -0.5 0.866 0 0] /Resources << /XObject << /Im0 7 0 R >> >>",
+        "q 80 0 0 40 10 10 cm /Im0 Do Q",
+    );
+    let bytes = forms_file("", &[(FM0, "q 1 0 0 1 40 60 cm /Fm0 Do Q")], vec![outer, inner, img]);
+    let (eng, id, path) = open(&d, &bytes);
+    let l = list(&eng, id);
+    assert_eq!(l.len(), 1);
+    assert_eq!(l[0].in_form, ["Fm0", "Fm1"]);
+    let seen = rendered_box(&path, 0);
+    assert!(l[0].rect.iter().zip(seen).all(|(a, b)| (a - b).abs() <= 0.5), "listed {:?}, rendered {:?}", l[0].rect, seen);
+    // The picture is turned 30° on the page, and its corners say so.
+    assert!((l[0].angle - -30.0).abs() < 0.1 || (l[0].angle - 30.0).abs() < 0.1, "{}", l[0].angle);
+    // A move by a typed distance lands where asked, whatever the matrices on the way.
+    change(&eng, id, Some(0), ImageChange::Move { dx: 25.0, dy: -10.0 });
+    let moved = list(&eng, id)[0].rect;
+    for (a, b) in moved.iter().zip(l[0].rect) {
+        assert!((a - b).abs() > 0.0);
+    }
+    assert!((moved[0] - l[0].rect[0] - 25.0).abs() < 0.05 && (moved[1] - l[0].rect[1] + 10.0).abs() < 0.05, "{moved:?} {:?}", l[0].rect);
+    let _ = saved(&eng, id, &path);
+    let seen = rendered_box(&path, 0);
+    assert!(moved.iter().zip(seen).all(|(a, b)| (a - b).abs() <= 0.5), "listed {moved:?}, rendered {seen:?}");
+}
+
+#[test]
+fn deleting_and_replacing_in_a_shared_form_changes_only_this_page() {
+    let d = dir("form-delete-replace");
+    let (eng, id, path) = open(&d, &two_pages_one_form());
+    let p2 = page_images(&eng, id, 1);
+    edit_on(&eng, id, 0, 0, ImageChange::Delete).unwrap();
+    assert!(page_images(&eng, id, 0).is_empty());
+    assert_eq!(page_images(&eng, id, 1), p2);
+    // The other page's form still draws its picture, and the file keeps the picture for it.
+    let doc = saved(&eng, id, &path);
+    assert_eq!(image_objects(&path).len(), 1);
+    assert!(text_of(&doc, entry(&doc, 1, "Fm0")).contains("/Im0 Do"));
+    eng.undo(id).unwrap();
+    assert_eq!(page_images(&eng, id, 0).len(), 1);
+
+    // Replace with a JPEG: this page's copy of the form draws it; page 2's does not.
+    let (jpg, bytes) = jpeg(&d);
+    edit_on(&eng, id, 0, 0, ImageChange::Replace { file: jpg }).unwrap();
+    let l = page_images(&eng, id, 0);
+    assert_eq!((l.len(), l[0].filter.clone(), l[0].in_form.clone()), (1, vec!["DCTDecode".to_string()], vec!["IwForm0".to_string()]));
+    assert_eq!(page_images(&eng, id, 1), p2);
+    let _ = saved(&eng, id, &path);
+    let jpegs: Vec<_> = image_objects(&path).into_iter().filter(|o| o.3 == ["DCTDecode"]).collect();
+    assert_eq!(jpegs.len(), 1);
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let stored = doc.new_indirect(jpegs[0].0, 0).unwrap().read_raw_stream().unwrap();
+    assert_eq!(stored, bytes, "the JPEG is stored as it is");
+}
+
+#[test]
+fn a_form_that_draws_itself_and_forms_past_the_depth_cap_end_the_reading() {
+    let d = dir("form-cycle");
+    // Form 5 draws itself and picture 6.
+    let looped = form("/BBox [0 0 300 300] /Resources << /XObject << /Fm0 5 0 R /Im0 6 0 R >> >>", "/Fm0 Do q 10 0 0 10 0 0 cm /Im0 Do Q");
+    let (eng, id, _) = open(&d, &forms_file("", &[(FM0, "/Fm0 Do")], vec![looped, red()]));
+    assert_eq!(list(&eng, id).len(), 1);
+
+    // A chain of six forms, each with its picture: only the first MAX_FORM_DEPTH are entered.
+    let mut rest = Vec::new();
+    for k in 0..6 {
+        let next = if k < 5 { format!("/Fm{} {} 0 R ", k + 1, 6 + k) } else { String::new() };
+        let draw = if k < 5 { format!("/Fm{} Do ", k + 1) } else { String::new() };
+        rest.push(form(
+            &format!("/BBox [0 0 300 300] /Resources << /XObject << {next} /Im0 11 0 R >> >>"),
+            &format!("{draw}q 10 0 0 10 {} 0 cm /Im0 Do Q", 20 * k),
+        ));
+    }
+    rest.push(red());
+    let (eng, id, _) = open(&d, &forms_file("", &[(FM0, "/Fm0 Do")], rest));
+    let l = list(&eng, id);
+    assert_eq!(l.len(), MAX_FORM_DEPTH, "{:?}", l.iter().map(|b| b.in_form.len()).collect::<Vec<_>>());
+    assert_eq!(l.iter().map(|b| b.in_form.len()).max(), Some(MAX_FORM_DEPTH));
+}
+
+#[test]
+fn a_form_drawn_twice_on_a_page_is_two_pictures_and_one_moves_alone() {
+    let d = dir("form-twice");
+    let bytes = forms_file(
+        "",
+        &[(FM0, "q 1 0 0 1 50 100 cm /Fm0 Do Q q 1 0 0 1 300 400 cm /Fm0 Do Q")],
+        vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 6 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    let l = list(&eng, id);
+    assert_eq!(l.len(), 2);
+    assert!(near(l[0].rect, [70.0, 612.0, 170.0, 662.0]) && near(l[1].rect, [320.0, 312.0, 420.0, 362.0]), "{:?} {:?}", l[0].rect, l[1].rect);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 0.0, dy: -40.0 });
+    let n = list(&eng, id);
+    assert!(near(n[0].rect, [70.0, 572.0, 170.0, 622.0]), "{:?}", n[0].rect);
+    assert_eq!(n[1].rect, l[1].rect, "the second drawing of the form is as it was");
+    // The second picture is now the only user of the form: it moves in place, no second copy.
+    change(&eng, id, Some(1), ImageChange::Move { dx: 5.0, dy: 0.0 });
+    let _ = saved(&eng, id, &path);
+    assert_eq!(forms_in(&path), 2);
+}
+
+#[test]
+fn resources_inherited_from_the_page_tree_make_a_form_shared() {
+    let d = dir("form-inherited");
+    // The two pages take their resources from the /Pages node: one dictionary, many users.
+    let kids = forms_file("", &[("", "q 1 0 0 1 50 100 cm /Fm0 Do Q"), ("", "q 1 0 0 1 200 300 cm /Fm0 Do Q")], vec![
+        form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 8 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"),
+        red(),
+    ]);
+    let kids = String::from_utf8_lossy(&kids).replace("/Type /Pages /Kids", "/Type /Pages /Resources << /XObject << /Fm0 7 0 R >> >> /Kids");
+    let (eng, id, _) = open(&d, kids.as_bytes());
+    let p2 = page_images(&eng, id, 1);
+    assert_eq!(p2.len(), 1);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 10.0 });
+    assert_eq!(page_images(&eng, id, 1), p2);
+    assert_eq!(page_images(&eng, id, 0)[0].in_form, ["IwForm0"]);
+}
+
+#[test]
+fn a_batch_in_one_shared_form_makes_one_copy() {
+    let d = dir("form-batch");
+    let res = "/Resources << /XObject << /Fm0 7 0 R >> >>";
+    let two = form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 8 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q q 40 0 0 40 150 150 cm /Im0 Do Q");
+    let bytes = forms_file("", &[(res, "q 1 0 0 1 50 100 cm /Fm0 Do Q"), (res, "q 1 0 0 1 200 300 cm /Fm0 Do Q")], vec![two, red()]);
+    let (eng, id, path) = open(&d, &bytes);
+    assert_eq!(page_images(&eng, id, 0).len(), 2);
+    let p2 = page_images(&eng, id, 1);
+    many(&eng, id, vec![(0, ImageChange::Move { dx: 5.0, dy: 5.0 }), (1, ImageChange::Move { dx: -5.0, dy: 0.0 })]).unwrap();
+    assert_eq!(page_images(&eng, id, 1), p2);
+    let _ = saved(&eng, id, &path);
+    assert_eq!(forms_in(&path), 2, "the form and one copy");
+    // A batch delete of both: also one copy, and the other page keeps both pictures.
+    let (eng, id, _) = open(&dir("form-batch-delete"), &bytes);
+    many(&eng, id, vec![(0, ImageChange::Delete), (1, ImageChange::Delete)]).unwrap();
+    assert!(page_images(&eng, id, 0).is_empty());
+    assert_eq!(page_images(&eng, id, 1).len(), 2);
+}
+
+#[test]
+fn a_picture_moved_out_of_its_forms_frame_is_warned_about() {
+    let d = dir("form-frame");
+    let (eng, id, _) = open(&d, &one_form());
+    // Inside the frame: nothing to say.
+    assert!(change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 }).warning.is_none());
+    // Partly out of the form's 300 × 300 frame (the picture is 100 wide, its left edge now at 30 in form space).
+    let r = change(&eng, id, Some(0), ImageChange::Move { dx: 200.0, dy: 0.0 });
+    assert!(r.warning.as_deref().is_some_and(|w| w.contains("cut off")), "{:?}", r.warning);
+    // Far out: hidden, and the move still happened.
+    let r = change(&eng, id, Some(0), ImageChange::Move { dx: 400.0, dy: 0.0 });
+    assert!(r.warning.as_deref().is_some_and(|w| w.contains("hidden")), "{:?}", r.warning);
+    assert_eq!(list(&eng, id).len(), 1);
+}
+
+#[test]
+fn a_picture_in_a_form_goes_to_another_page_with_its_place_and_leaves_a_shared_form_alone() {
+    let d = dir("form-move-page");
+    let res = "/Resources << /XObject << /Fm0 9 0 R >> >>";
+    let bytes = forms_file(
+        "",
+        &[(res, "q 1 0 0 1 50 100 cm /Fm0 Do Q"), (res, "q 1 0 0 1 200 300 cm /Fm0 Do Q"), ("", "")],
+        vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 10 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    let p2 = page_images(&eng, id, 1);
+    let r = move_to_page(&eng, id, rev(&eng, id), 0, &[0], (2, [60.0, 70.0]), EditSource::User).unwrap();
+    assert_eq!(r.state.undo.as_deref(), Some("Move image to p. 3"));
+    assert!(page_images(&eng, id, 0).is_empty());
+    assert_eq!(page_images(&eng, id, 1), p2);
+    let t = page_images(&eng, id, 2);
+    assert_eq!(t.len(), 1);
+    assert!(near(t[0].rect, [60.0, 70.0, 160.0, 120.0]), "{:?}", t[0].rect);
+    assert!(t[0].in_form.is_empty());
+    let _ = saved(&eng, id, &path);
+    assert!(near(rendered_box(&path, 2), t[0].rect), "{:?}", rendered_box(&path, 2));
+    eng.undo(id).unwrap();
+    assert_eq!(page_images(&eng, id, 0).len(), 1);
+    assert!(page_images(&eng, id, 2).is_empty());
+}
+
+#[test]
+fn a_picture_in_a_form_is_copied_with_its_full_place() {
+    let d = dir("form-copy");
+    let bytes = forms_file(
+        "",
+        &[("/Resources << /XObject << /Fm0 7 0 R >> >>", "q 0.5 0 0 0.5 50 100 cm /Fm0 Do Q"), ("", "")],
+        vec![form("/BBox [0 0 600 600] /Matrix [1 0 0 1 10 10] /Resources << /XObject << /Im0 8 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()],
+    );
+    let (eng, id, _) = open(&d, &bytes);
+    let l = page_images(&eng, id, 0);
+    assert!(near(l[0].rect, [65.0, 647.0, 115.0, 672.0]), "{:?}", l[0].rect);
+    let clip = copy(&eng, id, rev(&eng, id), 0, &[0]).unwrap();
+    assert!(near(clip.info().rect, l[0].rect), "{:?}", clip.info().rect);
+    pasted(&eng, id, 1, [10.0, 10.0], &clip).unwrap();
+    let p = page_images(&eng, id, 1);
+    assert!(near(p[0].rect, [10.0, 10.0, 60.0, 35.0]), "{:?}", p[0].rect);
+    // A copy does not touch the source.
+    assert_eq!(page_images(&eng, id, 0), l);
+}
+
+#[test]
+fn a_form_without_resources_of_its_own_is_listed_but_not_changed() {
+    let d = dir("form-no-resources");
+    // The picture's name comes from the page's resources (PDF 1.1).
+    let res = "/Resources << /XObject << /Fm0 5 0 R /Im0 6 0 R >> >>";
+    let (eng, id, _) = open(&d, &forms_file("", &[(res, "q 1 0 0 1 50 100 cm /Fm0 Do Q")], vec![form("/BBox [0 0 300 300]", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()]));
+    let l = list(&eng, id);
+    assert_eq!(l.len(), 1);
+    assert!(!l[0].editable && l[0].reason.as_deref().is_some_and(|r| r.contains("no resources")), "{:?}", l[0].reason);
+    assert!(matches!(edit_on(&eng, id, 0, 0, ImageChange::Move { dx: 1.0, dy: 1.0 }), Err(EngineError::Invalid(_))));
+}
+
+#[test]
+fn certified_and_signed_documents_treat_pictures_in_forms_as_any_other() {
+    let d = dir("form-certified");
+    let perms = "/Perms << /DocMDP << /Type /Sig /Reference [ << /TransformMethod /DocMDP /TransformParams << /P 2 >> >> ] >> >>";
+    let f = |catalog: &str, extra: Vec<Vec<u8>>| {
+        let mut rest = vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 6 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()];
+        rest.extend(extra);
+        forms_file(catalog, &[(FM0, "q 1 0 0 1 50 100 cm /Fm0 Do Q")], rest)
+    };
+    let (eng, id, _) = open(&d, &f(perms, vec![]));
+    assert!(blocks(&eng, id, 0).unwrap().locked.is_some());
+    assert!(matches!(edit_on(&eng, id, 0, 0, ImageChange::Move { dx: 1.0, dy: 1.0 }), Err(EngineError::Invalid(m)) if m.contains("certified")));
+
+    let field = format!("<< /FT /Sig /T (S) /Type /Annot /Subtype /Widget /Rect [0 0 0 0] {} >>", crate::outline::tests::sig_value("")).into_bytes();
+    let bytes = f("/AcroForm << /SigFlags 3 /Fields [7 0 R] >>", vec![field]);
+    let (eng, id, path) = open(&dir("form-signed"), &bytes);
+    assert!(blocks(&eng, id, 0).unwrap().signed);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 5.0, dy: 5.0 });
+    eng.save(id, None).unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(&bytes), "the signed bytes are not the start of the saved file");
+}
+
+#[test]
+fn a_resources_dictionary_two_pages_share_makes_its_forms_shared() {
+    let d = dir("form-shared-resources");
+    // Both pages point at object 9; only the first draws the form, but a change must not reach the second.
+    let bytes = forms_file(
+        "",
+        &[("/Resources 9 0 R", "q 1 0 0 1 50 100 cm /Fm0 Do Q"), ("/Resources 9 0 R", "")],
+        vec![
+            form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 8 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"),
+            red(),
+            b"<< /XObject << /Fm0 7 0 R >> >>".to_vec(),
+        ],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 });
+    assert_eq!(page_images(&eng, id, 0)[0].in_form, ["IwForm0"]);
+    let doc = saved(&eng, id, &path);
+    // Page 2 still has the dictionary it had, and the original form in it.
+    assert_ne!(entry(&doc, 1, "Fm0"), 0);
+    assert!(text_of(&doc, entry(&doc, 1, "Fm0")).contains("20 30 cm"));
+}
+
+#[test]
+fn a_form_that_is_also_an_annotations_appearance_is_copied_before_it_changes() {
+    let d = dir("form-annot");
+    let bytes = forms_file(
+        "",
+        &[(&format!("{FM0} /Annots [7 0 R]"), "q 1 0 0 1 50 100 cm /Fm0 Do Q")],
+        vec![
+            form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 6 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"),
+            red(),
+            b"<< /Type /Annot /Subtype /Stamp /Rect [0 0 300 300] /AP << /N 5 0 R >> >>".to_vec(),
+        ],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    change(&eng, id, Some(0), ImageChange::Move { dx: 10.0, dy: 0.0 });
+    assert_eq!(list(&eng, id)[0].in_form, ["IwForm0"]);
+    let _ = saved(&eng, id, &path);
+    // The appearance stream is the original form, picture where it was.
+    let doc = mupdf::pdf::PdfDocument::open(&path).unwrap();
+    let annot = doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+    let ap = get(&get(&annot, "AP").unwrap(), "N").unwrap();
+    assert_eq!(String::from_utf8_lossy(&ap.read_stream().unwrap()), "q 100 0 0 50 20 30 cm /Im0 Do Q");
+}
+
+#[test]
+fn a_page_picture_and_a_form_picture_move_to_another_page_together() {
+    let d = dir("form-mixed-move");
+    // The form is also drawn by page 2, so taking its picture out copies it (and renames the page's `Do`).
+    let res = "/Resources << /XObject << /Fm0 9 0 R /Im1 10 0 R >> >>";
+    let bytes = forms_file(
+        "",
+        &[
+            (res, "q 60 0 0 30 300 400 cm /Im1 Do Q q 1 0 0 1 50 100 cm /Fm0 Do Q q 20 0 0 20 400 100 cm /Im1 Do Q"),
+            (res, "q 1 0 0 1 200 300 cm /Fm0 Do Q"),
+            ("", ""),
+        ],
+        vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 10 0 R >> >>", "q 100 0 0 50 20 30 cm /Im0 Do Q"), red()],
+    );
+    let (eng, id, path) = open(&d, &bytes);
+    let l = list(&eng, id);
+    assert_eq!(l.len(), 3);
+    let sizes: Vec<_> = l.iter().map(|b| (b.rect[2] - b.rect[0]).round()).collect();
+    assert_eq!(sizes, [60.0, 100.0, 20.0]);
+    let p2 = page_images(&eng, id, 1);
+    // The first two go (a page picture and the form's), the third stays.
+    move_to_page(&eng, id, rev(&eng, id), 0, &[0, 1], (2, [20.0, 20.0]), EditSource::User).unwrap();
+    let rest = page_images(&eng, id, 0);
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].rect, l[2].rect);
+    assert_eq!(page_images(&eng, id, 1), p2, "the other page still has its picture in the form");
+    let moved = page_images(&eng, id, 2);
+    assert_eq!(moved.len(), 2);
+    let mut w: Vec<_> = moved.iter().map(|b| (b.rect[2] - b.rect[0]).round()).collect();
+    w.sort_by(f32::total_cmp);
+    assert_eq!(w, [60.0, 100.0]);
+    // Saved and reopened, the target page draws both and the other page its form.
+    let _ = saved(&eng, id, &path);
+    let seen = rendered_box(&path, 2);
+    assert!(seen[0] >= 19.0 && seen[1] >= 19.0, "{seen:?}");
+    assert!(near(rendered_box(&path, 1), p2[0].rect));
+    assert!(near(rendered_box(&path, 0), l[2].rect), "{:?} {:?}", rendered_box(&path, 0), l[2].rect);
+    // One undo step.
+    eng.undo(id).unwrap();
+    assert_eq!(list(&eng, id), l);
+}
+
+#[test]
+fn only_the_first_form_drawings_of_a_page_are_entered() {
+    let d = dir("form-draw-cap");
+    let content = "/Fm0 Do ".repeat(MAX_FORM_DRAWS + 6);
+    let (eng, id, _) = open(&d, &forms_file("", &[(FM0, &content)], vec![form("/BBox [0 0 300 300] /Resources << /XObject << /Im0 6 0 R >> >>", "q 10 0 0 10 0 0 cm /Im0 Do Q"), red()]));
+    assert_eq!(list(&eng, id).len(), MAX_FORM_DRAWS);
+}

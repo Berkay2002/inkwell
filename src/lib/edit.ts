@@ -156,7 +156,7 @@ export function editImage(id: number, rev: number, page: number, index: number |
   return textResult(id, async () => {
     const r = await api.imageEdit(id, rev, page, index, change);
     applyState(id, r.state);
-    return r.state;
+    return r;
   });
 }
 
@@ -165,7 +165,7 @@ export function editImages(id: number, rev: number, page: number, items: { index
   return textResult(id, async () => {
     const r = await api.imageEditMany(id, rev, page, items);
     applyState(id, r.state);
-    return r.state;
+    return r;
   });
 }
 
@@ -174,7 +174,7 @@ export function pasteImages(id: number, rev: number, page: number, at: [number, 
   return textResult(id, async () => {
     const r = await api.imagePaste(id, rev, page, at);
     applyState(id, r.state);
-    return r.state;
+    return r;
   });
 }
 
@@ -183,7 +183,7 @@ export function moveImagesToPage(id: number, rev: number, page: number, indices:
   return textResult(id, async () => {
     const r = await api.imageMoveToPage(id, rev, page, indices, toPage, at);
     applyState(id, r.state);
-    return r.state;
+    return r;
   });
 }
 

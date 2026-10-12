@@ -27,7 +27,7 @@ use crate::textedit::text::{page_streams, splice, write_streams};
 use mupdf::pdf::{PdfDocument, PdfObject};
 use mupdf::{Buffer, Image};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 type Result<T> = std::result::Result<T, EngineError>;
@@ -85,6 +85,9 @@ pub struct ImageBlock {
     pub editable: bool,
     /// Why it can't be changed.
     pub reason: Option<String>,
+    /// The resource names of the form XObjects it is drawn through, outermost first (empty for a picture
+    /// the page draws itself). `name` and `xref` are then the picture's entry in the innermost form.
+    pub in_form: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -199,6 +202,10 @@ struct Found {
     /// The clip box in user space, if a rectangle clips it.
     clip: Option<[f64; 4]>,
     in_text: bool,
+    /// The scope (the page, or one drawing of a form) whose content holds the operator.
+    scope: usize,
+    /// The box in user space the enclosing forms' `/BBox`es leave, if there are any.
+    frame: Option<[f64; 4]>,
     name: Option<Vec<u8>>,
     obj: Option<PdfObject>,
     width: u32,
@@ -209,15 +216,54 @@ struct Found {
     masked: bool,
 }
 
-struct PageImages {
-    page: PdfObject,
+/// A content stream as read: its pieces, operators and the CTM in effect before each operator.
+struct Content {
     streams: Vec<(PdfObject, Vec<u8>)>,
     pieces: Pieces,
     ops: Vec<Op>,
-    /// The CTM in effect before each operator.
+    /// The full CTM before each operator: for a form it starts from the form's `/Matrix` and the CTM at its
+    /// `Do`, so the placement of a picture inside a form is its place on the page's user space.
     ctms: Vec<Matrix>,
+}
+
+impl Content {
+    fn empty() -> Self {
+        Content { streams: Vec::new(), pieces: Pieces::join::<&[u8]>(&[]), ops: Vec::new(), ctms: Vec::new() }
+    }
+}
+
+/// One drawing of a content stream: the page's, or a form XObject's (a form drawn twice is two scopes, each
+/// with its own CTM). Scope 0 is the page.
+struct Scope {
+    /// The page, or the form XObject as its parent's resources name it.
+    holder: PdfObject,
+    content: Content,
+    /// The scope and operator index of the `Do` that draws it, and the resource name it uses there.
+    via: Option<(usize, usize, Vec<u8>)>,
+    /// The form's object number (0 for the page).
+    num: i32,
+    /// It has `/Resources` of its own (a page that inherits them, or a form without, has not).
+    own_res: bool,
+    /// Object numbers of its `/Resources` and `/XObject` dictionaries when they are indirect, else 0.
+    res_num: i32,
+    xo_num: i32,
+    /// Why nothing drawn in it can be changed.
+    reason: Option<String>,
+    /// The resource names of the forms from the page down to this one.
+    names: Vec<String>,
+}
+
+struct PageImages {
+    page: PdfObject,
+    scopes: Vec<Scope>,
     found: Vec<Found>,
 }
+
+/// How deep forms are entered, how many form drawings and how many bytes of form content one page reads
+/// (the content is untrusted: a form can draw a hundred forms, each drawing a hundred).
+const MAX_FORM_DEPTH: usize = 4;
+const MAX_FORM_DRAWS: usize = 64;
+const MAX_FORM_BYTES: usize = 16 << 20;
 
 fn union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
     [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
@@ -295,7 +341,221 @@ fn space_of(img: &PdfObject) -> String {
     }
 }
 
+/// The graphics state a content stream starts from.
+#[derive(Clone, Copy)]
+struct Start {
+    ctm: Matrix,
+    clip: Option<[f64; 4]>,
+    frame: Option<[f64; 4]>,
+    in_text: bool,
+}
+
+struct Reader {
+    scopes: Vec<Scope>,
+    found: Vec<Found>,
+    /// Enter form XObjects.
+    forms: bool,
+    draws: usize,
+    bytes: usize,
+    /// Object numbers of the forms being read, outermost first (a form that draws itself stops there).
+    chain: Vec<i32>,
+}
+
+fn nums_of(o: Option<PdfObject>) -> Vec<f64> {
+    let Some(a) = o.filter(|a| a.is_array().unwrap_or(false)) else { return Vec::new() };
+    (0..a.len().unwrap_or(0) as i32).map(|i| a.get_array(i).ok().flatten().and_then(|x| x.as_float().ok()).map_or(0.0, f64::from)).collect()
+}
+
+impl Reader {
+    /// Reads `streams` as the content of `holder`: records its images, and (with `forms`) enters the forms it
+    /// draws. `xobjects` is the `/XObject` dict its names resolve in. Returns the scope's index.
+    fn run(&mut self, mut sc: Scope, streams: Vec<(PdfObject, Vec<u8>)>, xobjects: Option<PdfObject>, start: Start, depth: usize) -> usize {
+        let at = self.scopes.len();
+        // Reserved, so the pictures found below can name their scope; filled in at the end.
+        self.scopes.push(Scope {
+            holder: PdfObject::new_null(),
+            content: Content::empty(),
+            via: None,
+            num: 0,
+            own_res: false,
+            res_num: 0,
+            xo_num: 0,
+            reason: None,
+            names: Vec::new(),
+        });
+        let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
+        let ops = pieces.parse();
+        // Graphics state: CTM and clip box; the streams are one stream (§7.8.2).
+        let (mut ctm, mut clip, mut in_text) = (start.ctm, start.clip, start.in_text);
+        let mut stack = Vec::new();
+        // The current path's rectangles (their union, in user space), and whether it has other parts.
+        let mut path: Option<[f64; 4]> = None;
+        let mut path_other = false;
+        let mut pending_clip = false;
+        let mut ctms = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            ctms.push(ctm);
+            match op.op.as_slice() {
+                b"q" => stack.push((ctm, clip)),
+                b"Q" => (ctm, clip) = stack.pop().unwrap_or((ctm, clip)),
+                b"cm" => {
+                    if let Some(m) = op.nums::<6>() {
+                        ctm = Matrix(m).then(&ctm);
+                    }
+                }
+                b"BT" => in_text = true,
+                b"ET" => in_text = false,
+                b"re" => match op.nums::<4>() {
+                    // Only rectangles are tracked as clips (several: their union); anything else in
+                    // the path clears the guess.
+                    Some([x, y, w, h]) => {
+                        let r = ctm.bbox([x.min(x + w), y.min(y + h), x.max(x + w), y.max(y + h)]);
+                        path = Some(path.map_or(r, |p| union(p, r)));
+                    }
+                    None => path_other = true,
+                },
+                // Straight edges count by their box (a turned crop is a parallelogram); curves clear it.
+                b"m" | b"l" => match op.nums::<2>() {
+                    Some([x, y]) => {
+                        let (x, y) = ctm.apply(x, y);
+                        path = Some(path.map_or([x, y, x, y], |p| union(p, [x, y, x, y])));
+                    }
+                    None => path_other = true,
+                },
+                b"h" => {}
+                b"c" | b"v" | b"y" => path_other = true,
+                b"W" | b"W*" => pending_clip = true,
+                b"n" | b"f" | b"F" | b"f*" | b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*" => {
+                    if pending_clip && !path_other {
+                        if let Some(r) = path {
+                            clip = Some(clip.map_or(r, |c| intersect(c, r)));
+                        }
+                    }
+                    pending_clip = false;
+                    path = None;
+                    path_other = false;
+                }
+                b"Do" => {
+                    let Some(name) = op.name(0) else { continue };
+                    let Some(x) = xobjects.as_ref().and_then(|x| get(x, &String::from_utf8_lossy(name))) else { continue };
+                    match get(&x, "Subtype").and_then(|s| s.as_name().ok()).as_deref() {
+                        Some(b"Image") => self.found.push(Found {
+                            op: i,
+                            kind: ImageKind::XObject,
+                            ctm,
+                            clip,
+                            in_text,
+                            scope: at,
+                            frame: start.frame,
+                            name: Some(name.to_vec()),
+                            width: int_of(get(&x, "Width")),
+                            height: int_of(get(&x, "Height")),
+                            color_space: space_of(&x),
+                            bpc: int_of(get(&x, "BitsPerComponent")).max(u32::from(space_of(&x) == "ImageMask")),
+                            filter: pdf_names(get(&x, "Filter")),
+                            masked: get(&x, "SMask").is_some() || get(&x, "Mask").is_some(),
+                            obj: Some(x),
+                        }),
+                        Some(b"Form") if self.forms => {
+                            let here = Start { ctm, clip, frame: start.frame, in_text };
+                            self.form(&x, (at, i, name), &sc, xobjects.as_ref(), here, depth);
+                        }
+                        _ => {}
+                    }
+                }
+                b"BI" => {
+                    let d = inline_dict(&pieces.data()[op.span.clone()]);
+                    let val = |k: &[u8]| d.iter().find(|(key, _)| key == k).map(|(_, v)| v);
+                    let n = |k: &[u8]| val(k).and_then(Obj::as_f64).unwrap_or(0.0).max(0.0) as u32;
+                    let mask = matches!(val(b"ImageMask"), Some(Obj::Bool(true)));
+                    self.found.push(Found {
+                        op: i,
+                        kind: ImageKind::Inline,
+                        ctm,
+                        clip,
+                        in_text,
+                        scope: at,
+                        frame: start.frame,
+                        name: None,
+                        obj: None,
+                        width: n(b"Width"),
+                        height: n(b"Height"),
+                        color_space: if mask { "ImageMask".into() } else { val(b"ColorSpace").map(inline_space).unwrap_or_default() },
+                        bpc: if mask { 1 } else { n(b"BitsPerComponent") },
+                        filter: val(b"Filter").map(inline_filter).unwrap_or_default(),
+                        masked: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+        sc.content = Content { streams, pieces, ops, ctms };
+        self.scopes[at] = sc;
+        at
+    }
+
+    /// Enters the form `x`, drawn by operator `via.1` of scope `via.0` under resource name `via.2`, at graphics state `st`.
+    fn form(&mut self, x: &PdfObject, via: (usize, usize, &[u8]), parent: &Scope, parent_xo: Option<&PdfObject>, st: Start, depth: usize) {
+        let num = x.as_indirect().unwrap_or(0).max(0);
+        // A form that draws itself (directly or through others) is entered once.
+        if depth >= MAX_FORM_DEPTH || self.draws >= MAX_FORM_DRAWS || (num > 0 && self.chain.contains(&num)) {
+            return;
+        }
+        if !x.is_stream().unwrap_or(false) {
+            return;
+        }
+        let Ok(data) = x.read_stream_capped(MAX_FORM_BYTES.saturating_sub(self.bytes)) else { return };
+        self.bytes += data.len();
+        self.draws += 1;
+        let m = nums_of(get(x, "Matrix"));
+        let m = if m.len() == 6 { Matrix([m[0], m[1], m[2], m[3], m[4], m[5]]) } else { Matrix::IDENTITY };
+        let e = m.then(&st.ctm);
+        let b = nums_of(get(x, "BBox"));
+        let (mut clip, mut frame) = (st.clip, st.frame);
+        if let [x0, y0, x1, y1] = b[..] {
+            // The form's `/BBox` clips what it draws: in user space, its box.
+            let r = e.bbox([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]);
+            clip = Some(clip.map_or(r, |c| intersect(c, r)));
+            frame = Some(frame.map_or(r, |f| intersect(f, r)));
+        }
+        let res = get(x, "Resources").filter(|r| r.is_dict().unwrap_or(false));
+        let own_res = res.is_some();
+        // A form without resources of its own draws with its parent's (PDF 1.1): readable, not changeable.
+        let xo = match &res {
+            Some(r) => get(r, "XObject"),
+            None => parent_xo.cloned(),
+        };
+        let reason = parent
+            .reason
+            .clone()
+            .or_else(|| (!own_res).then(|| "it is inside a form that has no resources of its own (PDF 1.1)".to_string()));
+        let mut names = parent.names.clone();
+        names.push(String::from_utf8_lossy(via.2).into_owned());
+        let sc = Scope {
+            holder: x.clone(),
+            content: Content::empty(),
+            via: Some((via.0, via.1, via.2.to_vec())),
+            num,
+            own_res,
+            res_num: get(x, "Resources").and_then(|r| r.as_indirect().ok()).unwrap_or(0).max(0),
+            xo_num: res.as_ref().and_then(|r| get(r, "XObject")).and_then(|o| o.as_indirect().ok()).unwrap_or(0).max(0),
+            reason,
+            names,
+        };
+        self.chain.push(num);
+        // The form's stream is its one content piece; the object stays the same one when it is rewritten.
+        self.run(sc, vec![(x.clone(), data)], xo, Start { ctm: e, clip, frame, in_text: st.in_text }, depth + 1);
+        self.chain.pop();
+    }
+}
+
 fn read_images(doc: &PdfDocument, page: u32) -> Result<PageImages> {
+    read_images_in(doc, page, true)
+}
+
+/// The images of `page`; `forms` also enters the form XObjects it draws (the editor does, the OCR clean-up
+/// does not).
+fn read_images_in(doc: &PdfDocument, page: u32, forms: bool) -> Result<PageImages> {
     let count = doc.page_count()?.max(0) as u32;
     if page >= count {
         return Err(EngineError::BadPage(page));
@@ -303,109 +563,22 @@ fn read_images(doc: &PdfDocument, page: u32) -> Result<PageImages> {
     let p = doc.find_page(page as i32)?;
     let res = p.get_dict_inheritable("Resources")?;
     let xobjects = res.as_ref().and_then(|r| get(r, "XObject"));
-    let streams = page_streams(&p)?;
-    let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
-    let ops = pieces.parse();
-    let mut found = Vec::new();
-    // Graphics state: CTM and clip box; the streams are one stream (§7.8.2).
-    let mut ctm = Matrix::IDENTITY;
-    let mut clip: Option<[f64; 4]> = None;
-    let mut stack = Vec::new();
-    // The current path's rectangles (their union, in user space), and whether it has other parts.
-    let mut path: Option<[f64; 4]> = None;
-    let mut path_other = false;
-    let mut pending_clip = false;
-    let mut in_text = false;
-    let mut ctms = Vec::with_capacity(ops.len());
-    for (i, op) in ops.iter().enumerate() {
-        ctms.push(ctm);
-        match op.op.as_slice() {
-            b"q" => stack.push((ctm, clip)),
-            b"Q" => (ctm, clip) = stack.pop().unwrap_or((ctm, clip)),
-            b"cm" => {
-                if let Some(m) = op.nums::<6>() {
-                    ctm = Matrix(m).then(&ctm);
-                }
-            }
-            b"BT" => in_text = true,
-            b"ET" => in_text = false,
-            b"re" => match op.nums::<4>() {
-                // Only rectangles are tracked as clips (several: their union); anything else in
-                // the path clears the guess.
-                Some([x, y, w, h]) => {
-                    let r = ctm.bbox([x.min(x + w), y.min(y + h), x.max(x + w), y.max(y + h)]);
-                    path = Some(path.map_or(r, |p| union(p, r)));
-                }
-                None => path_other = true,
-            },
-            // Straight edges count by their box (a turned crop is a parallelogram); curves clear it.
-            b"m" | b"l" => match op.nums::<2>() {
-                Some([x, y]) => {
-                    let (x, y) = ctm.apply(x, y);
-                    path = Some(path.map_or([x, y, x, y], |p| union(p, [x, y, x, y])));
-                }
-                None => path_other = true,
-            },
-            b"h" => {}
-            b"c" | b"v" | b"y" => path_other = true,
-            b"W" | b"W*" => pending_clip = true,
-            b"n" | b"f" | b"F" | b"f*" | b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*" => {
-                if pending_clip && !path_other {
-                    if let Some(r) = path {
-                        clip = Some(clip.map_or(r, |c| intersect(c, r)));
-                    }
-                }
-                pending_clip = false;
-                path = None;
-                path_other = false;
-            }
-            b"Do" => {
-                let Some(name) = op.name(0) else { continue };
-                let Some(x) = xobjects.as_ref().and_then(|x| get(x, &String::from_utf8_lossy(name))) else { continue };
-                if get(&x, "Subtype").and_then(|s| s.as_name().ok()).as_deref() != Some(b"Image") {
-                    continue;
-                }
-                found.push(Found {
-                    op: i,
-                    kind: ImageKind::XObject,
-                    ctm,
-                    clip,
-                    in_text,
-                    name: Some(name.to_vec()),
-                    width: int_of(get(&x, "Width")),
-                    height: int_of(get(&x, "Height")),
-                    color_space: space_of(&x),
-                    bpc: int_of(get(&x, "BitsPerComponent")).max(u32::from(space_of(&x) == "ImageMask")),
-                    filter: pdf_names(get(&x, "Filter")),
-                    masked: get(&x, "SMask").is_some() || get(&x, "Mask").is_some(),
-                    obj: Some(x),
-                });
-            }
-            b"BI" => {
-                let d = inline_dict(&pieces.data()[op.span.clone()]);
-                let val = |k: &[u8]| d.iter().find(|(key, _)| key == k).map(|(_, v)| v);
-                let n = |k: &[u8]| val(k).and_then(Obj::as_f64).unwrap_or(0.0).max(0.0) as u32;
-                let mask = matches!(val(b"ImageMask"), Some(Obj::Bool(true)));
-                found.push(Found {
-                    op: i,
-                    kind: ImageKind::Inline,
-                    ctm,
-                    clip,
-                    in_text,
-                    name: None,
-                    obj: None,
-                    width: n(b"Width"),
-                    height: n(b"Height"),
-                    color_space: if mask { "ImageMask".into() } else { val(b"ColorSpace").map(inline_space).unwrap_or_default() },
-                    bpc: if mask { 1 } else { n(b"BitsPerComponent") },
-                    filter: val(b"Filter").map(inline_filter).unwrap_or_default(),
-                    masked: false,
-                });
-            }
-            _ => {}
-        }
-    }
-    Ok(PageImages { page: p, streams, pieces, ops, ctms, found })
+    let own = get(&p, "Resources");
+    let sc = Scope {
+        holder: p.clone(),
+        content: Content::empty(),
+        via: None,
+        num: 0,
+        own_res: own.is_some(),
+        res_num: own.and_then(|r| r.as_indirect().ok()).unwrap_or(0).max(0),
+        xo_num: xobjects.as_ref().and_then(|x| x.as_indirect().ok()).unwrap_or(0).max(0),
+        reason: None,
+        names: Vec::new(),
+    };
+    let mut r = Reader { scopes: Vec::new(), found: Vec::new(), forms, draws: 0, bytes: 0, chain: Vec::new() };
+    let start = Start { ctm: Matrix::IDENTITY, clip: None, frame: None, in_text: false };
+    r.run(sc, page_streams(&p)?, xobjects, start, 0);
+    Ok(PageImages { page: p, scopes: r.scopes, found: r.found })
 }
 
 const UNIT: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
@@ -438,7 +611,8 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<ImageBlocks> {
             .map(|(i, f)| {
                 let full = f.ctm.bbox(UNIT);
                 let shown = f.clip.map_or(full, |c| intersect(full, c));
-                let reason = (f.in_text).then(|| "it is drawn inside a text object".to_string());
+                let sc = &pi.scopes[f.scope];
+                let reason = sc.reason.clone().or_else(|| f.in_text.then(|| "it is drawn inside a text object".to_string()));
                 let placed = f.ctm.then(&m);
                 let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(u, v)| placed.apply(u, v));
                 let mut quad = [0.0f32; 8];
@@ -464,6 +638,7 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<ImageBlocks> {
                     xref: f.obj.as_ref().and_then(|o| o.as_indirect().ok()).filter(|n| *n > 0),
                     editable: reason.is_none(),
                     reason,
+                    in_form: sc.names.clone(),
                 }
             })
             .collect();
@@ -483,11 +658,13 @@ pub fn blocks(eng: &Engine, doc: DocId, page: u32) -> Result<ImageBlocks> {
 #[serde(rename_all = "camelCase")]
 pub struct ImageEdited {
     pub state: EditState,
+    /// Something to tell the user about a change that was made: a picture moved out of its form's frame.
+    pub warning: Option<String>,
 }
 
-/// The page-local `/XObject` dict: the page's resources and their `/XObject` dict are copied onto
-/// the page first (shallowly) when they are inherited, shared or indirect, so removing a name
-/// never touches another page.
+/// The holder's own `/XObject` dict (the holder is a page or a form XObject): its resources and their `/XObject`
+/// dict are copied onto it first (shallowly) when they are inherited, shared or indirect, so removing or adding
+/// a name never touches another page or form.
 fn local_xobjects(doc: &mut PdfDocument, page: &PdfObject) -> Result<PdfObject> {
     let mut page = page.clone();
     let res = match page.get_dict_inheritable("Resources")? {
@@ -504,29 +681,42 @@ fn local_xobjects(doc: &mut PdfDocument, page: &PdfObject) -> Result<PdfObject> 
     get(&res, "XObject").ok_or_else(|| invalid("the page has no XObjects"))
 }
 
-/// Adds image object `img` to the page's XObjects under a new name.
-fn add_resource(doc: &mut PdfDocument, page: &PdfObject, img: &PdfObject) -> Result<Vec<u8>> {
-    let mut xo = local_xobjects(doc, page)?;
-    let name = (0..).map(|i| format!("IwImg{i}")).find(|n| get(&xo, n).is_none()).expect("a free name");
-    xo.dict_put(name.as_str(), img.clone())?;
+/// Adds XObject `obj` to the holder's resources under a new name made of `prefix` and a number.
+fn add_named(doc: &mut PdfDocument, holder: &PdfObject, prefix: &str, obj: &PdfObject) -> Result<Vec<u8>> {
+    let mut xo = local_xobjects(doc, holder)?;
+    let name = (0..).map(|i| format!("{prefix}{i}")).find(|n| get(&xo, n).is_none()).expect("a free name");
+    xo.dict_put(name.as_str(), obj.clone())?;
     Ok(name.into_bytes())
 }
 
-/// Drops the page's XObject entries for `names` the page's content no longer draws, so an image
-/// nothing else uses goes with the next full save.
-fn forget_unused(doc: &mut PdfDocument, page: u32, names: &HashSet<Vec<u8>>) -> Result<()> {
+/// Adds image object `img` to the holder's XObjects under a new name.
+fn add_resource(doc: &mut PdfDocument, holder: &PdfObject, img: &PdfObject) -> Result<Vec<u8>> {
+    add_named(doc, holder, "IwImg", img)
+}
+
+/// The content streams of a page, or the one stream of a form XObject, as they are now.
+fn holder_streams(holder: &PdfObject) -> Result<Vec<(PdfObject, Vec<u8>)>> {
+    if holder.is_stream()? {
+        Ok(vec![(holder.clone(), holder.read_stream()?)])
+    } else {
+        page_streams(holder)
+    }
+}
+
+/// Drops the holder's XObject entries for `names` its content no longer draws, so an image nothing else uses goes
+/// with the next full save.
+fn forget_unused(doc: &mut PdfDocument, p: &PdfObject, names: &HashSet<Vec<u8>>) -> Result<()> {
     if names.is_empty() {
         return Ok(());
     }
-    let p = doc.find_page(page as i32)?;
-    let streams = page_streams(&p)?;
+    let streams = holder_streams(p)?;
     let ops = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>()).parse();
     let used: HashSet<&[u8]> = ops.iter().filter(|o| o.is("Do")).filter_map(|o| o.name(0)).collect();
     let gone: Vec<&Vec<u8>> = names.iter().filter(|n| !used.contains(n.as_slice())).collect();
     if gone.is_empty() {
         return Ok(());
     }
-    // A form XObject without its own resources draws with the page's (PDF 1.1): keep names then.
+    // A form XObject without its own resources draws with the holder's (PDF 1.1): keep names then.
     let res = p.get_dict_inheritable("Resources")?;
     let xobjects = res.as_ref().and_then(|r| get(r, "XObject"));
     if let Some(x) = &xobjects {
@@ -539,7 +729,7 @@ fn forget_unused(doc: &mut PdfDocument, page: u32, names: &HashSet<Vec<u8>>) -> 
             }
         }
     }
-    let mut xo = local_xobjects(doc, &p)?;
+    let mut xo = local_xobjects(doc, p)?;
     for n in gone {
         xo.dict_delete(String::from_utf8_lossy(n).as_ref())?;
     }
@@ -630,15 +820,16 @@ pub fn edit(
     source: EditSource,
 ) -> Result<ImageEdited> {
     let entry = eng.doc_entry(doc)?;
+    let mut warning = None;
     let state = eng.apply_removing(doc, change.label(page), source, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
         crate::outline::refuse_if_certified(d, "Changing its images")?;
-        apply(d, page, index, change)?;
+        warning = apply(d, page, index, change)?;
         Ok(vec![page])
     })?;
-    Ok(ImageEdited { state })
+    Ok(ImageEdited { state, warning })
 }
 
 /// One image of a batch: its `index` in the list and what is done to it.
@@ -677,17 +868,19 @@ pub fn edit_many(eng: &Engine, doc: DocId, rev: u32, page: u32, items: &[ImageIt
         order.sort_by_key(|it| std::cmp::Reverse(it.index));
     }
     let entry = eng.doc_entry(doc)?;
+    let mut warning = None;
     let state = eng.apply_removing(doc, first.change.label_many(items.len(), page), source, |d| {
         if entry.generation() != rev {
             return Err(EngineError::Stale);
         }
         crate::outline::refuse_if_certified(d, "Changing its images")?;
         for it in order {
-            apply(d, page, Some(it.index), &it.change)?;
+            let w = apply(d, page, Some(it.index), &it.change)?;
+            warning = warning.take().or(w);
         }
         Ok(vec![page])
     })?;
-    Ok(ImageEdited { state })
+    Ok(ImageEdited { state, warning })
 }
 
 /// `m`'s linear part keeps the axes of the page: an upright or quarter-turned image.
@@ -708,7 +901,146 @@ fn fine_cm(m: &Matrix) -> Op {
     Op::verbatim(format!("{} cm", m.0.map(n).join(" ")).as_bytes())
 }
 
-fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChange) -> Result<()> {
+/// The warning for a picture moved out of the frame (`/BBox`) of the form it is drawn in: how much of its box
+/// shows before and after, in user space.
+fn frame_warning(old: [f64; 4], new: [f64; 4], frame: [f64; 4]) -> Option<String> {
+    let shown = |b: [f64; 4]| {
+        let area = (b[2] - b[0]) * (b[3] - b[1]);
+        let i = intersect(b, frame);
+        if area <= 1e-9 { 1.0 } else { (i[2] - i[0]).max(0.0) * (i[3] - i[1]).max(0.0) / area }
+    };
+    let (was, now) = (shown(old), shown(new));
+    if now >= was - 1e-3 {
+        None
+    } else if now < 1e-3 {
+        Some("The picture now lies outside the frame (/BBox) of the form it is drawn in, so it is hidden. Undo brings it back.".into())
+    } else {
+        Some("Part of the picture now lies outside the frame (/BBox) of the form it is drawn in and is cut off.".into())
+    }
+}
+
+/// Puts rewritten content back where it came from: a page's `/Contents`, or a form XObject's own stream
+/// (the object stays the one the other drawings of it point at).
+fn write_content(d: &mut PdfDocument, holder: &PdfObject, sc: &Scope, new: Vec<Vec<u8>>) -> Result<()> {
+    if sc.via.is_none() {
+        return write_streams(d, holder, &sc.content.streams, new);
+    }
+    write_form(d, holder, &new.into_iter().next().unwrap_or_default())
+}
+
+fn write_form(_d: &mut PdfDocument, form: &PdfObject, data: &[u8]) -> Result<()> {
+    let mut f = form.clone();
+    f.dict_put("Filter", PdfObject::new_name("FlateDecode")?)?;
+    f.dict_delete("DecodeParms")?;
+    f.write_raw_stream_buffer(&Buffer::from_bytes(&flate(data)?)?)?;
+    Ok(())
+}
+
+/// The most objects the user count of a form looks at.
+const MAX_WALK: usize = 2_000_000;
+
+/// How many slots (dictionary values and array elements) of the objects reachable from the trailer refer to each
+/// of `targets`. None when the file is too large to walk: the caller then takes everything as shared.
+fn incoming(d: &PdfDocument, targets: &HashSet<i32>) -> Option<HashMap<i32, u32>> {
+    let mut counts = HashMap::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![d.trailer().ok()?];
+    let mut work = 0usize;
+    while let Some(o) = stack.pop() {
+        work += 1;
+        if work > MAX_WALK {
+            return None;
+        }
+        if o.is_indirect().ok()? {
+            let n = o.as_indirect().ok()?;
+            if targets.contains(&n) {
+                *counts.entry(n).or_insert(0u32) += 1;
+            }
+            if !seen.insert(n) {
+                continue;
+            }
+        }
+        // A stream is its dictionary here: its data is not looked at.
+        if o.is_dict().ok()? {
+            for i in 0..o.dict_len().ok()? as i32 {
+                stack.extend(o.get_dict_val(i).ok()?);
+            }
+        } else if o.is_array().ok()? {
+            for i in 0..o.len().ok()? as i32 {
+                stack.extend(o.get_array(i).ok()?);
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// The form XObject a change inside scope `at` is written to. The form itself when this drawing is its only user
+/// (nothing else in the document can reach it: one slot names it, one `Do` draws it, and the dictionaries on the
+/// way down are not shared); otherwise copies, so no other drawing changes:
+/// from the outermost form on the way that is shared, each form is copied (its stream and its own resources), the
+/// `Do` that draws it in the parent is pointed at the copy under a fresh name, and the copy's own `Do` of the next
+/// form is pointed at that one's copy. Whatever is not sure is taken as shared: a copy costs a few bytes, a change
+/// to another page is a wrong document.
+fn private_form(d: &mut PdfDocument, pi: &PageImages, at: usize) -> Result<PdfObject> {
+    let mut chain = Vec::new();
+    let mut s = at;
+    while let Some((p, _, _)) = pi.scopes[s].via {
+        chain.push(s);
+        s = p;
+    }
+    chain.reverse();
+    let mut targets = HashSet::new();
+    for &c in &chain {
+        let sc = &pi.scopes[c];
+        targets.insert(sc.num);
+        if let Some((p, _, _)) = sc.via {
+            targets.extend([pi.scopes[p].res_num, pi.scopes[p].xo_num]);
+        }
+    }
+    targets.retain(|n| *n > 0);
+    let counts = incoming(d, &targets);
+    let used_once = |n: i32| n == 0 || counts.as_ref().is_some_and(|c| c.get(&n).copied().unwrap_or(0) <= 1);
+    let first_shared = chain.iter().position(|&c| {
+        let sc = &pi.scopes[c];
+        let Some((p, _, name)) = &sc.via else { return true };
+        let parent = &pi.scopes[*p];
+        let draws = parent.content.ops.iter().filter(|o| o.is("Do") && o.name(0) == Some(name.as_slice())).count();
+        let named = counts.as_ref().is_some_and(|c| c.get(&sc.num).copied() == Some(1));
+        !(sc.num > 0 && named && draws == 1 && parent.own_res && used_once(parent.res_num) && used_once(parent.xo_num))
+    });
+    let Some(j) = first_shared else { return Ok(pi.scopes[at].holder.clone()) };
+    // The parent of the first copy is not shared: the page, or a form this way alone reaches.
+    let first_parent = pi.scopes[pi.scopes[chain[j]].via.as_ref().map_or(0, |v| v.0)].holder.clone();
+    let mut parent_holder = first_parent;
+    let mut clone = pi.scopes[at].holder.clone();
+    for &c in &chain[j..] {
+        let sc = &pi.scopes[c];
+        let (p, op, via_name) = sc.via.clone().expect("a form is drawn by an operator");
+        let parent = &pi.scopes[p];
+        // The copy: the form's dictionary and decoded stream, with resources of its own.
+        let mut dict = sc.holder.copy_dict()?;
+        for k in ["Filter", "DecodeParms", "Length", "DL"] {
+            dict.dict_delete(k)?;
+        }
+        dict.dict_put("Filter", PdfObject::new_name("FlateDecode")?)?;
+        let data = sc.content.streams.first().map(|(_, b)| b.as_slice()).unwrap_or_default();
+        clone = d.add_stream(&Buffer::from_bytes(&flate(data)?)?, Some(&dict), true)?;
+        local_xobjects(d, &clone)?;
+        let name = add_named(d, &parent_holder, "IwForm", &clone)?;
+        // Only the one `Do` is pointed at the copy; the parent's other draws of the form stay on the original.
+        let mut once = Some(vec![Op::new("Do", vec![Obj::Name(name)])]);
+        let new = splice(&parent.content.pieces, &parent.content.ops, |i| if i == op { (once.take().unwrap_or_default(), false) } else { (Vec::new(), true) });
+        write_content(d, &parent_holder, parent, new)?;
+        // The parent (a copy of its own, or the page) no longer draws the shared form under that name.
+        forget_unused(d, &parent_holder, &HashSet::from([via_name]))?;
+        parent_holder = clone.clone();
+    }
+    Ok(clone)
+}
+
+/// Applies `change` to image `index` of `page` (or adds one). The result is a warning for the user, if the change
+/// calls for one.
+fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChange) -> Result<Option<String>> {
     let to_page = page_space(d, page)?;
     let to_user = to_page.invert().ok_or_else(|| invalid("the page has no area"))?;
     let pi = read_images(d, page)?;
@@ -716,15 +1048,21 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
         if index.is_some() {
             return Err(invalid("a new image takes no index"));
         }
-        return add(d, &pi, &to_user, file, *rect, *keep_aspect);
+        add(d, &pi, &to_user, file, *rect, *keep_aspect)?;
+        return Ok(None);
     }
     let index = index.ok_or_else(|| invalid("which image?"))? as usize;
     let f = pi.found.get(index).cloned().ok_or_else(|| invalid(format!("page {} has no image {}", page + 1, index + 1)))?;
     if f.in_text && !matches!(change, ImageChange::Delete) {
         return Err(invalid("this image is drawn inside a text object; it can only be deleted"));
     }
+    let sc = &pi.scopes[f.scope];
+    if let Some(why) = &sc.reason {
+        return Err(invalid(format!("this image can't be changed: {why}")));
+    }
+    let c = &sc.content;
     // The image's operator exactly as written (an inline image keeps its parameters and data).
-    let original = Op::verbatim(&pi.pieces.data()[pi.ops[f.op].span.clone()]);
+    let original = Op::verbatim(&c.pieces.data()[c.ops[f.op].span.clone()]);
     // Page-space transform of the image's box, for move, resize, rotate and flip.
     let full = to_page.bbox(f.ctm.bbox(UNIT));
     let (cx, cy) = ((full[0] + full[2]) / 2.0, (full[1] + full[3]) / 2.0);
@@ -771,25 +1109,30 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
     if let Some(t) = page_t {
         // The image and the wrappers around it (its clip crop, earlier transforms) move as one:
         // the new `cm` goes right after the outermost wrapper's `q`, or around the operator.
-        let (start, end) = unit_of(&pi.ops, f.op);
-        let c = pi.ctms[start];
+        let (start, end) = unit_of(&c.ops, f.op);
+        let ctm = c.ctms[start];
         // New placement = C · T (T in user space); as a `cm` there: C · T · C⁻¹.
         let t_user = to_page.then(&t).then(&to_user);
-        let inv = c.invert().ok_or_else(|| invalid("the image has no area"))?;
-        let m = c.then(&t_user).then(&inv);
+        let inv = ctm.invert().ok_or_else(|| invalid("the image has no area"))?;
+        let m = ctm.then(&t_user).then(&inv);
         if !m.0.iter().all(|v| v.is_finite() && v.abs() < 1e9) {
             return Err(invalid("the image can't be moved that far"));
         }
+        let warning = f.frame.and_then(|frame| frame_warning(f.ctm.bbox(UNIT), f.ctm.then(&t_user).bbox(UNIT), frame));
         let cm = fine_cm(&m);
         let new = if start == end {
             let mut wrapped = Some(vec![Op::new("q", vec![]), cm, original, Op::new("Q", vec![])]);
-            splice(&pi.pieces, &pi.ops, |i| if i == f.op { (wrapped.take().unwrap_or_default(), false) } else { (Vec::new(), true) })
+            splice(&c.pieces, &c.ops, |i| if i == f.op { (wrapped.take().unwrap_or_default(), false) } else { (Vec::new(), true) })
         } else {
             let mut cm = Some(vec![cm]);
-            splice(&pi.pieces, &pi.ops, |i| if i == start + 1 { (cm.take().unwrap_or_default(), true) } else { (Vec::new(), true) })
+            splice(&c.pieces, &c.ops, |i| if i == start + 1 { (cm.take().unwrap_or_default(), true) } else { (Vec::new(), true) })
         };
-        return write_streams(d, &pi.page, &pi.streams, new);
+        let holder = if f.scope == 0 { pi.page.clone() } else { private_form(d, &pi, f.scope)? };
+        write_content(d, &holder, sc, new)?;
+        return Ok(warning);
     }
+    // Where a name is added or dropped: the page, or the form the picture is drawn in (its own copy when it is shared).
+    let holder = if f.scope == 0 { pi.page.clone() } else { private_form(d, &pi, f.scope)? };
     let replacement: Vec<Op> = {
         match change {
             ImageChange::Delete => {
@@ -798,7 +1141,7 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
             }
             ImageChange::Replace { file } => {
                 let (img, w, h) = load_image(d, file)?;
-                let name = add_resource(d, &pi.page, &img)?;
+                let name = add_resource(d, &holder, &img)?;
                 gone.extend(f.name.clone());
                 // Fitted into the old placement, keeping the new image's proportions.
                 let c = f.ctm.0;
@@ -822,7 +1165,7 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
                 }
                 if *pixels {
                     let (obj, sub) = pixel_crop(d, &f, u)?;
-                    let name = add_resource(d, &pi.page, &obj)?;
+                    let name = add_resource(d, &holder, &obj)?;
                     gone.extend(f.name.clone());
                     vec![
                         Op::new("q", vec![]),
@@ -857,9 +1200,10 @@ fn apply(d: &mut PdfDocument, page: u32, index: Option<u32>, change: &ImageChang
         }
     };
     let mut replacement = Some(replacement);
-    let new = splice(&pi.pieces, &pi.ops, |i| if i == f.op { (replacement.take().unwrap_or_default(), false) } else { (Vec::new(), true) });
-    write_streams(d, &pi.page, &pi.streams, new)?;
-    forget_unused(d, page, &gone)
+    let new = splice(&c.pieces, &c.ops, |i| if i == f.op { (replacement.take().unwrap_or_default(), false) } else { (Vec::new(), true) });
+    write_content(d, &holder, sc, new)?;
+    forget_unused(d, &holder, &gone)?;
+    Ok(None)
 }
 
 /// The operators that draw image operator `op` as a unit: the operator itself, and around it each
@@ -923,8 +1267,9 @@ fn draw_ops(draw: Op, place: Matrix, clip: Option<[f64; 4]>) -> Vec<Op> {
 /// goes inside q … Q, with as many extra q before it as it closes more than it opens, and as many
 /// Q after it as are left open.
 fn append_draws(d: &mut PdfDocument, pi: &PageImages, ops: Vec<Op>) -> Result<()> {
+    let c = &pi.scopes[0].content;
     let (mut depth, mut lowest) = (0i64, 0i64);
-    for op in &pi.ops {
+    for op in &c.ops {
         match op.op.as_slice() {
             b"q" => depth += 1,
             b"Q" => {
@@ -936,7 +1281,7 @@ fn append_draws(d: &mut PdfDocument, pi: &PageImages, ops: Vec<Op>) -> Result<()
     }
     let opened = 1 + (-lowest) as usize;
     let left_open = (opened as i64 + depth).max(0) as usize;
-    let mut streams = pi.streams.clone();
+    let mut streams = c.streams.clone();
     let mut new: Vec<Vec<u8>> = streams.iter().map(|(_, b)| b.clone()).collect();
     // New pieces of their own before and after, so the old streams stay as they are.
     streams.insert(0, (PdfObject::new_null(), Vec::new()));
@@ -1239,7 +1584,7 @@ pub fn paste(eng: &Engine, doc: DocId, rev: u32, page: u32, at: [f64; 2], clip: 
         append_draws(d, &pi, ops)?;
         Ok(vec![page])
     })?;
-    Ok(ImageEdited { state })
+    Ok(ImageEdited { state, warning: None })
 }
 
 /// Moves the images `indices` of page `from` (listed at `rev`) to `target` of the same document: its
@@ -1268,15 +1613,19 @@ pub fn move_to_page(eng: &Engine, doc: DocId, rev: u32, from: u32, indices: &[u3
             if f.in_text {
                 return Err(invalid("this image is drawn inside a text object; it can only be deleted"));
             }
+            if let Some(why) = &pf.scopes[f.scope].reason {
+                return Err(invalid(format!("this image can't be changed: {why}")));
+            }
             // A page's own colour space can't come along in the picture's operator.
-            if f.kind == ImageKind::Inline && !self_contained(&pf.pieces.data()[pf.ops[f.op].span.clone()]) {
+            let c = &pf.scopes[f.scope].content;
+            if f.kind == ImageKind::Inline && !self_contained(&c.pieces.data()[c.ops[f.op].span.clone()]) {
                 return Err(invalid("this inline picture uses a colour space of its page, so it can't be moved to another page"));
             }
-            picked.push(f);
+            picked.push((*i, f));
         }
         let group = picked
             .iter()
-            .map(|f| {
+            .map(|(_, f)| {
                 let full = f.ctm.bbox(UNIT);
                 from_page.bbox(f.clip.map_or(full, |c| intersect(full, c)))
             })
@@ -1284,27 +1633,45 @@ pub fn move_to_page(eng: &Engine, doc: DocId, rev: u32, from: u32, indices: &[u3
             .unwrap_or([0.0; 4]);
         let (x, y) = keep_on_page(at, (group[2] - group[0], group[3] - group[1]), page_size(d, to)?)?;
         let into_user = from_page.then(&Matrix::translate(x - group[0], y - group[1])).then(&to_user);
-        let (mut draws, mut gone, mut remove) = (Vec::new(), HashSet::new(), HashSet::new());
-        for f in picked {
+        // The pictures the page itself draws are cut out of its content below; those drawn in a form are deleted
+        // one by one (a shared form is copied first), the last of the list first since deleting renumbers.
+        let (mut draws, mut gone, mut remove, mut in_forms) = (Vec::new(), HashSet::new(), HashSet::new(), Vec::new());
+        for (i, f) in picked {
+            let c = &pf.scopes[f.scope].content;
             let draw = match (&f.obj, &f.name) {
                 // The same image object moves: the new page names it, the old one forgets it.
                 (Some(obj), Some(name)) => {
-                    gone.insert(name.clone());
+                    if f.scope == 0 {
+                        gone.insert(name.clone());
+                    }
                     Op::new("Do", vec![Obj::Name(add_resource(d, &pt.page, obj)?)])
                 }
-                _ => Op::verbatim(&pf.pieces.data()[pf.ops[f.op].span.clone()]),
+                _ => Op::verbatim(&c.pieces.data()[c.ops[f.op].span.clone()]),
             };
             let place = f.ctm.then(&into_user);
             draws.extend(draw_ops(draw, place, f.clip.map(|c| into_user.bbox(c))));
-            remove.insert(f.op);
+            if f.scope == 0 {
+                remove.insert(f.op);
+            } else {
+                in_forms.push(i);
+            }
         }
-        let new = splice(&pf.pieces, &pf.ops, |i| (Vec::new(), !remove.contains(&i)));
-        write_streams(d, &pf.page, &pf.streams, new)?;
+        in_forms.sort_unstable_by_key(|i| std::cmp::Reverse(*i));
+        for i in in_forms {
+            apply(d, from, Some(i), &ImageChange::Delete)?;
+        }
+        if !remove.is_empty() {
+            // Read again: copying a shared form pointed one of the page's `Do`s elsewhere (the operators stay).
+            let pf = read_images_in(d, from, false)?;
+            let c = &pf.scopes[0].content;
+            let new = splice(&c.pieces, &c.ops, |i| (Vec::new(), !remove.contains(&i)));
+            write_streams(d, &pf.page, &c.streams, new)?;
+        }
         append_draws(d, &pt, draws)?;
-        forget_unused(d, from, &gone)?;
+        forget_unused(d, &pf.page, &gone)?;
         Ok(vec![from, to])
     })?;
-    Ok(ImageEdited { state })
+    Ok(ImageEdited { state, warning: None })
 }
 
 /// Components per pixel of an image's colour space.
@@ -1497,7 +1864,7 @@ pub(crate) struct Placed {
 
 /// The images `page` (0-based) draws, in drawing order.
 pub(crate) fn placed_images(doc: &PdfDocument, page: u32) -> Result<Vec<Placed>> {
-    Ok(read_images(doc, page)?
+    Ok(read_images_in(doc, page, false)?
         .found
         .into_iter()
         .map(|f| Placed {
