@@ -1087,6 +1087,27 @@ fn unembed_takes_out_only_the_fonts_that_can_go() {
     assert!(r.unembedded.skipped[0].1.contains("No such font"));
 }
 
+/// The embedded search index is a copy of the bookmarks too: a pass that drops them must not leave it behind.
+#[test]
+fn an_embedded_search_index_that_no_longer_matches_does_not_survive_a_compress() {
+    use crate::search::catalog::embed;
+    let s = Scratch::new();
+    let input = s.path("indexed.pdf");
+    let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 3, chapter_every: 1, needle_every: 0, lines: 4 })).unwrap();
+    embed::add(&mut doc).unwrap();
+    doc.save(&input.to_string_lossy()).unwrap();
+    drop(doc);
+    let indexed = |p: &Path| embed::status(&PdfDocument::open(p.to_str().unwrap()).unwrap());
+    assert!(indexed(&input).current);
+
+    let mut o = Options::preset(Preset::Balanced);
+    o.strip.bookmarks = true;
+    o.output = Some(s.path("no-bookmarks.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert!(!r.kept_original);
+    assert!(!indexed(&r.output).present, "the bookmarks' titles are not kept in the index");
+}
+
 /// Fonts that differ only in their /Encoding: three a replacement can follow, three it cannot.
 fn encoding_sink(path: &Path) {
     let mut doc = PdfDocument::from_bytes(&fixture::build(&fixture::Fixture { pages: 1, chapter_every: 0, needle_every: 0, lines: 4 })).unwrap();

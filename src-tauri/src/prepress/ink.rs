@@ -43,6 +43,46 @@ pub struct InkReport {
     pub spots: Vec<String>,
 }
 
+/// The ink at one point: per plane and in total, per cent.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InkAt {
+    pub page: u32,
+    pub planes: Vec<PlaneValue>,
+    pub total: f32,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaneValue {
+    pub name: String,
+    pub value: f32,
+}
+
+/// The ink of every plane at `(x, y)` (page points from the top-left of the page as shown), read from one
+/// pixel painted with overprint simulated, so it is what prints there and not what the topmost object says.
+pub fn ink_at(eng: &Engine, seps: &PageSeps, doc: DocId, page: u32, x: f32, y: f32) -> Result<InkAt> {
+    if !(x.is_finite() && y.is_finite()) {
+        return Err(bad("The point is not a number"));
+    }
+    let entry = eng.doc_entry(doc)?;
+    let rev = entry.generation();
+    let list = eng.page_list(&entry, rev, page)?;
+    // two pixels per point: a pixel is a quarter of a point square
+    const SCALE: f32 = 2.0;
+    let (m, w, h) = view_matrix(list.bounds(), 0, SCALE);
+    let px = ((x * SCALE).floor() as i32).clamp(0, w - 1);
+    let py = ((y * SCALE).floor() as i32).clamp(0, h - 1);
+    let p = paint_planes(&list, seps, true, &m, IRect { x0: px, y0: py, x1: px + 1, y1: py + 1 })?;
+    if entry.generation() != rev {
+        return Err(crate::engine::EngineError::Stale);
+    }
+    let name = |i: usize| if i < 4 { super::PROCESS[i].to_string() } else { seps.spots[i - 4].name.clone() };
+    let planes: Vec<PlaneValue> = p.data.iter().take(p.n).enumerate().map(|(i, v)| PlaneValue { name: name(i), value: *v as f32 * 100.0 / 255.0 }).collect();
+    let total = planes.iter().map(|v| v.value).sum();
+    Ok(InkAt { page, planes, total })
+}
+
 /// Grid used to report the regions above the limit.
 const GRID: usize = 32;
 const MAX_REGIONS: usize = 64;

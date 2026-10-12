@@ -18,3 +18,9 @@ pdfcraft
   Parts of Inkwell's source are adapted from pdfcraft, licensed MIT OR Apache-2.0:
   licenses/pdfcraft/LICENSE-MIT, licenses/pdfcraft/LICENSE-APACHE and licenses/pdfcraft/NOTICE.
   The adapted files are listed in third_party/pdfcraft/INKWELL-NOTICE.txt in the source.
+
+OpenAI and Claude marks
+  The two marks beside the assistant's provider names (src/components/assistant/providerMarks.tsx) are
+  the "openai" and "claude" icons of simple-icons 16.35.0 (https://simpleicons.org), dedicated to the
+  public domain under CC0 1.0. OpenAI and Claude are trademarks of their owners; the marks only say
+  which service answers and do not mean that the owners endorse Inkwell.
