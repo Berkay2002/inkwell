@@ -1,8 +1,9 @@
 //! Tauri commands for forms. The UI is the user; the assistant calls the functions in `super` with its turn.
 
 use super::{
-    Detected, FieldPatch, FieldValue, FormDto, NewField, ScriptsState, Stepped, add_many, add_one, arrange_one, calc_order_one, delete_many, detect_one, edit_one, list_all,
+    Axis, Copied, Detected, Dim, Edge, FieldPatch, FieldValue, FormDto, NewField, ScriptsState, Stepped, add_many, add_one, arrange_one, calc_order_one, delete_many, detect_one, edit_one, list_all,
     move_one, reset_report, scripts_enable, scripts_state, set_value_report, tab_order_one,
+    align_one, center_one, copies_one, distribute_one, duplicate_one, match_size_one, nudge_one, rename_one,
 };
 use super::af::{self, Format};
 use super::doc_js::{self, Applied, Check, DocJs, Op, Source};
@@ -136,6 +137,72 @@ pub async fn forms_arrange(eng: Eng<'_>, doc: DocId, page: u32, by: String) -> R
 pub async fn forms_detect(eng: Eng<'_>, doc: DocId, page: u32) -> Result<Vec<Detected>> {
     let eng = eng.inner().clone();
     blocking(move || detect_one(&eng, doc, page)).await
+}
+
+// ---- layout tools: one undo step each. `items` are `(page, xref)` pairs; the last one is the anchor. ----
+
+#[tauri::command]
+pub async fn forms_align(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>, edge: Edge) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || align_one(&eng, doc, &items, edge, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn forms_center(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>, axis: Axis) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || center_one(&eng, doc, &items, axis, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn forms_distribute(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>, axis: Axis) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || distribute_one(&eng, doc, &items, axis, EditSource::User)).await
+}
+
+#[tauri::command]
+pub async fn forms_match_size(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>, dim: Dim) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || match_size_one(&eng, doc, &items, dim, EditSource::User)).await
+}
+
+/// Moves the selection by `dx`, `dy` points on the page (the arrow keys; one step per burst).
+#[tauri::command]
+pub async fn forms_nudge(eng: Eng<'_>, doc: DocId, items: Vec<(u32, i32)>, dx: f32, dy: f32) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || nudge_one(&eng, doc, &items, dx, dy, EditSource::User)).await
+}
+
+/// The same field on other pages (0-based).
+#[tauri::command]
+pub async fn forms_duplicate(eng: Eng<'_>, doc: DocId, item: (u32, i32), pages: Vec<u32>) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || duplicate_one(&eng, doc, item, &pages, EditSource::User)).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopiesMade {
+    pub state: EditState,
+    #[serde(flatten)]
+    pub copied: Copied,
+}
+
+/// A grid of copies: `rows` x `cols`, `gap_x` and `gap_y` points apart.
+#[tauri::command]
+pub async fn forms_copies(eng: Eng<'_>, doc: DocId, item: (u32, i32), rows: u32, cols: u32, gap_x: f32, gap_y: f32) -> Result<CopiesMade> {
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let (state, copied) = copies_one(&eng, doc, item, rows, cols, (gap_x, gap_y), EditSource::User)?;
+        Ok(CopiesMade { state, copied })
+    })
+    .await
+}
+
+/// The field's full (dotted) name. `merge` joins it to the field that has that name when both are of one kind.
+#[tauri::command]
+pub async fn forms_rename(eng: Eng<'_>, doc: DocId, item: (u32, i32), name: String, merge: bool) -> Result<EditState> {
+    let eng = eng.inner().clone();
+    blocking(move || rename_one(&eng, doc, item, &name, merge, EditSource::User)).await
 }
 
 // ---- document JavaScript (the sheet; see doc_js.rs). Not an assistant tool. ----
