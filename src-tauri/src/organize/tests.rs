@@ -675,11 +675,15 @@ fn a_hostile_page_label_tree_is_bounded_and_never_stops_a_combine() {
 }
 
 fn locked_copy(d: &std::path::Path, name: &str, pages: usize, may_copy: bool) -> String {
+    locked_with(d, name, pages, may_copy, "secret-pw")
+}
+
+fn locked_with(d: &std::path::Path, name: &str, pages: usize, may_copy: bool, user_pw: &str) -> String {
     use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions, Permission};
     let path = d.join(name).to_string_lossy().into_owned();
     let doc = PdfDocument::from_bytes(&fixture::build(&Fixture { pages, ..Default::default() })).unwrap();
     let mut o = PdfWriteOptions::default();
-    o.set_encryption(Encryption::Aes256).set_user_password("secret-pw").set_owner_password("owner-pw");
+    o.set_encryption(Encryption::Aes256).set_user_password(user_pw).set_owner_password("owner-pw");
     if !may_copy {
         o.set_permissions(Permission::PRINT);
     }
@@ -749,4 +753,26 @@ fn an_owner_restriction_still_leaves_a_source_out_after_it_opens() {
     let out = d.join("out.pdf").to_string_lossy().into_owned();
     let specs = [src(&a, ""), with_password(&locked, "secret-pw")];
     assert_eq!(combine::run(&eng, &specs, opt, &out).unwrap().plan.pages, 2);
+}
+
+#[test]
+fn a_password_typed_full_width_opens_a_file_protect_wrote_in_nfkc() {
+    let d = dir("combine-nfkc");
+    let a = write(&d, "a.pdf", 2, 0);
+    // Protect writes the password in NFKC; the person types it full-width
+    let locked = locked_with(&d, "locked.pdf", 3, true, "ABC-secret");
+    let typed = "\u{ff21}\u{ff22}\u{ff23}-secret";
+    let opt = CombineOptions { bookmarks: false, keep_outlines: false, contents_page: false, keep_labels: true };
+    let specs = [src(&a, ""), with_password(&locked, typed)];
+    let plan = combine::inspect(&specs, opt).unwrap();
+    assert_eq!((plan.files[1].state.clone(), plan.pages), (FileState::Ready, 5), "{:?}", plan.files[1].message);
+    let (eng, _) = open(&a);
+    let out = d.join("out.pdf").to_string_lossy().into_owned();
+    assert_eq!(combine::run(&eng, &specs, opt, &out).unwrap().plan.pages, 5);
+    // the sheet's own unlock takes the same typed form
+    let eng2 = Engine::new(2, 64 << 20);
+    let (id, _) = eng2.open_pending(&locked);
+    assert_eq!(eng2.authenticate(id, typed).unwrap().page_count, 3);
+    // still refused when it is not the password in any form
+    assert_eq!(combine::inspect(&[with_password(&locked, "ＸＹＺ")], opt).unwrap().files[0].state, FileState::Encrypted);
 }

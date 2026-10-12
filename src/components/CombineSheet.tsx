@@ -197,7 +197,7 @@ function Row({
             {entry.name}
           </span>
           <span className={bad ? "cb-sub bad" : "cb-sub dim"}>
-            {needsPassword ? "Password needed" : bad && plan?.message ? plan.message : sub}
+            {needsPassword && !entry.password ? "Password needed" : bad && plan?.message ? plan.message : sub}
           </span>
         </div>
         {needsPassword && entry.locked != null && (

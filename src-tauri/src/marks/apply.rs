@@ -7,7 +7,7 @@
 use super::geometry::{M, View, n};
 use super::text::{Measure, face, first_undrawable, literal, undrawable_message};
 use super::{AddRequest, Background, Bates, Date, Mark, MarkKind, Picture, Rgb, Style, Watermark, bates_fits, bates_text, expand};
-use crate::engine::edit::{open_source, rewrite_opts, write_doc, write_new};
+use crate::engine::edit::{authenticate_typed, open_source, rewrite_opts, write_doc, write_new};
 use crate::engine::{EngineError, Result};
 use crate::textedit::content::{self as cs, Obj};
 use mupdf::pdf::{PdfDocument, PdfGraftMap, PdfObject};
@@ -413,7 +413,7 @@ fn load_picture(doc: &mut PdfDocument, p: &Picture) -> Result<Loaded> {
         if d.needs_password()? {
             match p.password.as_deref() {
                 None => return Err(EngineError::NeedsPassword),
-                Some(pw) if !d.authenticate(pw)? => return Err(EngineError::BadPassword),
+                Some(pw) if !authenticate_typed(&mut d, pw)? => return Err(EngineError::BadPassword),
                 _ => {}
             }
         }

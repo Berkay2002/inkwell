@@ -587,6 +587,19 @@ fn run(doc: &mut PdfDocument, op: &EditOp, sizes: &[[f32; 2]]) -> Result<Option<
     }
 }
 
+/// Unlocks `d` with a password the person typed: as typed, then in NFKC. MuPDF does no SASLprep and the
+/// writer (Protect) puts passwords in NFKC, so one typed decomposed or full-width opens the file under its
+/// NFKC form. `Ok(false)`: neither opens it.
+pub(crate) fn authenticate_typed(d: &mut Document, pw: &str) -> Result<bool> {
+    if d.authenticate(pw)? {
+        return Ok(true);
+    }
+    match protect::nfkc_form(pw) {
+        Some(n) => Ok(d.authenticate(&n)?),
+        None => Ok(false),
+    }
+}
+
 /// Another PDF to take pages from.
 pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocument> {
     check_pdf(path)?;
@@ -594,7 +607,7 @@ pub(crate) fn open_source(path: &str, password: Option<&str>) -> Result<PdfDocum
     if d.needs_password()? {
         match password {
             None => return Err(EngineError::NeedsPassword),
-            Some(pw) if !d.authenticate(pw)? => return Err(EngineError::BadPassword),
+            Some(pw) if !authenticate_typed(&mut d, pw)? => return Err(EngineError::BadPassword),
             _ => {}
         }
     }
