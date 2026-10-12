@@ -259,15 +259,22 @@ export function ranges(nums: number[]): [number, number][] {
 
 const pagesWord = (a: number, b: number) => (a === b ? `Page ${a}` : `Pages ${a}-${b}`);
 
+/** The most pages a range may reach while the file's page count is not known: `parseRange` expands the range, so a
+ *  typed "1-20000000" must be turned away before it is. */
+const RANGE_CAP = 100_000;
+
 /** A page range field of the compare setup. `pages` is null for an empty field (every page) and while the text is not
  *  usable; `error` is what to tell the user then. Without `count` (the file's pages are not known yet) only the syntax
  *  is checked and the engine refuses a page past the end. */
 export function rangeField(text: string, count: number | null): { pages: number[] | null; error: string | null } {
   if (!text.trim()) return { pages: null, error: null };
-  const syntax = parseRange(text, Number.MAX_SAFE_INTEGER);
-  if (!syntax?.length) return { pages: null, error: "Enter pages like 1-3, 5" };
-  if (count !== null && syntax[syntax.length - 1] >= count) return { pages: null, error: `This file has ${count} ${count === 1 ? "page" : "pages"}` };
-  return { pages: syntax, error: null };
+  const syntax = "Enter pages like 1-3, 5";
+  // the largest number typed, read before the range is expanded
+  const top = (text.match(/\d+/g) ?? []).reduce((m, d) => Math.max(m, Number(d)), 0);
+  if (count !== null && top > count) return { pages: null, error: `This file has ${count} ${count === 1 ? "page" : "pages"}` };
+  if (top > (count ?? RANGE_CAP)) return { pages: null, error: syntax };
+  const pages = parseRange(text, count ?? RANGE_CAP);
+  return pages?.length ? { pages, error: null } : { pages: null, error: syntax };
 }
 
 /** Page-level summary lines for the top of the change list: "Page 3 inserted", "Pages 5-6 moved to 9". */

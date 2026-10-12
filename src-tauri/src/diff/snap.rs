@@ -177,13 +177,13 @@ fn to_page_space(v: &[f32], ctm: &Matrix) -> Rect4 {
 }
 
 impl Snap {
-    /// `pages` = the 0-based pages to read (`None` = all; refused when empty or past the end). `step(done, total)` is
-    /// called after each page read; it returns false to stop (the open is cancelled).
-    pub fn open(bytes: &[u8], side: Side, password: Option<&str>, pages: Option<&[u32]>, step: &mut dyn FnMut(u32, u32) -> bool) -> Result<Snap> {
+    /// Opens the document and settles which pages will be read (`pages`: the 0-based pages, `None` = all; refused
+    /// when empty or past the end), without reading any: both sides are checked before either is read.
+    pub fn open(bytes: &[u8], side: Side, password: Option<&str>, pages: Option<&[u32]>) -> Result<Snap> {
         let doc = open_doc(bytes, side, password)?;
         let n = doc.page_count()?.max(0) as usize;
         let ids = pick_pages(pages, n, side)?;
-        let mut snap = Snap {
+        Ok(Snap {
             doc,
             pages: (0..n).map(|_| PageSnap::default()).collect(),
             ids,
@@ -191,16 +191,20 @@ impl Snap {
             active: RefCell::default(),
             forms_left: Cell::new(MAX_FORMS_PER_PAGE),
             words: RefCell::default(),
-        };
-        let total = snap.ids.len() as u32;
-        for k in 0..snap.ids.len() {
-            let i = snap.ids[k];
-            snap.pages[i] = snap.read_page(i)?;
+        })
+    }
+
+    /// Reads the picked pages. `step(done, total)` is called after each; it returns false to stop (cancelled).
+    pub fn read(&mut self, step: &mut dyn FnMut(u32, u32) -> bool) -> Result<()> {
+        let total = self.ids.len() as u32;
+        for k in 0..self.ids.len() {
+            let i = self.ids[k];
+            self.pages[i] = self.read_page(i)?;
             if !step(k as u32 + 1, total) {
                 return Err(DiffError::Cancelled);
             }
         }
-        Ok(snap)
+        Ok(())
     }
 
     fn read_page(&self, i: usize) -> Result<PageSnap> {

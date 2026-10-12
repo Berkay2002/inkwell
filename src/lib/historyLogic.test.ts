@@ -354,4 +354,10 @@ describe("compare page range field", () => {
     // the page count is not known yet: only the syntax is judged, the engine refuses a page past the end
     expect(rangeField("5-20", null).pages).toHaveLength(16);
   });
+
+  it("turns a huge range away without expanding it", () => {
+    expect(rangeField("1-20000000", 12)).toEqual({ pages: null, error: "This file has 12 pages" });
+    expect(rangeField("1-20000000", null)).toEqual({ pages: null, error: "Enter pages like 1-3, 5" });
+    expect(rangeField("1-99999999999999999999", null).pages).toBeNull();
+  });
 });

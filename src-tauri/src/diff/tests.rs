@@ -1013,6 +1013,16 @@ fn an_invalid_range_is_refused_with_a_message() {
 }
 
 #[test]
+fn a_bad_range_on_b_is_refused_before_any_page_of_a_is_read() {
+    let (a, b) = (base(40), base(3));
+    let opts = CompareOptions { pages_b: Some(vec![5]), ..Default::default() };
+    let mut seen = Vec::new();
+    let e = compare_with(&build(&a), &build(&b), &opts, &AtomicBool::new(false), &mut |p| seen.push(p)).unwrap_err();
+    assert_eq!(e, DiffError::PageOutOfRange { side: Side::B, page: 6, count: 3 });
+    assert!(seen.is_empty(), "A was read: {seen:?}");
+}
+
+#[test]
 fn only_the_picked_pages_are_read_and_counted() {
     let (a, b) = shifted();
     let mut firsts = Vec::new();

@@ -51,8 +51,11 @@ pub fn compare(a: &[u8], b: &[u8], opts: &CompareOptions, cancel: &AtomicBool, o
             identical: true,
         });
     }
-    let sa = Snap::open(a, Side::A, opts.password_a.as_deref(), opts.pages_a.as_deref(), &mut |d, t| ctl.tick(Stage::First, d, t).is_ok())?;
-    let sb = Snap::open(b, Side::B, opts.password_b.as_deref(), opts.pages_b.as_deref(), &mut |d, t| ctl.tick(Stage::Second, d, t).is_ok())?;
+    // Both files are opened and both ranges checked before the first page is read: a bad B range costs nothing.
+    let mut sa = Snap::open(a, Side::A, opts.password_a.as_deref(), opts.pages_a.as_deref())?;
+    let mut sb = Snap::open(b, Side::B, opts.password_b.as_deref(), opts.pages_b.as_deref())?;
+    sa.read(&mut |d, t| ctl.tick(Stage::First, d, t).is_ok())?;
+    sb.read(&mut |d, t| ctl.tick(Stage::Second, d, t).is_ok())?;
     ctl.tick(Stage::Pages, 0, 0)?;
     // From here every page number is the file's own: `b2a` is indexed by B's page number and holds A's, and only
     // the compared pages (`ids`) have entries, so a page outside a range is never "added" or "removed".
