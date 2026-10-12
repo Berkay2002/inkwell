@@ -823,9 +823,13 @@ fn set_value_rt(rt: &Rt, page: u32, xref: i32, value: &FieldValue) -> Result<Vec
             changed.extend(rt.validate(e, &stored).map_err(bad)?);
             // Scripts see one pick, the first: what they make of it takes its place among the others.
             if strings.len() > 1 {
-                let mut strings = strings;
-                strings[0] = stored;
-                FieldValue::Many(strings)
+                let mut picks: Vec<String> = Vec::new();
+                for p in std::iter::once(stored).chain(strings.into_iter().skip(1)) {
+                    if !p.is_empty() && !picks.contains(&p) {
+                        picks.push(p);
+                    }
+                }
+                FieldValue::Many(picks)
             } else {
                 FieldValue::Text(stored)
             }

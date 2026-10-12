@@ -909,7 +909,13 @@ fn a_keystroke_script_on_a_multi_select_list_replaces_the_first_pick() {
     let (eng, id) = table_form("tbl-multi-k");
     put_script(&eng, id, "Pick", "K", "if (event.value === \"no\") { event.value = \"se\"; }");
     try_set(&eng, id, "Pick", FieldValue::Many(vec!["no".into(), "se".into()])).unwrap();
-    assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["se", "se"]);
+    // The script's "se" is already one of the picks: it is kept once, not twice.
+    assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["se"]);
+    // A first pick the script empties is dropped, not stored as an empty entry.
+    put_script(&eng, id, "Pick", "K", "event.value = \"\";");
+    try_set(&eng, id, "Pick", FieldValue::Many(vec!["no".into(), "se".into()])).unwrap();
+    assert_eq!(dto(&eng, id, "Pick")[0].values, vec!["se"]);
+    put_script(&eng, id, "Pick", "K", "if (event.value === \"no\") { event.value = \"se\"; }");
     // What is not an entry of the list is not followed.
     put_script(&eng, id, "Pick", "K", "event.value = \"zz\";");
     try_set(&eng, id, "Pick", FieldValue::Many(vec!["no".into(), "se".into()])).unwrap();
