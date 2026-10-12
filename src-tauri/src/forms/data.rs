@@ -528,3 +528,6 @@ pub fn import_one(eng: &Engine, doc: DocId, parsed: &Parsed, source: EditSource)
     })?;
     Ok(Imported { summary, state, signed })
 }
+
+#[cfg(test)]
+mod tests;
