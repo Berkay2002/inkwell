@@ -23,6 +23,9 @@ interface Props {
 const EMPTY: Field[] = [];
 const NO_PICKS: Pick[] = [];
 const fm = () => useForms.getState();
+/** Ctrl-click is the context menu on a Mac: there only Cmd and Shift add to the picked fields. */
+const MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+const additive = (e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => e.metaKey || e.shiftKey || (e.ctrlKey && !MAC);
 type Pt = [number, number];
 
 /**
@@ -76,9 +79,10 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
 
   const startDrag = (e: React.PointerEvent, f: Field, mode: Drag["mode"]) => {
     e.stopPropagation();
+    if (MAC && e.ctrlKey) return; // the context menu follows
     e.currentTarget.setPointerCapture(e.pointerId);
     // Ctrl, Cmd or Shift adds to the picked fields and does not drag; a plain press picks just this one (no group drag).
-    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+    if (additive(e)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
       fm().toggle(docId, { page: f.page, xref: f.xref });
       return;
@@ -126,7 +130,7 @@ function Layer({ docId, page, rot, rawSize, zoom, all, mine, authoring }: Props 
               onPointerDown={(e) => {
                 e.currentTarget.setPointerCapture(e.pointerId);
                 const q = toPage(e);
-                setMarquee({ a: q, b: q, add: e.ctrlKey || e.metaKey || e.shiftKey });
+                setMarquee({ a: q, b: q, add: additive(e) });
               }}
               onPointerMove={(e) => marquee && setMarquee({ ...marquee, b: toPage(e) })}
               onPointerUp={() => {

@@ -91,7 +91,7 @@ Fields are built as plain AcroForm dictionaries (MuPDF only creates signature wi
 ## Layout tools
 Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step, and a refused one records none.
 
-- **Picking.** Ctrl, Cmd or Shift click adds a field to the picked ones (or takes it out); dragging a box on empty
+- **Picking.** Ctrl, Cmd or Shift click adds a field to the picked ones (or takes it out; on a Mac Ctrl-click is the context menu, so Cmd or Shift); dragging a box on empty
   page picks every visible field it touches (with Ctrl, Cmd or Shift it adds). The **anchor** is the field picked last
   (a box picks in reading order, so the last one in the box), and has a heavier outline. A plain click picks one field.
   There is no group drag: a press on a field picks just that one, and it moves alone.
@@ -122,8 +122,9 @@ Acrobat Prepare Form's layout tools, in `forms/layout.rs`. Each is one undo step
   field); a different kind is refused with a message, radio groups and signature fields never merge, and no field can be
   named below another field or over a group.
 - **Refused**: a certified document at any `/P` (P 3 allows form fill and comments, not changing fields); a field a
-  signature covers (`/Lock`) and a signature field that is signed. The controls are disabled with the reason as their
-  tooltip. A signed, uncertified document is changed incrementally: the signed bytes stay a prefix of the file.
+  signature covers (`/Lock`) and a signature field that is signed. A certified document, or a selection that is too
+  small, shows the controls disabled with the reason as their tooltip; a signature lock is refused by the engine with a
+  message. A signed, uncertified document is changed incrementally: the signed bytes stay a prefix of the file.
 - Caps: 1 000 widgets per step, 500 copies, 2 000 pages.
 - Not built: dragging a group, and an assistant tool for any of this.
 

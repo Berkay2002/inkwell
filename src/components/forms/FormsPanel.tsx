@@ -310,7 +310,7 @@ function Row({ doc, f, all, active, follow, onOpen }: { doc: number; f: Field; a
     <button
       ref={ref}
       className={`fm-row${active ? " on" : ""}`}
-      onClick={(e) => (authoring && (e.ctrlKey || e.metaKey || e.shiftKey) ? fm().toggle(doc, { page: f.page, xref: f.xref }) : onOpen())}
+      onClick={(e) => (authoring && (e.metaKey || e.shiftKey || e.ctrlKey) ? fm().toggle(doc, { page: f.page, xref: f.xref }) : onOpen())}
       onDoubleClick={() => authoring && fm().setRenaming({ page: f.page, xref: f.xref })}
       title={authoring ? `${KIND_LABEL[f.kind]}. Double-click or F2 to rename.` : KIND_LABEL[f.kind]}
     >

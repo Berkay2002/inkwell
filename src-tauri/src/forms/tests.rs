@@ -2179,6 +2179,38 @@ fn align_centre_distribute_and_match_size_work_in_page_space_each_one_undo_step(
 }
 
 #[test]
+fn every_geometry_tool_is_one_step_that_undoes_exactly_and_survives_save_and_reopen() {
+    type Op = fn(&Engine, DocId, &[Item]) -> Result<EditState>;
+    let ops: [(&str, Op); 8] = [
+        ("align left", |e, i, it| align_one(e, i, it, Edge::Left, EditSource::User)),
+        ("align vcenter", |e, i, it| align_one(e, i, it, Edge::VCenter, EditSource::User)),
+        ("centre both", |e, i, it| center_one(e, i, it, Axis::Both, EditSource::User)),
+        ("centre horizontal", |e, i, it| center_one(e, i, it, Axis::Horizontal, EditSource::User)),
+        ("distribute", |e, i, it| distribute_one(e, i, it, Axis::Horizontal, EditSource::User)),
+        ("same size", |e, i, it| match_size_one(e, i, it, Dim::Both, EditSource::User)),
+        ("same width", |e, i, it| match_size_one(e, i, it, Dim::Width, EditSource::User)),
+        ("nudge", |e, i, it| nudge_one(e, i, it, 7.0, -4.0, EditSource::User)),
+    ];
+    for (n, (what, op)) in ops.iter().enumerate() {
+        let (eng, id, path) = rotated_form(&format!("layout-exact-{n}"), &THREE);
+        let abc = items_of(&eng, id, &["A", "B", "C"]);
+        let start = all_rects(&eng, id);
+        let before = steps(&eng, id);
+        op(&eng, id, &abc).unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(steps(&eng, id), before + 1, "{what} is one step");
+        let done = all_rects(&eng, id);
+        assert!(!same_rects(&done, &start), "{what} changed something");
+        eng.save(id, None).unwrap();
+        let (eng2, id2) = reopen(&path);
+        assert!(same_rects(&all_rects(&eng2, id2), &done), "{what}: the saved file shows the same rectangles");
+        eng.undo(id).unwrap();
+        assert!(same_rects(&all_rects(&eng, id), &start), "{what}: undo puts every field back exactly");
+        eng.redo(id).unwrap();
+        assert!(same_rects(&all_rects(&eng, id), &done), "{what}: redo");
+    }
+}
+
+#[test]
 fn distribute_needs_three_fields_and_makes_the_gaps_equal() {
     let (eng, id, _) = rotated_form(
         "layout-distribute",
