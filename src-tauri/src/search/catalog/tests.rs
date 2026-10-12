@@ -41,12 +41,12 @@ pub(super) fn before_open(path: &Path) {
 }
 
 /// Like `BEFORE_OPEN`, but just after the open handle's size was taken (a file that grew while it was being read).
-static AFTER_LEN: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(None);
+static AFTER_LEN: Mutex<Vec<(PathBuf, Vec<u8>)>> = Mutex::new(Vec::new());
 
 pub(super) fn after_len(path: &Path) {
     let mut g = AFTER_LEN.lock().unwrap_or_else(|e| e.into_inner());
-    if g.as_ref().is_some_and(|(p, _)| p == path) {
-        let (p, bytes) = g.take().unwrap();
+    if let Some(i) = g.iter().position(|(p, _)| p == path) {
+        let (p, bytes) = g.remove(i);
         std::fs::write(p, bytes).unwrap();
     }
 }
@@ -1168,9 +1168,9 @@ fn a_file_that_grows_while_it_is_read_is_read_again_under_the_big_file_lock() {
     let p = write(&folder, "a.pdf", small);
     let q = write(&folder, "b.pdf", plain(&[vec!["another notice"]]));
     let (_, d) = make(&base.join("catalogs"), &folder);
-    *AFTER_LEN.lock().unwrap() = Some((p.clone(), grown));
+    AFTER_LEN.lock().unwrap().push((p.clone(), grown));
     let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), max_read, max_file).unwrap();
-    assert!(AFTER_LEN.lock().unwrap().is_none(), "the file was replaced after its size was taken");
+    assert!(AFTER_LEN.lock().unwrap().iter().all(|(x, _)| x != &p), "the file was replaced after its size was taken");
     assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (2, 2, 0, 0), "{s:?}");
     // The whole grown file was read, so its text is stored (a search leaves it out: it changed since the listing);
     // the one that did not grow never took the lock.
@@ -1193,7 +1193,7 @@ fn a_file_that_grows_past_the_limit_while_it_is_read_is_too_large() {
     let limit = small.len() as u64 + 10;
     let p = write(&folder, "a.pdf", small);
     let (_, d) = make(&base.join("catalogs"), &folder);
-    *AFTER_LEN.lock().unwrap() = Some((p, grown));
+    AFTER_LEN.lock().unwrap().push((p, grown));
     let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), limit, limit).unwrap();
     assert_eq!((s.files, s.extracted, s.too_large, s.damaged), (1, 0, 1, 0), "{s:?}");
 }

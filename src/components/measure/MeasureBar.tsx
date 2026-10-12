@@ -49,6 +49,10 @@ export function MeasureBar({ doc }: { doc: DocState }) {
   useEffect(() => {
     if (locked && tool !== "select") ms().setTool("select");
   }, [locked, tool]);
+  // A tool armed on another document must not draw a calibration line where the scale cannot be set.
+  useEffect(() => {
+    if (scaleLocked && tool === "calibrate") ms().setTool("distance");
+  }, [scaleLocked, tool]);
   useEffect(() => setEdit(false), [tool, page, open]);
 
   if (!open) return null;
