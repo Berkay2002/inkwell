@@ -236,7 +236,8 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   at its edge goes. A line, a single-line block (heading, table cell) included, never grows past the width its
   block had: nothing tells what is beside it, so a replacement that does not fit is not wrapped or pushed down
   but skipped with "the replacement does not fit on its line". The same goes for a block whose line ends can't
-  be placed in its new text, and for a match that cuts a word across a dropped hyphen. A match across a line end
+  be placed in its new text, for a block whose lines have their own character spacing or scale, and for a match
+  that stops inside a word a dropped hyphen split. A match across a line end
   drops
   that one break. Edit text itself re-wraps the whole block to its widest line when its text is committed (its draft
   is one paragraph), so short lines can join. Nothing is searched again

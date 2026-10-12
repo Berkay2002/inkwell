@@ -490,15 +490,21 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
         return false;
     }
     // A match that covers a dropped hyphen takes in the line after it, so its words after the match would
-    // join the first line: when a space follows the match, that space is where the second line goes on.
+    // join the first line: when a space follows the match, that space is where the second line goes on. A
+    // match that stops inside the word has no such place, and the block is left as it is.
     let mut breaks = b.breaks.clone();
     let mut forced = Vec::new();
     for (&j, &n) in b.joins.iter().zip(&b.join_lines) {
         if let Some(&(_, e)) = spans.iter().find(|&&(s, e)| s < j && e >= j) {
-            if all.get(e + 1) == Some(&' ') && !breaks.iter().any(|&(p, _)| p == e + 1) {
-                breaks.push((e + 1, n));
-                forced.push(n);
+            if breaks.iter().any(|&(p, _)| p == e + 1) || e + 1 >= all.len() {
+                continue;
             }
+            if all[e + 1] != ' ' {
+                skip_all(out, "the match ends inside a word that a hyphen at the end of a line splits");
+                return false;
+            }
+            breaks.push((e + 1, n));
+            forced.push(n);
         }
     }
     breaks.sort_by_key(|&(p, _)| p);
@@ -560,12 +566,7 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
                                 *r = (r.0.min(len), r.1.min(len));
                             }
                         }
-                        let (pos, src) = (now + plain.chars().count(), srcs.next().expect("a line for each mark"));
-                        ends.push((pos, src));
-                        // The line a replacement took the first word of is no longer as it was.
-                        if forced.contains(&src) {
-                            changed.push((pos, pos + 1));
-                        }
+                        ends.push((now + plain.chars().count(), srcs.next().expect("a line for each mark")));
                     }
                     OPEN => open = plain.chars().count(),
                     CLOSE => {
@@ -584,6 +585,12 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
             }
         }
         at += n;
+    }
+    // The line a replacement took the first word of is no longer as it was, whichever run its end is in.
+    for &(pos, src) in &ends {
+        if forced.contains(&src) {
+            changed.push((pos, pos + 1));
+        }
     }
     // Two ends in one place (the words between them were replaced by nothing): the later line is the one that
     // stays; the gap the emptied line leaves is kept.

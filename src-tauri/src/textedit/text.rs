@@ -1472,7 +1472,11 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
         None => None,
         Some(keep) => {
             let cant = || invalid("the lines of the block can't be kept where they are");
-            if items.iter().map(|i| i.text.chars().count()).sum::<usize>() != shown || items.iter().any(|i| matches!(i.kind, Kind::Break)) {
+            // Lines are measured and set with the first line's character spacing and scale: one with its own
+            // would be spaced again.
+            let (tc, tz) = (first.origin.state.char_spacing, first.origin.state.scale);
+            let alike = members.iter().all(|l| (l.origin.state.char_spacing - tc).abs() < 1e-6 && (l.origin.state.scale - tz).abs() < 1e-6);
+            if !alike || items.iter().map(|i| i.text.chars().count()).sum::<usize>() != shown || items.iter().any(|i| matches!(i.kind, Kind::Break)) {
                 return Err(cant());
             }
             // Each line: its source line, its items, and where it starts and ends in the new text.

@@ -1754,12 +1754,12 @@ fn a_block_cut_by_the_cap_is_checked_for_hyphens_after_the_cut() {
     assert!(out.stopped.is_some() && out.skipped[0].reason.contains("hyphen"), "{out:?}");
     assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(1) }), "{out:?}");
     assert_eq!(all_text(&eng, id), "lk well- known X");
-    // With room, the hyphen is no longer why: the match across it takes in the line after it, and the block's
-    // first line has no room for both, so it is listed for that.
+    // With room, the hyphen is no longer why: the match stops inside "wellknown", which no line of the block can
+    // go on from, so it is listed for that.
     r.from = out.resume;
     let out = replace_within(&eng, id, rev(&eng, id), &r, EditSource::User, Limits::default()).unwrap();
     assert_eq!((out.replaced, out.skipped_count), (0, 2), "{out:?}");
-    assert!(out.skipped.iter().all(|s| s.reason.contains("does not fit")), "{out:?}");
+    assert!(out.skipped.iter().all(|s| s.reason.contains("inside a word")), "{out:?}");
 }
 
 #[test]
@@ -2025,6 +2025,47 @@ fn a_single_line_is_never_set_wider_than_it_was() {
     assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
     assert_eq!(r.skipped[0].reason, "skipped: the replacement does not fit on its line");
     assert_eq!(all_text(&eng, id), "A cat");
+}
+
+#[test]
+fn a_line_with_its_own_character_spacing_or_scale_skips_the_block() {
+    for (name, own) in [("tc", "2 Tc"), ("tz", "80 Tz")] {
+        // The last line is set with its own Tc or Tz: the block is measured with the first line's.
+        let page = format!("BT /F1 12 Tf 72 700 Td 14 TL (One cat) Tj T* (Two) Tj T* {own} (Three long hats here) Tj ET");
+        let (eng, id, _) = open(&dir(&format!("replace-own-spacing-{name}")), &pages_pdf(&[&page]));
+        let r = do_replace(&eng, id, &req("cat", "act", SearchOpts::default())).unwrap();
+        assert_eq!((r.replaced, r.skipped_count), (0, 1), "{name}: {r:?}");
+        assert!(r.skipped[0].reason.contains("can't be kept"), "{name}: {r:?}");
+    }
+}
+
+#[test]
+fn a_match_that_stops_inside_a_hyphen_split_word_skips_the_block() {
+    let d = dir("replace-cuts-hyphen-word");
+    let page = "BT /F1 12 Tf 72 700 Td (A well-) Tj ET\nBT /F1 12 Tf 72 686 Td (known fox and a fox) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let before = all_text(&eng, id);
+    let r = do_replace(&eng, id, &req("wellkn", "x", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (0, 1), "{r:?}");
+    assert!(r.skipped[0].reason.contains("inside a word"), "{r:?}");
+    assert_eq!(all_text(&eng, id), before);
+}
+
+#[test]
+fn the_second_line_of_a_replaced_hyphenated_word_is_set_again_at_its_natural_width() {
+    let d = dir("replace-hyphen-restart");
+    // "known" is bold, the rest of line 2 regular: the break after the match lands in a run with no match.
+    let page = "BT /F1 12 Tf 72 700 Td (A well-) Tj ET\nBT /F2 12 Tf 72 686 Td (known) Tj /F1 12 Tf ( fox and a fox) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[page]));
+    let lines = |eng: &Engine| eng.page_text(id, 0).unwrap().iter().map(|l| (l.t.trim().to_string(), l.b)).collect::<Vec<_>>();
+    let before = lines(&eng);
+    let r = do_replace(&eng, id, &req("wellknown", "famous", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    let after = lines(&eng);
+    assert_eq!(after.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), ["A famous", "fox and a fox"], "{after:?}");
+    // The second line starts where it did and is as wide as its words are: not stretched to the old width.
+    assert!((after[1].1[0] - before[1].1[0]).abs() < 0.05, "{after:?} vs {before:?}");
+    assert!(after[1].1[2] < before[1].1[2] - 5.0, "{after:?} vs {before:?}");
 }
 
 #[test]
