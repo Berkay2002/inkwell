@@ -10,7 +10,7 @@
 //! text in a form) is skipped and listed with its page and reason; a block is rewritten whole or not at all.
 //! Comments, form-field values and bookmarks are not replaced.
 
-use super::text::{self, group_blocks, issue_text, read_page, Block, Fallback, RunChange, TextChange};
+use super::text::{self, collapse, group_blocks, issue_text, read_page, Block, Fallback, RunChange, TextChange};
 use super::{page_space, rect32, Result};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
@@ -27,6 +27,8 @@ const MAX_LISTED: usize = 200;
 const BUDGET: Duration = Duration::from_secs(20);
 /// Longest replacement text.
 const MAX_WITH: usize = 1000;
+/// Stands before a space in a run's new text while it is built: the space is where a line of the block ended.
+const END: char = '\u{E000}';
 /// Slack when placing a find hit (MuPDF's character boxes) in a block's line boxes, in points.
 const SLACK: f32 = 3.0;
 
@@ -424,6 +426,10 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
     };
     let mut specs = Vec::new();
     let (mut at, mut si) = (0usize, 0usize);
+    // The lines of the block stay as they were: each space that stood for a line end (not one a match
+    // swallows) is marked in the text it is in, and found again in the new text's coordinates.
+    let ends: Vec<usize> = b.breaks.iter().copied().filter(|&p| all.get(p) == Some(&' ')).collect();
+    let (mut line_ends, mut now) = (Vec::new(), 0usize);
     for (ri, run) in b.runs.iter().enumerate() {
         let (mut t, mut hit) = (String::new(), false);
         let n = run.text.chars().count();
@@ -439,21 +445,48 @@ fn apply_block(d: &mut PdfDocument, page: u32, index: usize, b: &Block, spans: &
                         t.push_str(with);
                     }
                 }
-                _ => t.push(c),
+                _ => {
+                    if ends.contains(&g) {
+                        t.push(END);
+                    }
+                    t.push(c);
+                }
+            }
+        }
+        if !hit {
+            line_ends.extend(ends.iter().filter(|&&p| p >= at && p < at + n).map(|p| now + p - at));
+            now += n;
+            specs.push(RunChange { source: Some(ri), ..Default::default() });
+        } else {
+            // The text as the rewrite will read it (spaces collapsed): the marks go, their places stay. A
+            // replacement that ends in a space against a line end would be collapsed by the rewrite and
+            // shift what follows: that run's lines are left to reflow.
+            let t = collapse(&t);
+            let plain: String = t.chars().filter(|&c| c != END).collect();
+            let kept = collapse(&plain) == plain;
+            let mut k = 0;
+            for c in t.chars() {
+                if c == END {
+                    if kept {
+                        line_ends.push(now + k);
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+            let plain = collapse(&plain);
+            now += plain.chars().count();
+            if !plain.is_empty() {
+                specs.push(RunChange { text: Some(plain), source: Some(ri), ..Default::default() });
             }
         }
         at += n;
-        if !hit {
-            specs.push(RunChange { source: Some(ri), ..Default::default() });
-        } else if !t.is_empty() {
-            specs.push(RunChange { text: Some(t), source: Some(ri), ..Default::default() });
-        }
     }
     if specs.is_empty() {
         skip_all(out, "the replacement would leave no text in the block; delete the block's text with Edit text");
         return false;
     }
-    let change = TextChange { runs: Some(specs), ..Default::default() };
+    let change = TextChange { runs: Some(specs), line_ends, ..Default::default() };
     match text::rewrite_block_expecting(d, page, index, &change, Some(&b.text)) {
         Ok(fallbacks) => {
             out.replaced += spans.len() as u32;

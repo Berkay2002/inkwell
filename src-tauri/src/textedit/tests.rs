@@ -1805,3 +1805,116 @@ fn one_block_over_the_cap_is_part_replaced_and_the_rest_listed() {
     assert_eq!(out.resume, Some(ReplaceFrom { page: 0, upto: Some(0) }), "{out:?}");
     assert_eq!(all_text(&eng, id), "cats cats cat");
 }
+
+/// Three lines of different widths in one block: the short ones would join the widest if the block were re-wrapped.
+const THREE_LINES: &str = "BT /F1 12 Tf 72 700 Td 14 TL (One cat) Tj T* (Two) Tj T* (Three long hats here) Tj ET";
+
+fn page_lines(eng: &Engine, id: DocId) -> Vec<String> {
+    eng.page_text(id, 0).unwrap().iter().map(|l| l.t.trim().to_string()).collect()
+}
+
+/// The first block's line boxes: one block of `n` lines is the whole check that nothing joined or split.
+fn line_boxes(eng: &Engine, id: DocId) -> Vec<[f32; 4]> {
+    let tb = blocks(eng, id, 0).unwrap();
+    assert_eq!(tb.blocks.len(), 1, "{:?}", tb.blocks);
+    tb.blocks[0].lines.clone()
+}
+
+#[test]
+fn edit_text_on_an_untouched_block_reflows_its_lines_to_the_widest() {
+    // What Edit text sends for one changed word: the block's text with spaces, no line breaks.
+    let d = dir("edit-joins");
+    let (eng, id, _) = open(&d, &pdf(THREE_LINES, &[("F1", HELV)], &[]));
+    assert_eq!(line_boxes(&eng, id).len(), 3);
+    set_text(&eng, id, 0, "One dog Two Three long hats here");
+    assert!(line_boxes(&eng, id).len() < 3, "{:?}", page_lines(&eng, id));
+}
+
+#[test]
+fn replace_all_keeps_the_lines_of_a_block_it_changes() {
+    let d = dir("replace-keeps-lines");
+    let (eng, id, path) = open(&d, &pages_pdf(&[THREE_LINES]));
+    let before = line_boxes(&eng, id);
+    assert_eq!(before.len(), 3);
+    let r = do_replace(&eng, id, &req("cat", "dog", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    let check = |eng: &Engine, id: DocId| {
+        assert_eq!(page_lines(eng, id), ["One dog", "Two", "Three long hats here"]);
+        let after = line_boxes(eng, id);
+        assert_eq!(after.len(), 3);
+        for (a, b) in after.iter().zip(&before) {
+            assert!((a[1] - b[1]).abs() < 0.5 && (a[0] - b[0]).abs() < 0.5, "{after:?} vs {before:?}");
+        }
+    };
+    check(&eng, id);
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = reopen(&path);
+    check(&eng, id);
+}
+
+#[test]
+fn a_longer_replacement_wraps_only_its_own_line() {
+    let d = dir("replace-grows-one-line");
+    let (eng, id, _) = open(&d, &pages_pdf(&[THREE_LINES]));
+    let before = line_boxes(&eng, id);
+    // Fits the block's width: that line grows, the others stay where they were.
+    do_replace(&eng, id, &req("Two", "Two and a half", SearchOpts::default())).unwrap();
+    assert_eq!(page_lines(&eng, id), ["One cat", "Two and a half", "Three long hats here"]);
+    let after = line_boxes(&eng, id);
+    assert_eq!(after.len(), 3);
+    assert!(after.iter().zip(&before).all(|(a, b)| (a[1] - b[1]).abs() < 0.5), "{after:?}");
+    // Wider than the block: its overflow wraps onto a line of its own, the lines below keep theirs.
+    eng.undo(id).unwrap();
+    do_replace(&eng, id, &req("cat", "cat who sat on the very large mat", SearchOpts::default())).unwrap();
+    let lines = page_lines(&eng, id);
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert!(lines[0].starts_with("One cat who"), "{lines:?}");
+    assert_eq!(&lines[2..], ["Two", "Three long hats here"], "{lines:?}");
+    assert_eq!(line_boxes(&eng, id).len(), 4);
+}
+
+#[test]
+fn a_match_across_a_line_end_drops_only_that_break() {
+    let d = dir("replace-across-lines");
+    let (eng, id, _) = open(&d, &pages_pdf(&[THREE_LINES]));
+    let r = do_replace(&eng, id, &req("cat Two", "pet", SearchOpts::default())).unwrap();
+    assert_eq!((r.replaced, r.skipped_count), (1, 0), "{r:?}");
+    assert_eq!(page_lines(&eng, id), ["One pet", "Three long hats here"]);
+}
+
+#[test]
+fn a_justified_block_stays_justified_when_one_word_is_replaced() {
+    let d = dir("replace-justified");
+    let (eng, id, _) = open(&d, &pdf(TWO_BLOCKS, &[("F1", HELV)], &[]));
+    let long = "Justified text spreads the free width of every line but the last over its spaces, so both edges line up.";
+    let change = BlockChange { text: Some(long.into()), align: Some(Align::Justify), width: Some(160.0), ..Default::default() };
+    edit(&eng, id, rev(&eng, id), 0, 1, &change, EditSource::User).unwrap();
+    let before = blocks(&eng, id, 0).unwrap().blocks[1].lines.clone();
+    let n = before.len();
+    assert!(n >= 4, "{n} lines");
+    // Same length, so no line changes its own width by more than a glyph or two.
+    let r = do_replace(&eng, id, &req("both", "each", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let b = blocks(&eng, id, 0).unwrap().blocks[1].clone();
+    assert_eq!(b.lines.len(), n, "{:?}", page_lines(&eng, id));
+    let right = b.lines[0][2];
+    assert!(b.lines[..n - 1].iter().all(|l| (l[2] - right).abs() < 0.6), "{:?}", b.lines);
+    assert!(b.lines[n - 1][2] < right - 5.0, "the last line is not stretched");
+    assert!(b.text.contains("each edges"), "{}", b.text);
+}
+
+#[test]
+fn lines_set_in_different_styles_keep_their_breaks_too() {
+    let d = dir("replace-keeps-mixed-lines");
+    let mixed = "BT /F1 12 Tf 72 700 Td 14 TL (One cat) Tj T* /F2 12 Tf (Bold two) Tj T* /F1 12 Tf (Three long hats here) Tj ET";
+    let (eng, id, _) = open(&d, &pages_pdf(&[mixed]));
+    assert_eq!(line_boxes(&eng, id).len(), 3);
+    let r = do_replace(&eng, id, &req("cat", "dog", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    assert_eq!(page_lines(&eng, id), ["One dog", "Bold two", "Three long hats here"]);
+    // A replacement that starts and ends in a space beside a line end: still no panic, nothing misplaced.
+    let r = do_replace(&eng, id, &req("dog", " big dog ", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    assert_eq!(page_lines(&eng, id), ["One big dog", "Bold two", "Three long hats here"]);
+}

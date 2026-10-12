@@ -306,6 +306,7 @@ pub fn edit(eng: &Engine, doc: DocId, rev: u32, page: u32, index: u32, change: &
             strike: change.strike,
             rise: change.rise,
             runs: change.runs.clone(),
+            ..Default::default()
         };
         fallbacks = text::rewrite_block(d, page, index as usize, &c)?;
         Ok(vec![page])

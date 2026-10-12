@@ -15,7 +15,7 @@
 
 use super::content::{Matrix, Obj, Op, Pieces, num, serialize_ops};
 use super::font::{Limit, Metrics};
-use super::layout::{Deco, Face, Measure, Placement, RunSpec, Setter, emit, family_of, forget_unused_fonts, restyled_face, wrap};
+use super::layout::{Deco, Face, Kind, Measure, Placement, RunSpec, Setter, emit, family_of, forget_unused_fonts, restyled_face, wrap};
 use crate::engine::EngineError;
 use mupdf::Buffer;
 use mupdf::pdf::{PdfDocument, PdfObject};
@@ -300,6 +300,9 @@ pub struct Block {
     /// Where in the runs' joined text a line-end hyphen was dropped (the character offset the next line
     /// starts at): a rewrite of the block does not put it back.
     pub joins: Vec<usize>,
+    /// Where in the runs' joined text a line ended: the character offset of the space that stands for
+    /// the break (not a hyphen's, those are `joins`). A rewrite that keeps the lines sets a line end there.
+    pub breaks: Vec<usize>,
 }
 
 /// What the page holds that can't be edited, outside the blocks.
@@ -1068,11 +1071,12 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
                 lines: vec![i],
                 runs: Vec::new(),
                 joins: Vec::new(),
+                breaks: Vec::new(),
             });
         }
     }
     for b in &mut blocks {
-        (b.runs, b.joins) = block_runs(lines, &b.lines);
+        (b.runs, b.joins, b.breaks) = block_runs(lines, &b.lines);
         if let Some(r) = b.runs.get(body_run(&b.runs)) {
             (b.base_font, b.size, b.bold, b.italic, b.color) = (r.base_font.clone(), r.size, r.bold, r.italic, r.color);
         }
@@ -1084,11 +1088,12 @@ pub fn group_blocks(lines: &[Line]) -> Vec<Block> {
     blocks
 }
 
-/// The runs of a block's lines in reading order, joined across line breaks (see [`Block::runs`]), and where
-/// line-end hyphens were dropped (see [`Block::joins`]).
-fn block_runs(lines: &[Line], members: &[usize]) -> (Vec<Run>, Vec<usize>) {
+/// The runs of a block's lines in reading order, joined across line breaks (see [`Block::runs`]), where
+/// line-end hyphens were dropped (see [`Block::joins`]) and where the other lines ended (see [`Block::breaks`]).
+fn block_runs(lines: &[Line], members: &[usize]) -> (Vec<Run>, Vec<usize>, Vec<usize>) {
     let mut out: Vec<Run> = Vec::new();
     let mut joins = Vec::new();
+    let mut breaks = Vec::new();
     for (n, &li) in members.iter().enumerate() {
         let line = &lines[li];
         for (k, run) in line.runs.iter().enumerate() {
@@ -1113,9 +1118,12 @@ fn block_runs(lines: &[Line], members: &[usize]) -> (Vec<Run>, Vec<usize>) {
                             }
                             joins.push(out.iter().map(|r| r.text.chars().count()).sum());
                         } else if prev.same_style(&run) {
+                            breaks.push(out.iter().map(|r| r.text.chars().count()).sum());
+                            let prev = out.last_mut().expect("checked");
                             prev.text.push(' ');
                             prev.glyphs.push(Glyph::gap());
                         } else {
+                            breaks.push(out.iter().map(|r| r.text.chars().count()).sum());
                             run.text.insert(0, ' ');
                             run.glyphs.insert(0, Glyph::gap());
                         }
@@ -1138,7 +1146,7 @@ fn block_runs(lines: &[Line], members: &[usize]) -> (Vec<Run>, Vec<usize>) {
         last.text = last.text.trim_end_matches(paragraph_separator).to_string();
     }
     out.retain(|r| !r.text.is_empty());
-    (out, joins)
+    (out, joins, breaks)
 }
 
 fn detect_align(lines: &[Line], members: &[usize]) -> Align {
@@ -1197,6 +1205,10 @@ pub struct TextChange {
     pub rise: Option<Option<Rise>>,
     /// The block's new content as runs of their own style, in order (replaces `text`).
     pub runs: Option<Vec<RunChange>>,
+    /// Character offsets in the new runs' text of spaces that stay where a line ended (Find & Replace, which
+    /// changes words and leaves the lines): each is set as a line end, and the rest reflows as usual.
+    #[serde(skip)]
+    pub line_ends: Vec<usize>,
 }
 
 /// One run of a block's new content. Unset fields come from run `source` of the block (or its
@@ -1263,7 +1275,7 @@ fn normalize(text: &str) -> String {
 }
 
 /// Text with each stretch of spaces as one space, hard breaks (`\n`) kept, the ends left as they are.
-fn collapse(text: &str) -> String {
+pub(super) fn collapse(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.replace("\r\n", "\n").chars() {
         if c != '\n' && paragraph_separator(c) {
@@ -1336,6 +1348,8 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
     // The size lines are spaced by: the first run that is not raised, and what it was.
     let mut reference: Option<(f64, f64)> = None;
     let mut first_size = None;
+    // Characters the runs show, for placing `change.line_ends` in the items.
+    let mut shown = 0usize;
     for rc in &specs {
         let src = match rc.source {
             Some(i) => Some(b.runs.get(i).ok_or_else(|| invalid(format!("the block has no run {}", i + 1)))?),
@@ -1385,6 +1399,7 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
         if text.is_none() && src.is_none() {
             continue;
         }
+        shown += text.as_deref().map_or_else(|| src.map_or(0, |s| s.text.chars().count()), |t| t.chars().count());
         let spec = RunSpec {
             source: src,
             text,
@@ -1403,6 +1418,16 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
             reference.get_or_insert((size, like.tsize));
         }
         items.extend(setter.items(&spec)?);
+    }
+    // Only when the items add up to the runs' text, so an offset is known to be what it was meant for.
+    if !change.line_ends.is_empty() && items.iter().map(|i| i.text.chars().count()).sum::<usize>() == shown {
+        let mut at = 0;
+        for it in &mut items {
+            if matches!(it.kind, Kind::Space(_)) && change.line_ends.contains(&at) {
+                (it.kind, it.w, it.kern) = (Kind::Line, 0.0, 0.0);
+            }
+            at += it.text.chars().count();
+        }
     }
     let (size, old_tf) = match (reference, first_size) {
         (Some(r), _) => r,

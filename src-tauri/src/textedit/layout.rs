@@ -153,6 +153,9 @@ pub(crate) enum Kind {
     Space(Option<Vec<u8>>),
     /// A hard line break.
     Break,
+    /// A line end the text keeps inside its paragraph (Find & Replace leaves the lines of a block as they
+    /// are): unlike `Break` it does not end the paragraph, so a justified line stays justified.
+    Line,
 }
 
 /// One glyph, space or break to set.
@@ -596,7 +599,7 @@ impl Measure<'_> {
     pub fn width(&self, it: &Item) -> f64 {
         let size = self.styles[it.style].size;
         let glyph = match it.kind {
-            Kind::Break => return 0.0,
+            Kind::Break | Kind::Line => return 0.0,
             Kind::Space(None) => it.w / 1000.0 * size,
             _ => it.w / 1000.0 * size + self.cs,
         };
@@ -616,15 +619,19 @@ fn is_space(it: &Item) -> bool {
 /// line and are dropped), between CJK characters, and at hard breaks.
 pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
     let mut out = Vec::new();
-    let mut paras: Vec<Vec<Item>> = vec![Vec::new()];
+    // Each paragraph, and whether its last line ends it (a `Line` end does not).
+    let mut paras: Vec<(Vec<Item>, bool)> = vec![(Vec::new(), true)];
     for it in items {
-        if matches!(it.kind, Kind::Break) {
-            paras.push(Vec::new());
-        } else {
-            paras.last_mut().expect("one").push(it);
+        match it.kind {
+            Kind::Break => paras.push((Vec::new(), true)),
+            Kind::Line => {
+                paras.last_mut().expect("one").1 = false;
+                paras.push((Vec::new(), true));
+            }
+            _ => paras.last_mut().expect("one").0.push(it),
         }
     }
-    for para in paras {
+    for (para, ends) in paras {
         // Words: (spaces before, word).
         let mut words: Vec<(Vec<Item>, Vec<Item>)> = Vec::new();
         let mut spaces = Vec::new();
@@ -671,7 +678,7 @@ pub(crate) fn wrap(items: Vec<Item>, width: f64, m: &Measure) -> Vec<LineOut> {
                 line.extend(wd);
             }
         }
-        out.push(LineOut { items: line, ends_para: true });
+        out.push(LineOut { items: line, ends_para: ends });
     }
     out
 }
@@ -822,7 +829,7 @@ pub(crate) fn emit(setter: &Setter, lines: &[LineOut], m: &Measure, p: &Placemen
                     flush(&mut arr, &mut text);
                     arr.push(num(-it.w));
                 }
-                Kind::Break => {}
+                Kind::Break | Kind::Line => {}
             }
             if is_space(it) && extra != 0.0 {
                 flush(&mut arr, &mut text);
