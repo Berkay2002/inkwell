@@ -204,6 +204,11 @@ fn accept(items: &[Item], run: &[Entry], widgets: &[Rect]) -> Option<Toc> {
     if !(right || left) || run.windows(2).any(|w| w[1].key < w[0].key) {
         return None;
     }
+    // Page numbers that all repeat or climb by one fixed step are a price list or a numbered column, not pages.
+    let step = |w: &[Entry]| (w[0].key.0 == w[1].key.0).then(|| i64::from(w[1].key.1) - i64::from(w[0].key.1));
+    if run.windows(2).all(|w| step(w).is_some() && step(w) == step(&run[..2])) {
+        return None;
+    }
     // Drawn entry by entry, each line whole before the next: tag order and content order then agree.
     let cells: Vec<&Item> = run.iter().flat_map(|e| e.cells.iter().map(|&i| &items[i])).collect();
     if cells.windows(2).any(|w| w[0].runs.1 >= w[1].runs.0) {

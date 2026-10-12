@@ -445,12 +445,13 @@ describe("rules decided by hand", () => {
   });
 
   it("are stored with the file's recents entry and read back when the document is opened again", async () => {
-    const path = "C:\Docs\a.pdf";
+    const path = "C:\\Docs\\a.pdf";
     useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], path } as never } });
     useRecents.setState({ items: [{ path, opened: 1 }] });
-    reply({ a11y_check: sample, a11y_preview: { untagged: false }, recents_save: null });
+    reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: "0a1b/12", recents_save: null });
     a().setMark(1, "title", "passed");
     await vi.waitFor(() => expect(useRecents.getState().items[0].a11yMarks).toEqual({ title: "passed" }));
+    expect(useRecents.getState().items[0].a11yFp).toBe("0a1b/12");
     // A new session: the entry comes back from the stored JSON with the marks, and the panel reads them.
     const stored = parse(JSON.stringify(useRecents.getState().items))!;
     expect(stored[0].a11yMarks).toEqual({ title: "passed" });
@@ -462,11 +463,54 @@ describe("rules decided by hand", () => {
     await vi.waitFor(() => expect(useRecents.getState().items[0].a11yMarks).toBeUndefined());
   });
 
+  it("are dropped when another file has taken the path (its fingerprint differs), so no report claims them", async () => {
+    const path = "C:\\Docs\\b.pdf";
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], path } as never } });
+    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
+    // Another PDF with the same page count but another /ID, or the same /ID with another page count.
+    for (const other of ["ffff/12", "0a1b/13"]) {
+      useA11y.setState({ docs: {} });
+      useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
+      reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: other, recents_save: null });
+      await a().check(1);
+      await vi.waitFor(() => expect(useRecents.getState().items[0].a11yMarks).toBeUndefined());
+      expect(a().get(1).marks).toEqual({});
+      expect(marksIn(a().get(1).report!, a().get(1).marks)).toEqual({});
+    }
+    // The same document, as Inkwell saves it (same fingerprint), keeps them.
+    useA11y.setState({ docs: {} });
+    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
+    reply({ a11y_check: sample, a11y_preview: { untagged: false }, a11y_fingerprint: "0a1b/12", recents_save: null });
+    await a().check(1);
+    await vi.waitFor(() => expect(a().get(1).marks).toEqual({ title: "passed" }));
+  });
+
+  it("are not applied when the fingerprint cannot be read", async () => {
+    const path = "C:\\Docs\\c.pdf";
+    useStore.setState({ docs: { 1: { ...useStore.getState().docs[1], path } as never } });
+    useRecents.setState({ items: [{ path, opened: 1, a11yMarks: { title: "passed" }, a11yFp: "0a1b/12" }] });
+    reply({ a11y_check: sample, a11y_preview: { untagged: false } });
+    await a().check(1);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(a().get(1).marks).toEqual({});
+    expect(useRecents.getState().items[0].a11yMarks).toEqual({ title: "passed" });
+  });
+
   it("are checked when stored: other values, long ids and too many are dropped", () => {
     const many = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`r${i}`, "passed"]));
-    const l = parse(JSON.stringify([{ path: "C:\a.pdf", opened: 1, a11yMarks: { title: "passed", x: "failed", ["y".repeat(41)]: "skipped" } }, { path: "C:\b.pdf", opened: 2, a11yMarks: many }, { path: "C:\c.pdf", opened: 3, a11yMarks: ["passed"] }]))!;
+    const e = (path: string, opened: number, a11yMarks: unknown, a11yFp = "ab/1") => ({ path, opened, a11yFp, a11yMarks });
+    const l = parse(
+      JSON.stringify([
+        e("C:/a.pdf", 1, { title: "passed", x: "failed", ["y".repeat(41)]: "skipped" }),
+        e("C:/b.pdf", 2, many),
+        e("C:/c.pdf", 3, ["passed"]),
+        e("C:/d.pdf", 4, { title: "passed" }, ""),
+      ]),
+    )!;
     expect(l[0].a11yMarks).toEqual({ title: "passed" });
     expect(Object.keys(l[1].a11yMarks!)).toHaveLength(64);
     expect("a11yMarks" in l[2]).toBe(false);
+    // marks without the fingerprint of their document are not trusted
+    expect("a11yMarks" in l[3]).toBe(false);
   });
 });

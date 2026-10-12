@@ -3,7 +3,7 @@
 //! same and that the tree passes the structure rules.
 
 use super::tests::{Spec, check_eng, file, open};
-use super::tests_tables::{at, autotag, autotag_loose, grid, page};
+use super::tests_tables::{Tagged, at, autotag as autotag_plain, autotag_loose, grid, page};
 use super::*;
 
 /// An element and what is under it: `TOCI(Link*)`, `*` for an annotation and `#` for marked content.
@@ -16,6 +16,16 @@ fn outline(t: &Tree, i: usize) -> String {
         s += &format!("({})", e.children.iter().map(|&c| outline(t, c)).collect::<Vec<_>>().join(","));
     }
     s
+}
+
+/// `autotag`, and every TOCI holds only Reference elements: no marked content and no Link of its own.
+fn autotag(test: &str, s: &Spec) -> Tagged {
+    let t = autotag_plain(test, s);
+    for (i, e) in t.tree.elems.iter().enumerate().filter(|(_, e)| e.ty == "TOCI") {
+        let kids: Vec<&str> = e.children.iter().map(|&c| t.tree.elems[c].ty.as_str()).collect();
+        assert!(e.mcids.is_empty() && e.annots.is_empty() && kids == ["Reference"], "{test}: TOCI {i} holds {kids:?} and {} MCIDs", e.mcids.len());
+    }
+    t
 }
 
 /// The first element of type `ty` and its outline.
@@ -49,15 +59,16 @@ fn leader_page(y0: i32, pages: &[&str]) -> String {
 #[test]
 fn entries_with_a_dot_leader_and_a_page_number_are_a_toc() {
     let mut c = at("F1", 18, 72, 740, "Contents");
-    c += &leader_page(700, &["3", "5", "7", "9"]);
+    c += &leader_page(700, &["3", "5", "8", "9"]);
     c += &at("F1", 12, 72, 520, "This report covers the year.");
     let t = autotag("toc-leader", &page(c));
-    assert_eq!(t.types, ["Document", "H1", "TOC", "TOCI", "TOCI", "TOCI", "TOCI", "P"].map(String::from), "{:?}", t.types);
+    assert_eq!(t.types, ["Document", "H1", "TOC", "TOCI", "Reference", "TOCI", "Reference", "TOCI", "Reference", "TOCI", "Reference", "P"].map(String::from), "{:?}", t.types);
     // One run of marked content for each line, and each entry's text is in its own TOCI.
-    assert_eq!(t.content.matches("/TOCI <</MCID").count(), 4, "{}", t.content);
+    assert_eq!(t.content.matches("/Reference <</MCID").count(), 4, "{}", t.content);
     assert_eq!(t.content.matches("<</MCID").count(), 6);
     let toc = find(&t.tree, "TOC").unwrap();
-    assert!(t.tree.elems[toc].children.iter().all(|&c| t.tree.elems[c].ty == "TOCI" && t.tree.elems[c].mcids.len() == 1));
+    assert!(t.tree.elems[toc].children.iter().all(|&c| t.tree.elems[c].ty == "TOCI" && t.tree.elems[c].children.len() == 1));
+    assert_eq!(outline(&t.tree, find(&t.tree, "TOCI").unwrap()), "TOCI(Reference#)");
 }
 
 #[test]
@@ -73,9 +84,9 @@ fn a_leader_and_a_page_number_set_as_their_own_lines_are_a_toc() {
     }
     let t = autotag("toc-split", &page(c));
     assert_eq!((t.count("TOC"), t.count("TOCI"), t.count("Table")), (1, 4, 0), "{:?}", t.types);
-    // Each entry's three lines are in its TOCI, in order.
-    assert_eq!(outline(&t.tree, find(&t.tree, "TOCI").unwrap()), "TOCI#");
-    assert_eq!(t.content.matches("/TOCI <</MCID").count(), 12);
+    // Each entry's three lines are in its Reference, in order.
+    assert_eq!(outline(&t.tree, find(&t.tree, "TOCI").unwrap()), "TOCI(Reference#)");
+    assert_eq!(t.content.matches("/Reference <</MCID").count(), 12);
 }
 
 #[test]
@@ -140,6 +151,9 @@ fn what_is_not_clearly_a_toc_stays_paragraphs() {
     toc("toc-two", leader_page(700, &["3", "5"]));
     // Page numbers that go back: a price list with a dot leader.
     toc("toc-prices", leader_page(700, &["25", "18", "30", "12"]));
+    // Prices that only climb by one step, or repeat: not pages either.
+    toc("toc-prices-up", leader_page(700, &["25", "35", "45", "55"]));
+    toc("toc-prices-same", leader_page(700, &["5", "5", "5", "5"]));
     // Page numbers that do not line up in a column.
     let mut c = String::new();
     for (i, (title, x, no)) in [("Introduction", 500, "1"), ("Background", 430, "7"), ("Method", 510, "12"), ("Results", 470, "20")].iter().enumerate() {
@@ -175,7 +189,7 @@ fn what_is_not_clearly_a_toc_stays_paragraphs() {
 /// Link annotations over entries 1 and 2 (a page that exists), 3 (a page that does not), and none over 4.
 fn linked_toc() -> Spec {
     let mut c = at("F1", 18, 72, 740, "Contents");
-    c += &leader_page(700, &["3", "5", "7", "9"]);
+    c += &leader_page(700, &["3", "5", "8", "9"]);
     let mut s = page(c);
     s.pages[0].0 = "/Annots [120 0 R 121 0 R 122 0 R]".into();
     for (n, y, dest) in [(120, 700, "10 0 R"), (121, 682, "10 0 R"), (122, 664, "999 0 R")] {
@@ -189,13 +203,13 @@ fn a_link_over_an_entry_becomes_a_link_in_its_toci_and_only_there() {
     let t = autotag("toc-links", &linked_toc());
     let toc = find(&t.tree, "TOC").unwrap();
     let entries: Vec<String> = t.tree.elems[toc].children.iter().map(|&c| outline(&t.tree, c)).collect();
-    // Entries 1 and 2 hold a Link that has the text and the annotation; 3 (its page is not there) and 4
-    // (no annotation) hold their text. Nothing was added to the annotations.
-    assert_eq!(entries, ["TOCI(Link*#)", "TOCI(Link*#)", "TOCI#", "TOCI#"], "{entries:?}");
+    // Entries 1 and 2 hold a Link (inside the Reference) that has the text and the annotation; 3 (its page is
+    // not there) and 4 (no annotation) hold their text in the Reference. Nothing was added to the annotations.
+    assert_eq!(entries, ["TOCI(Reference(Link*#))", "TOCI(Reference(Link*#))", "TOCI(Reference#)", "TOCI(Reference#)"], "{entries:?}");
     // The annotation that goes nowhere is still tagged as a link, by itself, outside the TOC.
     let links: Vec<usize> = (0..t.tree.elems.len()).filter(|&i| t.tree.elems[i].ty == "Link").collect();
     assert_eq!(links.len(), 3);
-    assert_eq!(links.iter().filter(|&&i| parent_type(&t.tree, i) == Some("TOCI")).count(), 2);
+    assert_eq!(links.iter().filter(|&&i| parent_type(&t.tree, i) == Some("Reference")).count(), 2);
     assert_eq!(t.report.status(Rule::TaggedLinks), Status::Passed, "{:?}", t.report.result(Rule::TaggedLinks).findings);
     let doc = PdfDocument::open(&file_path("toc-links")).unwrap();
     let page = doc.find_page(0).unwrap();
@@ -204,7 +218,7 @@ fn a_link_over_an_entry_becomes_a_link_in_its_toci_and_only_there() {
 
 #[test]
 fn a_toc_without_any_annotation_gets_no_link() {
-    let t = autotag("toc-nolinks", &page(leader_page(700, &["3", "5", "7"])));
+    let t = autotag("toc-nolinks", &page(leader_page(700, &["3", "5", "8"])));
     assert_eq!((t.count("TOC"), t.count("TOCI"), t.count("Link")), (1, 3, 0), "{:?}", t.types);
 }
 
@@ -311,7 +325,7 @@ const SIGNATURE: &str = "<</FT/Sig /T(Signature1) /V <</Type/Sig /Filter/Adobe.P
 
 /// An untagged page with a table of contents, signed, and certified with DocMDP `/P` when given.
 fn untagged(certified: Option<u8>) -> Spec {
-    let mut s = page(leader_page(700, &["3", "5", "7", "9"]));
+    let mut s = page(leader_page(700, &["3", "5", "8", "9"]));
     s.cat = "/AcroForm <</SigFlags 3 /Fields [120 0 R]>>".into();
     s.objs.push((120, SIGNATURE.into()));
     if let Some(p) = certified {

@@ -638,14 +638,18 @@ pub fn run(doc: &mut PdfDocument, progress: &mut dyn FnMut(Progress), cancel: &A
                                 pg.els[e].kids.push(item);
                                 let b = union(row.iter().map(|&l| t.lines[l].bbox));
                                 top_y = top_y.min(b.y0);
-                                // A link annotation already over the entry, with a target that exists,
-                                // wraps the entry's text; without one the entry's text is its own.
-                                let mut owner = item;
+                                // TOCI takes Reference (and Lbl, P, NonStruct, TOC), not marked content or Link
+                                // directly (ISO 32000-1 Table 333). The entry's text is in a Reference; a link
+                                // annotation already over the entry, with a target that exists, makes it a Link
+                                // inside that Reference, holding the text and the annotation.
+                                let reference = pg.add("Reference");
+                                pg.els[item].kids.push(reference);
+                                let mut owner = reference;
                                 if let Some((x, a)) = take_link(&mut links, b) {
                                     claimed.insert(x);
                                     owner = pg.add("Link");
                                     pg.els[owner].objr = Some(a);
-                                    pg.els[item].kids.push(owner);
+                                    pg.els[reference].kids.push(owner);
                                 }
                                 row.iter().for_each(|&l| line_owner[l] = owner);
                             }

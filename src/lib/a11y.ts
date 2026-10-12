@@ -6,6 +6,7 @@ import { type EditState, pickSave, toolCancel } from "./api";
 import { applyState, run } from "./edit";
 import { type A11yMark, type A11yMarks, type Finding, type Fix, type Preview, type Progress, type Rect4, type Report, applyOverrides, marksIn, safeFixes, stem, suggestLang } from "./a11yLogic";
 import { useRecents } from "../recents";
+import { marksFor } from "./recent";
 import {
   type Problem,
   type ReadingOrder,
@@ -42,6 +43,8 @@ export const a11yApi = {
   },
   preview: (doc: number) => invoke<Preview>("a11y_preview", { doc }),
   protection: (doc: number) => invoke<Protection>("a11y_protection", { doc }),
+  /** Trailer /ID[0] and page count: what tells this document from another file at the same path. */
+  fingerprint: (doc: number) => invoke<string>("a11y_fingerprint", { doc }),
   readingOrder: (doc: number, page: number) => invoke<ReadingOrder>("a11y_reading_order", { doc, page }),
   tags: (doc: number, page: number | null) => invoke<TagNode[]>("a11y_tags", { doc, page }),
   tagProblems: (doc: number) => invoke<Problem[]>("a11y_tag_problems", { doc }),
@@ -361,13 +364,34 @@ export const useA11y = create<A11yStore>((set, get) => {
   const editTags = (doc: number, f: () => Promise<EditState>) =>
     edit(doc, f, (m) => patchTags(doc, { error: m }), () => get().loadTags(doc, true));
 
-  /** Reads the marks stored with the file once; a mark set before the read finishes wins. */
-  async function loadMarks(doc: number) {
+  /**
+   * Reads the marks stored with the file once. They count only when they were made on this document (same
+   * fingerprint); otherwise a different file has taken the path and its marks are dropped. A mark set before the
+   * read finishes wins. Reading the fingerprint fails: nothing is applied or stored.
+   */
+  const marksRead = new Map<number, Promise<void>>();
+  function loadMarks(doc: number): Promise<void> {
     const d = st().docs[doc];
-    if (!d || get().get(doc).marksLoaded) return;
+    if (!d || get().get(doc).marksLoaded) return marksRead.get(doc) ?? Promise.resolve();
     patch(doc, { marksLoaded: true });
-    const stored = d.path ? await useRecents.getState().marksOf(d.path).catch(() => undefined) : undefined;
-    if (stored && get().docs[doc]) patch(doc, { marks: { ...stored, ...get().get(doc).marks } });
+    const p = (async () => {
+      if (!d.path) return;
+      const [entry, fp] = await Promise.all([useRecents.getState().entryOf(d.path), a11yApi.fingerprint(doc).catch(() => null)]);
+      if (!entry?.a11yMarks || !get().docs[doc]) return;
+      const stored = marksFor(entry, fp);
+      if (stored) patch(doc, { marks: { ...stored, ...get().get(doc).marks } });
+      else if (fp) useRecents.getState().setMarks(d.path, {}, fp);
+    })().catch(() => {});
+    marksRead.set(doc, p);
+    return p;
+  }
+  /** Stores the marks as they are now with the file's entry and the document's fingerprint. */
+  async function saveMarks(doc: number) {
+    await loadMarks(doc);
+    const d = st().docs[doc];
+    if (!d?.path || !get().docs[doc]) return;
+    const fp = await a11yApi.fingerprint(doc).catch(() => null);
+    if (fp && get().docs[doc]) useRecents.getState().setMarks(d.path, get().get(doc).marks, fp);
   }
 
   async function loadPreview(doc: number, r: Report) {
@@ -421,6 +445,8 @@ export const useA11y = create<A11yStore>((set, get) => {
         const report = await a11yApi.check(job, doc, (p) => latest.get(doc) === job && patch(doc, { progress: p }));
         if (latest.get(doc) !== job) return;
         patch(doc, { report, checkedRev: rev, shown: null, ...done() });
+        // The document may have changed (pages added) since the marks were stored with its fingerprint.
+        if (Object.keys(get().get(doc).marks).length) void saveMarks(doc);
         await loadPreview(doc, report);
       } catch (e) {
         if (latest.get(doc) !== job) return;
@@ -516,8 +542,8 @@ export const useA11y = create<A11yStore>((set, get) => {
       const { [rule]: _old, ...rest } = get().get(doc).marks;
       void _old;
       const marks = mark ? { ...rest, [rule]: mark } : rest;
-      patch(doc, { marks, marksLoaded: true });
-      if (d.path) useRecents.getState().setMarks(d.path, marks);
+      patch(doc, { marks });
+      void saveMarks(doc);
     },
 
     show: (doc, f) => {
@@ -542,6 +568,7 @@ export const useA11y = create<A11yStore>((set, get) => {
         latestTags.delete(doc);
         reading.delete(doc);
         readSeq.delete(doc);
+        marksRead.delete(doc);
         return { docs: rest };
       }),
 

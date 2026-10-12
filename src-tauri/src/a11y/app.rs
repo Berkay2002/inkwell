@@ -6,7 +6,7 @@ use super::order::ReadingOrder;
 use super::report::Overrides;
 use super::tags::{TagNode, TagPatch};
 use super::{
-    Fix, Problem, Progress, Protection, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, merge_many_doc, move_tag_doc, preview_doc, protection_doc, reading_order_doc, reorder_doc,
+    Fix, Problem, Progress, Protection, Report, artifact_doc, check_doc, edit_tag_doc, fix_doc_with, merge_doc, merge_many_doc, move_tag_doc, fingerprint_doc, preview_doc, protection_doc, reading_order_doc, reorder_doc,
     report_bytes, set_role_doc, split_doc, tag_problems_doc, tags_doc,
 };
 use crate::engine::edit::{EditSource, EditState};
@@ -110,6 +110,14 @@ pub async fn a11y_export_report(
 pub async fn a11y_protection(eng: Eng<'_>, doc: DocId) -> Result<Protection> {
     let eng = eng.inner().clone();
     blocking(move || protection_doc(&eng, doc)).await
+}
+
+/// The document's fingerprint (see `fingerprint_doc`): the UI stores it with the marks a person made, so marks
+/// are not applied to a different file that took the same path.
+#[tauri::command]
+pub async fn a11y_fingerprint(eng: Eng<'_>, doc: DocId) -> Result<String> {
+    let eng = eng.inner().clone();
+    blocking(move || fingerprint_doc(&eng, doc)).await
 }
 
 // ---- reading order and tags ----------------------------------------------------------------------

@@ -798,6 +798,26 @@ fn rules_marked_by_hand_read_as_such_in_the_report_and_change_nothing_in_the_fil
 }
 
 #[test]
+fn the_fingerprint_is_the_first_id_and_the_page_count_and_survives_an_edit_and_save() {
+    let path = file("fingerprint", &untagged_article());
+    // No /ID: only the page count.
+    let (eng, id) = open(&path);
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "/1");
+    eng.close(id);
+    let bytes = std::fs::read_to_string(&path).unwrap().replace("/Root 1 0 R", "/Root 1 0 R /ID [<0123456789abcdef0123456789abcdef> <ffffffffffffffffffffffffffffffff>]");
+    std::fs::write(&path, bytes).unwrap();
+    let (eng, id) = open(&path);
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "0123456789abcdef0123456789abcdef/1");
+    // An edit and Inkwell's own save keep the first string.
+    fix_doc(&eng, id, &Fix::Title { title: Some("Q3".into()) }, EditSource::User).unwrap();
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "0123456789abcdef0123456789abcdef/1");
+    eng.save(id, None).unwrap();
+    eng.close(id);
+    let (eng, id) = open(&path);
+    assert_eq!(fingerprint_doc(&eng, id).unwrap(), "0123456789abcdef0123456789abcdef/1");
+}
+
+#[test]
 fn a_report_never_replaces_a_document_that_is_open() {
     let path = file("report-target", &untagged_article());
     let (eng, _id) = open(&path);

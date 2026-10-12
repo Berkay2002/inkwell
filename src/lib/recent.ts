@@ -16,6 +16,8 @@ export interface Recent {
   lastPage?: number;
   /** Accessibility rules the person marked by hand, by rule id (see `a11yLogic.applyOverrides`). Kept with the entry, never in the file. */
   a11yMarks?: A11yMarks;
+  /** `a11y_fingerprint` of the document the marks were made on (trailer /ID[0] and page count). */
+  a11yFp?: string;
 }
 
 export type A11yMark = "passed" | "skipped";
@@ -23,6 +25,11 @@ export type A11yMarks = Record<string, A11yMark>;
 
 const MAX_MARKS = 64;
 const MAX_ID = 40;
+
+/** The marks of an entry for the document with this fingerprint; none when they were made on another file. */
+export function marksFor(r: Recent | undefined, fp: string | null): A11yMarks | undefined {
+  return r?.a11yMarks && fp && r.a11yFp === fp ? r.a11yMarks : undefined;
+}
 
 /** Marks as stored: only "passed" and "skipped", short ids, a bounded count; anything else is dropped. Undefined when none are left. */
 export function cleanMarks(v: unknown): A11yMarks | undefined {
@@ -154,9 +161,10 @@ export function parse(json: string | null): Recent[] | null {
     return v
       .filter((r): r is Recent => typeof r?.path === "string" && typeof r?.opened === "number")
       .map((r) => {
-        const { a11yMarks, ...rest } = r;
-        const marks = cleanMarks(a11yMarks);
-        return marks ? { ...rest, a11yMarks: marks } : rest;
+        const { a11yMarks, a11yFp, ...rest } = r;
+        // Marks without the fingerprint of their document are not trusted.
+        const marks = typeof a11yFp === "string" && a11yFp.length > 0 && a11yFp.length <= 200 ? cleanMarks(a11yMarks) : undefined;
+        return marks ? { ...rest, a11yMarks: marks, a11yFp } : rest;
       });
   } catch {
     return [];
