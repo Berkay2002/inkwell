@@ -1562,7 +1562,11 @@ pub fn rewrite_block_expecting(doc: &mut PdfDocument, page: u32, index: usize, c
         (insert, keep)
     });
     write_contents(doc, &pc, new_data)?;
-    forget_unused_fonts(doc, page)?;
+    // The edit is written: a stale font entry left behind is harmless (it goes with the next full save), so
+    // it is not an error the caller could mistake for a refused edit.
+    if let Err(e) = forget_unused_fonts(doc, page) {
+        eprintln!("textedit: could not tidy the fonts of page {}: {e}", page + 1);
+    }
     Ok(fallbacks)
 }
 
