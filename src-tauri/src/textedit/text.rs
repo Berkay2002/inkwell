@@ -859,9 +859,10 @@ fn interpret(
                                 // A large gap inside TJ reads as a space.
                                 if dx > ts.size * 0.2 && !text.ends_with(' ') {
                                     text.push(' ');
-                                    glyphs.push(Glyph { kern: std::mem::take(&mut kern), ..Glyph::gap() });
-                                    // The gap shows as the space; what is left of it is kerning.
-                                    kern = n + 250.0;
+                                    // The gap shows as the font's own space; what is left of it is kerning.
+                                    let sw = if m.is_space(32, 1) && m.width(32) > 0.0 { m.width(32) * 1000.0 } else { 250.0 };
+                                    glyphs.push(Glyph { kern: std::mem::take(&mut kern), w: sw, ..Glyph::gap() });
+                                    kern = n + sw;
                                 } else {
                                     kern += n;
                                 }

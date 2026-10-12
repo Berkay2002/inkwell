@@ -265,7 +265,8 @@ content-stream writer: every changed block goes through `rewrite_block`, so font
   nothing moves with a first-line indent or uneven leading; in a justified block it is stretched to the end that
   line had, unless it is the last (a line's own leading and trailing spaces don't count in its width). A line
   whose own spaces were stretched in the source (wider than its glyphs by a tenth of its size at each space) is
-  judged the same way in a block too short or too indented to be read as justified: it ends where it did, unless it is the last line; a ragged line is not stretched. The spread is
+  judged the same way in a block too short or too indented to be read as justified: it ends where it did, unless it is the last line; a ragged line is not stretched, and a gap in a `TJ` counts as
+  the font's own space, so a line set with gaps is not taken for a justified one. The spread is
   written as `TJ` adjustments at the spaces, so it works in any font (`Tw` would not in a two-byte one). The text
   of a run with a match is kept as it is (double and no-break spaces); only a space the replacement would double
   at its edge goes. A line of a block of several lines never grows past the width its

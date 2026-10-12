@@ -2495,6 +2495,23 @@ fn a_one_line_block_takes_a_longer_word_where_nothing_is_beside_it() {
     assert!(page_lines(&eng, id).iter().any(|l| l == "A much longer heading than it was"));
 }
 
+const COURIER: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>";
+
+#[test]
+fn a_ragged_line_whose_spaces_are_tj_gaps_is_not_stretched_back() {
+    let d = dir("replace-ragged-tj-gaps");
+    // Courier's space is 600: a gap of -600 in a TJ is a plain space, so these lines are ragged, not justified.
+    let page = "BT /F1 12 Tf 14 TL 72 700 Td [(aaa) -600 (bbb) -600 (ccc)] TJ T* [(dd) -600 (ee)] TJ T* [(ff) -600 (gg) -600 (hh)] TJ ET";
+    let (eng, id, _) = open(&d, &pdf(page, &[("F1", COURIER)], &[]));
+    let before = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    assert_eq!(before.lines.len(), 3, "{before:?}");
+    let r = do_replace(&eng, id, &req("bbb", "b", SearchOpts::default())).unwrap();
+    assert_eq!(r.replaced, 1, "{r:?}");
+    let after = blocks(&eng, id, 0).unwrap().blocks[0].clone();
+    // "aaa b ccc" at 7.2 pt a character: it ends where its words do, not at the old end.
+    assert!((after.lines[0][2] - (72.0 + 9.0 * 7.2)).abs() < 0.5, "{:?} vs {:?}", after.lines, before.lines);
+}
+
 #[test]
 fn a_style_or_a_move_leaves_the_lines_of_a_block_as_they_are() {
     let d = dir("edit-format-keeps-lines");
