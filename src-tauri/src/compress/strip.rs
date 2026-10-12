@@ -352,17 +352,43 @@ impl Dests {
         }
     }
 
-    /// In the `/Dests` dictionary: by the name object, or by a string's own bytes (MuPDF `pdf_dict_gets`).
+    /// In the `/Dests` dictionary: by the name object, or by a string's own bytes (MuPDF `pdf_dict_gets`), and then
+    /// by the string re-encoded the way MuPDF's viewer does before it looks it up (`pdf_resolve_link_dest`:
+    /// `pdf_new_text_string` of the decoded text, which is ASCII as it is and UTF-16BE with a mark otherwise, read as a
+    /// C string). The text as a UTF-8 name and as PDFDocEncoding bytes are tried too: the optimizer only keeps more.
     fn in_old(&self, key: &PdfObject) -> Option<Option<PdfObject>> {
         let Some(old) = &self.old else { return Some(None) };
         if key.is_name().ok()? {
             return Some(old.get_dict(key.share()).ok().flatten());
         }
         let bytes = key.as_bytes().ok()?;
-        match std::str::from_utf8(&bytes) {
-            // a NUL makes the key unbuildable here, so it is not judged
+        // a NUL makes the key unbuildable here, so it is not judged
+        if let Some(v) = self.by_bytes(old, &bytes)? {
+            return Some(Some(v));
+        }
+        // no faithful text: nothing more to try, and the tree decides whether it is judged
+        let Some(text) = mupdf_text(&bytes) else { return Some(None) };
+        let mut forms = vec![text.as_bytes().to_vec()];
+        if let Some(doc) = text.chars().map(pdf_doc_byte).collect::<Option<Vec<u8>>>() {
+            forms.push(doc);
+        }
+        if !text.is_ascii() {
+            let mut be = vec![0xFE, 0xFF];
+            be.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+            // MuPDF compares the buffer as a C string, which ends at the first 0 byte
+            be.truncate(be.iter().position(|&c| c == 0).unwrap_or(be.len()));
+            forms.push(be);
+        }
+        // a form that cannot be a name (a NUL) finds nothing; the tree still judges the text
+        Some(forms.iter().find_map(|f| self.by_bytes(old, f).flatten()))
+    }
+
+    /// A `/Dests` key by its bytes: a UTF-8 one is a name object, any other is in the index built at load. `None`:
+    /// the bytes cannot be a name (a NUL).
+    fn by_bytes(&self, old: &PdfObject, bytes: &[u8]) -> Option<Option<PdfObject>> {
+        match std::str::from_utf8(bytes) {
             Ok(k) => old.get_dict(k).ok(),
-            Err(_) => Some(self.raw.get(&bytes).map(|v| v.share())),
+            Err(_) => Some(self.raw.get(bytes).map(|v| v.share())),
         }
     }
 
@@ -432,6 +458,15 @@ fn mupdf_text(b: &[u8]) -> Option<String> {
     let text = crate::outline::decode_text(b);
     // U+001B starts a language escape, which MuPDF skips
     (!text.contains(['\u{FFFD}', '\u{1B}'])).then_some(text)
+}
+
+/// The PDFDocEncoding byte of a character that has one in the range both it and Latin-1 share (the printable ASCII
+/// and U+00A1..=U+00FF but U+00AD; U+00A0 is the Euro sign there).
+fn pdf_doc_byte(c: char) -> Option<u8> {
+    match c as u32 {
+        0x20..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF => Some(c as u8),
+        _ => None,
+    }
 }
 
 /// An explicit destination array's page must be one of the document's pages. `pages`: when an integer

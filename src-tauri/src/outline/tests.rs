@@ -439,6 +439,31 @@ fn a_dests_dictionary_hides_the_names_tree_as_it_does_in_mupdf() {
     assert!(matches!(got[4], Dest::Broken { .. }), "neither has it: {:?}", got[4]);
 }
 
+/// A string that is not the key's own bytes still reaches an old-style `/Dests` key: MuPDF's viewer re-encodes the
+/// decoded text before it looks it up there.
+#[test]
+fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
+    let d = dir("outline", "dests_reencoded");
+    let items: Vec<String> = [
+        "<< /Title (C) /Parent 4 0 R /Dest <FEFF0063> /Next 8 0 R >>",
+        "<< /Title (Cafe) /Parent 4 0 R /Dest <FEFF00630061006600E9> /Prev 7 0 R /Next 9 0 R >>",
+        "<< /Title (Gone) /Parent 4 0 R /Dest <FEFF0067006F006E0065> /Prev 8 0 R >>",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let bytes = outline_pdf_with(
+        "/Dests << /c [5 0 R /Fit] /caf#E9 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        &items,
+    );
+    let (eng, id, _p) = open_bytes(&d, "a.pdf", &bytes);
+    let got: Vec<_> = list(&eng, id).unwrap().items.into_iter().map(|b| b.dest).collect();
+    assert!(matches!(got[0], Dest::Page { page: 0, .. }), "{:?}", got[0]);
+    assert!(matches!(got[1], Dest::Page { page: 0, .. }), "{:?}", got[1]);
+    assert!(matches!(got[2], Dest::Broken { .. }), "{:?}", got[2]);
+}
+
 /// A name tree that cannot be read is not an empty one: no name is called broken.
 #[test]
 fn an_unreadable_names_tree_leaves_a_name_unjudged() {

@@ -565,6 +565,22 @@ fn a_named_destination_that_cannot_be_checked_is_told_apart_and_can_be_retargete
 }
 
 #[test]
+fn a_utf16_string_destination_finds_its_key_in_the_old_dests_dictionary() {
+    // MuPDF's viewer re-encodes the decoded text before it looks it up in /Dests
+    let cat = "/Dests << /c [3 0 R /Fit] /caf#E9 [3 0 R /Fit] >>";
+    let annots = vec![
+        link_annot("/Dest <FEFF0063>"),
+        link_annot("/A << /S /GoTo /D <FEFF00630061006600E9> >>"),
+        link_annot("/Dest <FEFF0067006F006E0065>"),
+    ];
+    let (eng, id, _, _d) = opened("utf16_dests", &page_with_annots("", cat, &annots, &[]));
+    let links = list(&eng, id, 0).unwrap().links;
+    assert!(matches!(links[0].target, Target::Page { page: 0, .. }), "{:?}", links[0].target);
+    assert!(matches!(links[1].target, Target::Page { page: 0, .. }), "{:?}", links[1].target);
+    assert!(matches!(links[2].target, Target::Broken { .. }), "{:?}", links[2].target);
+}
+
+#[test]
 fn setting_a_named_link_to_the_page_it_resolves_to_writes_an_explicit_destination() {
     // /Dests maps n to page 3 0 R; the link names it, once as /Dest and once as the /D of a GoTo
     let cat = "/Dests << /n [3 0 R /Fit] >>";

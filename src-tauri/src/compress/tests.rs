@@ -1975,6 +1975,52 @@ fn a_goto_without_a_destination_and_a_destination_dictionary_are_judged_like_the
     assert_eq!(outline_text(&outline_of(&r.output).items), "A, B, D");
 }
 
+/// MuPDF's viewer re-encodes a string destination before it looks it up in `/Dests` (`pdf_new_text_string`): a
+/// UTF-16BE string for a key that is plain ASCII, or whose PDFDocEncoding bytes are the key, still leads there.
+#[test]
+fn a_utf16_string_destination_is_found_in_the_old_dests_dictionary_by_its_text() {
+    let s = Scratch::new();
+    let input = s.path("utf16.pdf");
+    // /Dests keys: c and caf\351; the strings are UTF-16BE "c", "caf\351", and "gone" (defined nowhere)
+    bookmark_pdf(
+        &input,
+        "/Dests << /c [5 0 R /Fit] /caf#E9 [5 0 R /Fit] >>",
+        "<< /Type /Outlines /First 7 0 R /Last 10 0 R /Count 4 >>",
+        &[
+            "<< /Title (C) /Parent 4 0 R /Dest <FEFF0063> /Next 8 0 R >>",
+            "<< /Title (Cafe) /Parent 4 0 R /Dest <FEFF00630061006600E9> /Prev 7 0 R /Next 9 0 R >>",
+            "<< /Title (Gone) /Parent 4 0 R /Dest <FEFF0067006F006E0065> /Prev 8 0 R /Next 10 0 R >>",
+            "<< /Title (Action) /Parent 4 0 R /A << /S /GoTo /D <FEFF0063> >> /Prev 9 0 R >>",
+        ],
+    );
+    let mut o = invalid_bookmarks_only();
+    o.output = Some(s.path("out.pdf"));
+    let r = run(&input, &o).unwrap();
+    assert_eq!(r.stripped.invalid_bookmarks, 1, "{:?}", r.stripped);
+    assert_eq!(outline_text(&outline_of(&r.output).items), "C, Cafe, Action");
+
+    let links = s.path("links.pdf");
+    let link = |rest: &str| format!("<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] {rest} >>");
+    let objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Dests << /c [4 0 R /Fit] /caf#E9 [4 0 R /Fit] >> >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R 6 0 R 7 0 R 8 0 R] >>".to_string(),
+        link("/Dest <FEFF0063>"),
+        link("/A << /S /GoTo /D <FEFF00630061006600E9> >>"),
+        link("/Dest <FEFF0067006F006E0065>"),
+        link("/Dest << /D <FEFF0063> >>"),
+    ];
+    fs::write(&links, crate::outline::tests::raw_pdf(&objs)).unwrap();
+    let mut o = Options::preset(Preset::Custom);
+    o.strip.invalid_links = true;
+    o.output = Some(s.path("links-out.pdf"));
+    let r = run(&links, &o).unwrap();
+    assert_eq!(r.stripped.invalid_links, 1, "{:?}", r.stripped);
+    let doc = open_pdf(&r.output, None).unwrap();
+    assert_eq!(doc.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().len().unwrap(), 3);
+}
+
 #[test]
 fn invalid_links_accept_a_destination_dictionary_and_still_drop_a_goto_without_one() {
     let s = Scratch::new();
