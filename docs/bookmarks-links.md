@@ -245,7 +245,8 @@ Highlight, inline links and Remove all links: `links::tests` (`the_highlight_sty
 Named destinations: `outline::dests_tests` (list from both sources and from a tree in the wrong order; rename in the
 tree, in `/Dests` and in both with bookmarks, links, GoTo and `/OpenAction` followed and undone in one step; rename
 refused for a script mention, a reference spelled another way and a name that exists; set view with zoom and a
-dictionary value; add into the source the file uses; delete; remove unused keeps what is referenced or in doubt;
+dictionary value; add into the source the file uses; delete; remove unused keeps what is referenced or in doubt, including a field on no page, a field's `/AA` and a GoTo
+reached through `/Next`, and rename rewrites them;
 the name tree walked node by node for byte order, `/Limits` and indirect kids after inserts and deletes, on a
 1,100-entry tree and a given two-level tree; certified refuses every op; a signed document saves incrementally;
 unreadable shapes and caps refuse; every bookmark and link resolves the same before and after each op),

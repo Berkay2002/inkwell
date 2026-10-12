@@ -556,10 +556,11 @@ describe("named destinations", () => {
     expect(useNav.getState().docs[1].notice).toBe(n);
   });
 
-  it("shows the engine's refusal as the notice and keeps the list", async () => {
+  it("returns the engine's refusal without a second notice and keeps the list", async () => {
     vi.mocked(editDests).mockResolvedValue({ kind: "error", message: 'A script mentions "alpha", so it is left as it is' });
     const n = await useNav.getState().destOp(1, { op: "rename", name: "alpha", to: "omega" });
     expect(n).toContain("A script mentions");
+    expect(useNav.getState().docs[1].notice).toBeFalsy();
     expect(useNav.getState().docs[1].dests?.items).toHaveLength(2);
   });
 

@@ -291,10 +291,10 @@ impl Uses {
                 "Dest" | "OpenAction" => {
                     self.note(dict, if key == "Dest" { "Dest" } else { "OpenAction" }, &val, &origin);
                     // a `/Dest << /D … >>` is read through its `/D` as well
-                    if let Some(inner) = val.resolve()?.filter(|v| v.is_dict().unwrap_or(false)) {
-                        if let Some(d) = inner.get_dict("D")? {
-                            self.note(&inner, "D", &d, &origin);
-                        }
+                    if let Some(inner) = val.resolve()?.filter(|v| v.is_dict().unwrap_or(false))
+                        && let Some(d) = inner.get_dict("D")?
+                    {
+                        self.note(&inner, "D", &d, &origin);
                     }
                 }
                 "D" if is_goto => self.note(dict, "D", &val, &origin),

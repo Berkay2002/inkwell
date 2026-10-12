@@ -244,7 +244,7 @@ interface Store {
   loadDests: (doc: number) => Promise<void>;
   /**
    * One change to the named destinations, one undo step. The bookmarks and links that use a name are listed again;
-   * a refusal (a script that may use the name, a certified file) is the notice. Returns the notice it set, or null.
+   * a refusal (a script that may use the name, a certified file) is the document error. Returns the sentence, or null.
    */
   destOp: (doc: number, op: DestOp) => Promise<string | null>;
   makeFromHeadings: (doc: number, replace: boolean) => Promise<void>;
@@ -453,10 +453,8 @@ export const useNav = create<Store>((set, get) => {
         patch(doc, { notice: n });
         return n;
       }
-      if (r.kind === "error") {
-        patch(doc, { notice: r.message });
-        return r.message;
-      }
+      // a refusal is already shown as the document error (edit.ts), as for bookmarks: not repeated in the rail
+      if (r.kind === "error") return r.message;
       // applyState (edit.ts) has listed the bookmarks, links and destinations again for the new generation
       const n = destNotice(op, r.value, listed);
       patch(doc, { notice: n });

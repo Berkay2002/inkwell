@@ -97,10 +97,16 @@ fn raw(eng: &Engine, id: DocId, num: i32, key: &str) -> String {
 }
 
 /// Walks `/Names /Dests` as a reader would and holds it to the rules: sorted keys with no duplicates, kids indirect,
-/// `/Limits` on every node but the root and equal to what is below it. Returns the keys in order and the deepest level.
+/// `/Limits` on every node but the root and equal to what is below it. Returns the keys in order and the depth of the leaves (all equal).
 fn check_tree(eng: &Engine, id: DocId) -> (Vec<Vec<u8>>, usize) {
     eng.read_custom(id, |d| {
-        fn walk(node: &PdfObject, is_root: bool, depth: usize, out: &mut Vec<Vec<u8>>, deepest: &mut usize) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        fn walk(
+            node: &PdfObject,
+            is_root: bool,
+            depth: usize,
+            out: &mut Vec<Vec<u8>>,
+            leaves: &mut Vec<usize>,
+        ) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
             let kids = node.get_dict("Kids").unwrap();
             let names = node.get_dict("Names").unwrap();
             assert!(kids.is_none() || names.is_none(), "a node has both /Kids and /Names");
@@ -110,12 +116,14 @@ fn check_tree(eng: &Engine, id: DocId) -> (Vec<Vec<u8>>, usize) {
                 for i in 0..k.len().unwrap() as i32 {
                     let kid = k.get_array(i).unwrap().unwrap();
                     assert!(kid.is_indirect().unwrap(), "kids are indirect references");
-                    let (l, h) = walk(&kid, false, depth + 1, out, deepest);
+                    let (l, h) = walk(&kid, false, depth + 1, out, leaves);
                     lo = lo.or(l);
                     hi = h;
                 }
             } else if let Some(n) = names {
                 assert_eq!(n.len().unwrap() % 2, 0, "names come in pairs");
+                assert!(is_root || n.len().unwrap() > 0, "no node but the root is empty");
+                leaves.push(depth);
                 for i in 0..(n.len().unwrap() / 2) as i32 {
                     let k = n.get_array(2 * i).unwrap().unwrap().as_bytes().unwrap();
                     out.push(k.clone());
@@ -123,7 +131,6 @@ fn check_tree(eng: &Engine, id: DocId) -> (Vec<Vec<u8>>, usize) {
                     hi = Some(k);
                 }
             }
-            *deepest = (*deepest).max(depth);
             let limits = node.get_dict("Limits").unwrap();
             if is_root {
                 assert!(limits.is_none(), "the root has no /Limits");
@@ -135,10 +142,11 @@ fn check_tree(eng: &Engine, id: DocId) -> (Vec<Vec<u8>>, usize) {
             (lo, hi)
         }
         let root = d.catalog()?.get_dict("Names")?.unwrap().get_dict("Dests")?.unwrap();
-        let (mut keys, mut deepest) = (Vec::new(), 0);
-        walk(&root, true, 0, &mut keys, &mut deepest);
+        let (mut keys, mut leaves) = (Vec::new(), Vec::new());
+        walk(&root, true, 0, &mut keys, &mut leaves);
         assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys are sorted and unique");
-        Ok((keys, deepest))
+        assert!(leaves.windows(2).all(|w| w[0] == w[1]), "every leaf is at the same depth: {leaves:?}");
+        Ok((keys, leaves.first().copied().unwrap_or(0)))
     })
     .unwrap()
 }
@@ -237,14 +245,8 @@ fn a_non_ascii_name_goes_into_the_tree_and_is_refused_in_the_old_dictionary() {
 
 #[test]
 fn a_rename_is_refused_when_a_script_may_use_the_name() {
-    let cat = format!("{TREE} /Names << /JavaScript << /Names [(init) 12 0 R] >> >>");
-    // both /Names keys cannot be in one catalog: put the tree and the scripts in one dictionary
-    let cat = cat.replace(" /Names << /JavaScript", " /X << /JavaScript");
-    let cat = format!(
-        "/Names << /Dests << /Names [(alpha) [5 0 R /Fit] (beta) [6 0 R /Fit]] >> /JavaScript << /Names [(init) 12 0 R] >> >> {}",
-        cat.split("/X").next().map(|_| "").unwrap()
-    );
-    let (eng, id, _) = open("rename_js", &cat, &["<< /S /JavaScript /JS (this.gotoNamedDest(\"alpha\");) >>"]);
+    let cat = "/Names << /Dests << /Names [(alpha) [5 0 R /Fit] (beta) [6 0 R /Fit]] >> /JavaScript << /Names [(init) 12 0 R] >> >>";
+    let (eng, id, _) = open("rename_js", cat, &["<< /S /JavaScript /JS (this.gotoNamedDest(\"alpha\");) >>"]);
     let why = refused(&eng, id, DestOp::Rename { name: "alpha".into(), to: "omega".into() });
     assert!(why.contains("JavaScript") && why.contains("alpha"), "{why}");
     assert!(dl(&eng, id).items.iter().all(|e| e.name != "beta" || e.maybe.is_none()), "only the mentioned name is in doubt");
@@ -295,6 +297,9 @@ fn set_view_writes_the_page_the_point_and_the_zoom() {
     check_tree(&eng, id);
     // the bookmarks that named it follow it
     assert!(matches!(resolved(&eng, id).0[0], Dest::Page { page: 2, .. }));
+    // one step undoes it
+    eng.undo(id).unwrap();
+    assert_eq!(page_of(entry(&dl(&eng, id), "alpha")), Some(0));
 }
 
 #[test]
@@ -339,6 +344,8 @@ fn add_goes_where_the_names_live_and_never_creates_or_removes_dests() {
     assert_eq!(check_tree(&eng, id).0.len(), 4);
     assert!(eng.read_custom(id, |d| Ok(d.catalog()?.get_dict("Dests")?.is_none())).unwrap(), "/Dests would hide the tree");
     assert!(refused(&eng, id, DestOp::Add { name: "alpha".into(), page: 0, at: None, zoom: None }).contains("already exists"));
+    eng.undo(id).unwrap();
+    assert_eq!(names(&dl(&eng, id)), ["alpha", "beta", "gamma"]);
 
     // only /Dests: MuPDF reads nothing else, so it stays there (ASCII)
     let (eng, id, _) = open("add_old", OLD, &[]);
@@ -381,12 +388,47 @@ fn remove_unused_keeps_what_is_referenced_or_in_doubt() {
     let done = go(&eng, id, DestOp::RemoveUnused);
     assert_eq!(done.count, 4, "{:?}", done.kept);
     assert_eq!(names(&dl(&eng, id)), ["alpha", "viajs"]);
+    // all four went in one step
+    eng.undo(id).unwrap();
+    assert_eq!(dl(&eng, id).items.len(), 6);
+    eng.redo(id).unwrap();
+    assert_eq!(names(&dl(&eng, id)), ["alpha", "viajs"]);
     assert!(done.kept.iter().any(|k| k.contains("viajs") && k.contains("JavaScript")), "{:?}", done.kept);
     assert_eq!(resolved(&eng, id), before);
     check_tree(&eng, id);
     // nothing left to remove: no step
     let r = rev(&eng, id);
     assert_eq!(go(&eng, id, DestOp::RemoveUnused).state.rev, r);
+}
+
+/// A field that is on no page, a field's `/AA`, and a GoTo reached through `/Next` of another action are all users.
+#[test]
+fn what_forms_additional_actions_and_next_chains_use_is_kept_and_followed() {
+    let cat = "/AcroForm << /Fields [12 0 R 13 0 R] >> /OpenAction << /S /URI /URI (http://example.com) /Next << /S /GoTo /D (chained) >> >> \
+               /Names << /Dests << /Names [(aa) [5 0 R /Fit] (alpha) [5 0 R /Fit] (chained) [6 0 R /Fit] (orphan) [7 0 R /Fit] (target) [6 0 R /Fit]] >> >>";
+    let extra = [
+        "<< /FT /Tx /T (f1) /A << /S /GoTo /D (target) >> >>",
+        "<< /FT /Btn /T (f2) /AA << /U << /S /GoTo /D (aa) >> >> >>",
+    ];
+    let (eng, id, _) = open("forms", cat, &extra);
+    let l = dl(&eng, id);
+    for n in ["aa", "chained", "target"] {
+        assert_eq!(entry(&l, n).refs, 1, "{n}: {:?}", entry(&l, n).used_by);
+    }
+    assert_eq!(entry(&l, "orphan").refs, 0);
+    assert!(!l.unchecked);
+
+    let done = go(&eng, id, DestOp::RemoveUnused);
+    assert_eq!(done.count, 1, "{:?}", done.kept);
+    assert_eq!(names(&dl(&eng, id)), ["aa", "alpha", "chained", "target"]);
+
+    go(&eng, id, DestOp::Rename { name: "target".into(), to: "t2".into() });
+    go(&eng, id, DestOp::Rename { name: "aa".into(), to: "a2".into() });
+    go(&eng, id, DestOp::Rename { name: "chained".into(), to: "c2".into() });
+    assert!(raw(&eng, id, 12, "A").contains("(t2)"), "{}", raw(&eng, id, 12, "A"));
+    assert!(raw(&eng, id, 13, "AA").contains("(a2)"), "{}", raw(&eng, id, 13, "AA"));
+    assert!(raw(&eng, id, 1, "OpenAction").contains("(c2)"), "{}", raw(&eng, id, 1, "OpenAction"));
+    assert_eq!(names(&dl(&eng, id)), ["a2", "alpha", "c2", "t2"]);
 }
 
 #[test]
