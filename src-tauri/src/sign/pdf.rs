@@ -590,8 +590,8 @@ fn locks_of(fields: &[SigField], bytes: &[u8]) -> Locks {
         .collect()
 }
 
-/// The locks the signature in `g` carried in the revision it signs (the same field, by name and signature
-/// dictionary). None when it covers the whole file (the current ones are those) or that revision can't be read
+/// The locks the signature in `g` carried in the revision it signs (the field holding the same signature
+/// dictionary there, whatever it is called now: renaming it later must not drop its locks). None when it covers the whole file (the current ones are those) or that revision can't be read
 /// (the current ones still count).
 fn signed_locks(g: &SigField, bytes: &[u8]) -> Vec<crate::forms::scripts::Lock> {
     let Some((v, vn)) = g.value.as_ref().and_then(|v| Some((v, ind(v)?))) else { return Vec::new() };
@@ -600,7 +600,7 @@ fn signed_locks(g: &SigField, bytes: &[u8]) -> Vec<crate::forms::scripts::Lock> 
     let Ok(fields) = sig_fields(&then) else { return Vec::new() };
     fields
         .iter()
-        .find(|h| h.name == g.name && h.value.as_ref().and_then(ind) == Some(vn))
+        .find(|h| h.value.as_ref().and_then(ind) == Some(vn))
         .map(|h| crate::forms::scripts::signature_locks(&h.field, &h.widget))
         .unwrap_or_default()
 }

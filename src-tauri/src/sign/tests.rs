@@ -1701,6 +1701,12 @@ fn a_lock_removed_in_a_later_update_still_locks() {
     assert!(PdfDocument::from_bytes(&stripped).unwrap().find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap().get_dict("Lock").unwrap().is_none());
     assert_eq!(locked_fields(&stripped), ["Witness"]);
     assert_eq!(field(&infos(&stripped), "Witness").locked_by.as_deref(), Some("Maple Property Test"));
+    // Renamed as well: the signed revision's field is found by its signature, not its name.
+    let renamed = append(&stripped, |d| {
+        let mut t = d.find_page(0).unwrap().get_dict("Annots").unwrap().unwrap().get_array(0).unwrap().unwrap();
+        t.dict_put("T", d.new_object_from_str("(Renamed)").unwrap()).unwrap();
+    });
+    assert_eq!(locked_fields(&renamed), ["Witness"]);
 }
 
 #[test]
