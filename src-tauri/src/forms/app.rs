@@ -9,7 +9,10 @@ use super::af::{self, Format};
 use super::doc_js::{self, Applied, Check, DocJs, Op, Source};
 use crate::engine::edit::{EditSource, EditState};
 use crate::engine::{DocId, Engine, EngineError};
+use crate::exchange;
+use crate::paths::Paths;
 use serde::Serialize;
+use tauri::{Manager, Window};
 
 type Result<T> = std::result::Result<T, EngineError>;
 type Eng<'a> = tauri::State<'a, std::sync::Arc<Engine>>;
@@ -232,4 +235,32 @@ pub async fn doc_js_check(source: String) -> Result<Check> {
 pub async fn doc_js_apply(eng: Eng<'_>, doc: DocId, op: Op) -> Result<Applied> {
     let eng = eng.inner().clone();
     blocking(move || doc_js::apply(&eng, doc, &op, EditSource::User)).await
+}
+
+/// Writes every field's value to `to` (a save token) as FDF, XFDF or JSON, by the file name's extension.
+#[tauri::command]
+pub async fn forms_export(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, to: String) -> Result<super::data::Exported> {
+    let dest = reg.take_save(window.label(), &to)?;
+    eng.check_not_open(&dest, None)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let name = std::path::Path::new(&eng.doc_entry(doc)?.path()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let (bytes, done) = super::data::export(&eng, doc, exchange::Format::of_path(&dest, true), &name)?;
+        std::fs::write(&dest, bytes).map_err(|e| EngineError::Io(e.to_string()))?;
+        window.state::<Paths>().learn(&dest);
+        Ok(done)
+    })
+    .await
+}
+
+/// Fills fields from `file` (an open token; FDF, XFDF or JSON, told by what is inside) as one undo step.
+#[tauri::command]
+pub async fn forms_import(window: Window, eng: Eng<'_>, reg: tauri::State<'_, Paths>, doc: DocId, file: String) -> Result<super::data::Imported> {
+    let path = reg.open(window.label(), &file)?;
+    let eng = eng.inner().clone();
+    blocking(move || {
+        let parsed = super::data::parse(&exchange::read_capped(&path)?)?;
+        super::data::import_one(&eng, doc, &parsed, EditSource::User)
+    })
+    .await
 }

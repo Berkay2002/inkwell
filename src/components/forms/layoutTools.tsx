@@ -58,18 +58,21 @@ export function useCertified(doc: number): boolean {
   return certified;
 }
 
+/** A menu item that is off, with the reason as its title. */
+const off = (why: string | null | undefined) => (why ? { disabled: true, title: why } : {});
+
 /** The right-click menu of a picked field: the layout tools (disabled with their reason), rename and delete. */
 export function layoutMenu(doc: number, picked: Pick[], fields: Field[], certified: boolean): MenuEntry[] {
   const out: MenuEntry[] = [];
   for (const g of LAYOUT_GROUPS) {
-    for (const a of g) out.push({ label: a.label, disabled: layoutReason(a.op, picked, fields, certified) ?? undefined, onSelect: () => a.run(doc) });
+    for (const a of g) out.push({ label: a.label, ...off(layoutReason(a.op, picked, fields, certified)), onSelect: () => a.run(doc) });
     out.push("sep");
   }
   const anchor = picked[picked.length - 1];
   out.push({
     label: "Rename…",
     hint: "F2",
-    disabled: layoutReason("rename", picked, fields, certified) ?? undefined,
+    ...off(layoutReason("rename", picked, fields, certified)),
     onSelect: () => {
       fm().setOpen(true);
       fm().setRenaming(doc, anchor ?? null);
@@ -79,7 +82,7 @@ export function layoutMenu(doc: number, picked: Pick[], fields: Field[], certifi
     label: picked.length > 1 ? `Delete ${picked.length} fields` : "Delete field",
     hint: "Del",
     danger: true,
-    disabled: certified ? CERTIFIED_REASON : undefined,
+    ...off(certified ? CERTIFIED_REASON : null),
     onSelect: () => void fm().remove(doc, picked),
   });
   return out;

@@ -1504,14 +1504,14 @@ select {
   border-radius: var(--radius-sm);
   text-align: left;
 }
-.ink-menu button:hover:not([aria-disabled="true"]),
+.ink-menu button[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+.ink-menu button:not([aria-disabled="true"]):hover,
 .ink-menu button:focus-visible {
   background: var(--surface-2);
   outline: none;
-}
-.ink-menu button[aria-disabled="true"] {
-  opacity: 0.45;
-  cursor: default;
 }
 .sr-only {
   position: absolute;

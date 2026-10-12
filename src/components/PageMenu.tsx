@@ -1,11 +1,11 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as edits from "../lib/edit";
 import { useSheets } from "../lib/organizePlus";
 import { formatRange } from "../lib/pageRange";
 import { useTools } from "../lib/toolsStore";
 import type { DocState } from "../store";
-import type { MenuEntry } from "./Menu";
+import { type MenuEntry, MenuRow } from "./Menu";
 
 /** The page actions offered on a thumbnail (sidebar or Organize grid) for `pages` (0-based, sorted). */
 export function pageActions(
@@ -45,7 +45,6 @@ export function pageActions(
 /** A menu at the pointer (right click). Closes on any outside click, Escape, scroll or resize. */
 export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuEntry[]; onClose: () => void }) {
   const el = useRef<HTMLDivElement>(null);
-  const uid = useId();
   const [pos, setPos] = useState({ left: x, top: y });
 
   useLayoutEffect(() => {
@@ -87,28 +86,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
         it === "sep" ? (
           <hr key={n} />
         ) : (
-          <button
-            key={n}
-            role="menuitem"
-            className={it.danger ? "danger" : undefined}
-            aria-disabled={it.disabled ? true : undefined}
-            aria-describedby={it.disabled ? `${uid}-${n}` : undefined}
-            title={it.disabled}
-            onClick={() => {
-              if (it.disabled) return;
-              onClose();
-              it.onSelect();
-            }}
-          >
-            <span className="check" />
-            <span className="grow">{it.label}</span>
-            {it.hint && <span className="dim">{it.hint}</span>}
-            {it.disabled && (
-              <span id={`${uid}-${n}`} className="sr-only" aria-hidden="true">
-                {it.disabled}
-              </span>
-            )}
-          </button>
+          <MenuRow key={n} it={it} onDone={onClose} />
         ),
       )}
     </div>,

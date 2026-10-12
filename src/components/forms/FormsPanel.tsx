@@ -6,8 +6,10 @@ import {
 } from "../../lib/formsLogic";
 import { SIGNED_NOTE } from "../../lib/a11yLogic";
 import { parseRange } from "../../lib/pageRange";
+import { FORMS_CERTIFIED, useExchange } from "../../lib/dataExchange";
 import { type DocState, useStore } from "../../store";
 import { Icon } from "../Icons";
+import { MenuButton } from "../Menu";
 import { FieldProps } from "./FieldProps";
 import { LAYOUT_GROUPS, useCertified, useSigned } from "./layoutTools";
 import "./forms.css";
@@ -137,6 +139,10 @@ export function FormsPanel({ doc }: { doc: DocState }) {
   useEffect(() => {
     void fm().refresh(id);
   }, [id, doc.rev]);
+  const blocked = useExchange((s) => s.gates[id]?.forms === false);
+  useEffect(() => {
+    if (open) void useExchange.getState().readGates(id);
+  }, [open, id]);
 
   // Arrow keys nudge the picked fields (1 pt, Shift 10 pt): the presses are collected and sent as one step at key up.
   // F2 renames the anchor. Not while typing in a control or with a menu open.
@@ -200,6 +206,21 @@ export function FormsPanel({ doc }: { doc: DocState }) {
           <span className="ax-title">Forms</span>
           <span className="dim cm-count">{list.length}</span>
           <span className="grow" />
+          <MenuButton
+            className="ax-icon"
+            label="Form data files"
+            items={[
+              { label: "Export form data…", onSelect: () => void useExchange.getState().exportForm(id) },
+              {
+                label: "Import form data…",
+                disabled: blocked,
+                title: blocked ? FORMS_CERTIFIED : undefined,
+                onSelect: () => void useExchange.getState().importForm(id),
+              },
+            ]}
+          >
+            <Icon name="more" size={16} />
+          </MenuButton>
           <button className="ax-icon" title="Close" aria-label="Close Forms" onClick={() => fm().setOpen(false)}>
             <Icon name="close" size={16} />
           </button>

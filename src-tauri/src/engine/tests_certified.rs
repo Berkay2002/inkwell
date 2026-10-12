@@ -351,3 +351,25 @@ fn an_unsigned_file_that_had_to_be_repaired_is_still_edited() {
     eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
     assert!(eng.edit_state(id).unwrap().undo.is_some());
 }
+
+#[test]
+fn a_signed_file_that_had_to_be_repaired_takes_no_password_security_either() {
+    use crate::protect::ProtectSpec;
+    let d = dir("certified", "repaired-protect");
+    let (eng, id, path) = crate::outline::tests::open_bytes(&d, "a.pdf", &broken_xref(signed_only()));
+    let spec = ProtectSpec {
+        open_password: Some("pw".into()),
+        permissions_password: None,
+        printing: Default::default(),
+        changes: Default::default(),
+        copy: true,
+        accessibility: true,
+        cipher: Default::default(),
+    };
+    let e = eng.protect(id, spec, None, user()).unwrap_err().to_string();
+    assert!(e.contains("repaired") && e.contains("save a copy"), "{e}");
+    assert!(eng.edit_state(id).unwrap().undo.is_none());
+    let before = std::fs::read(&path).unwrap();
+    eng.save(id, None).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

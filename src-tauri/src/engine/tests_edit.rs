@@ -976,3 +976,27 @@ fn page_size_reads_what_a_loaded_page_reports() {
     assert_eq!(page_size(&doc, 0).unwrap(), UPRIGHT);
     assert!(page_size(&doc, n as u32).is_err());
 }
+
+#[test]
+fn a_noop_edit_that_wrote_something_before_giving_up_leaves_no_trace() {
+    let d = dir("noop-writes");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    let before = eng.edit_state(id).unwrap();
+    // Writes, then reports that nothing changed (as a per-item error swallowed halfway does).
+    let s = eng
+        .apply_custom_unless_noop(id, "Nothing".into(), EditSource::User, false, |doc| {
+            doc.delete_page(1)?;
+            Ok(None)
+        })
+        .unwrap();
+    assert_eq!(s, before);
+    // The next step and the save carry no trace of the write.
+    eng.apply(id, EditOp::Rotate { pages: vec![0], quarter_turns: 1 }).unwrap();
+    assert_eq!(labels(&eng, id), vec![1, 2, 3]);
+    eng.save(id, None).unwrap();
+    let again = Engine::new(1, 64 << 20);
+    let reopened = again.open(&path).unwrap();
+    assert_eq!(reopened.page_count, 3);
+}

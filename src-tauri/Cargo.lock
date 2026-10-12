@@ -1760,6 +1760,7 @@ dependencies = [
  "lru",
  "mupdf",
  "parking_lot",
+ "quick-xml",
  "regex",
  "rquickjs",
  "serde",

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "./Icons";
 
@@ -8,23 +8,47 @@ export interface MenuItem {
   checked?: boolean;
   danger?: boolean;
   hint?: string;
-  /** Why the item cannot be used now: it stays focusable, is announced as unavailable and gives this as its reason. */
-  disabled?: string;
+  /** Off, with `title` saying why. */
+  disabled?: boolean;
+  title?: string;
 }
 export type MenuEntry = MenuItem | "sep";
 
 const ITEM_H = 32;
 
+/**
+ * One row. An off item is `aria-disabled`, not `disabled`, so the keyboard and screen readers still reach it and its
+ * `title` says why it is off; activating it does nothing.
+ */
+export function MenuRow({ it, onDone }: { it: MenuItem; onDone: () => void }) {
+  return (
+    <button
+      role="menuitem"
+      className={it.danger ? "danger" : undefined}
+      aria-disabled={it.disabled || undefined}
+      title={it.title}
+      onClick={() => {
+        if (it.disabled) return;
+        onDone();
+        it.onSelect();
+      }}
+    >
+      <span className="check">{it.checked && <Icon name="check" size={14} />}</span>
+      <span className="grow">{it.label}</span>
+      {it.hint && <span className="dim">{it.hint}</span>}
+    </button>
+  );
+}
+
 /** A button that opens a small popup menu. The popup is portalled and fixed, so scrolling lists never clip it. */
 export function MenuButton({ items, label, className = "icon-btn", children }: { items: MenuEntry[]; label: string; className?: string; children: ReactNode }) {
   const btn = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
-  const uid = useId();
   const [pos, setPos] = useState<{ right: number; top?: number; bottom?: number } | null>(null);
 
   useEffect(() => {
     if (!pos) return;
-    menu.current?.querySelector<HTMLElement>("button")?.focus();
+    menu.current?.querySelector<HTMLElement>('button:not([aria-disabled="true"])')?.focus();
     const close = () => setPos(null);
     const away = (e: Event) => {
       if (!menu.current?.contains(e.target as Node)) close();
@@ -60,6 +84,7 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    // Off items stay in the cycle: they are focusable so their `title` says why they are off.
     const all = [...menu.current!.querySelectorAll<HTMLElement>("button")];
     const i = all.indexOf(document.activeElement as HTMLElement);
     all[(i + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length]?.focus();
@@ -90,28 +115,7 @@ export function MenuButton({ items, label, className = "icon-btn", children }: {
               it === "sep" ? (
                 <hr key={n} />
               ) : (
-                <button
-                  key={n}
-                  role="menuitem"
-                  className={it.danger ? "danger" : undefined}
-                  aria-disabled={it.disabled ? true : undefined}
-                  aria-describedby={it.disabled ? `${uid}-${n}` : undefined}
-                  title={it.disabled}
-                  onClick={() => {
-                    if (it.disabled) return;
-                    setPos(null);
-                    it.onSelect();
-                  }}
-                >
-                  <span className="check">{it.checked && <Icon name="check" size={14} />}</span>
-                  <span className="grow">{it.label}</span>
-                  {it.hint && <span className="dim">{it.hint}</span>}
-                  {it.disabled && (
-                    <span id={`${uid}-${n}`} className="sr-only" aria-hidden="true">
-                      {it.disabled}
-                    </span>
-                  )}
-                </button>
+                <MenuRow key={n} it={it} onDone={() => setPos(null)} />
               ),
             )}
           </div>,
