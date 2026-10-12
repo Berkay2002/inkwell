@@ -253,6 +253,9 @@ export function quadTouches(q: ImageBlock["quad"], box: Rect4): boolean {
   return true;
 }
 
+/** The most pictures one change takes: the picks stop here. Keep equal to `MAX_BATCH` in src-tauri/src/imageedit/mod.rs. */
+export const MAX_PICKS = 100;
+
 /** The box around several rectangles. */
 export function groupBox(rects: Rect4[]): Rect4 {
   return [Math.min(...rects.map((r) => r[0])), Math.min(...rects.map((r) => r[1])), Math.max(...rects.map((r) => r[2])), Math.max(...rects.map((r) => r[3]))];
@@ -314,10 +317,34 @@ export const isQuarter = (deg: number) => Math.abs(deg / 90 - Math.round(deg / 9
 /** Round to a hundredth of a degree: what the field shows and sends. */
 export const roundAngle = (deg: number) => Math.round(deg * 100) / 100;
 
-/** The turn (degrees clockwise) that takes an image now at `current` to `typed`: the shortest way, null when it is the same. */
+/**
+ * The turn (degrees clockwise) that takes an image now at `current` to `typed`: the shortest way, null when
+ * it is the same. The typed value is what counts (to a hundredth); the turn is measured from where the image
+ * really is, so an angle that was stored a little off is not carried on.
+ */
 export function turnTo(current: number, typed: number): number | null {
-  const d = roundAngle(normAngle(typed - current));
+  const d = Math.round(normAngle(roundAngle(typed) - current) * 1e4) / 1e4;
   return Math.abs(d) < 0.005 ? null : d;
+}
+
+/** The picture's own width and height in points (the sides of its outline, not of the box that holds it turned). */
+export function ownSize(b: ImageBlock): [number, number] {
+  const q = b.quad;
+  return [Math.hypot(q[2] - q[0], q[3] - q[1]), Math.hypot(q[6] - q[0], q[7] - q[1])];
+}
+
+/**
+ * The frame box to send for the picture to have the own size `w` × `h`, its top left staying. A turned picture is
+ * scaled evenly (by `w` over its own width): its frame grows by the same factor, so the picture's centre moves.
+ * An upright or quarter-turned one is its frame; a quarter turn swaps the sides.
+ */
+export function sizeRect(b: ImageBlock, w: number, h: number): Rect4 {
+  const [x, y] = b.fullRect;
+  if (!isQuarter(b.angle)) {
+    const s = w / Math.max(ownSize(b)[0], 1e-6);
+    return [x, y, x + rectW(b.fullRect) * s, y + rectH(b.fullRect) * s];
+  }
+  return Math.round(Math.abs(b.angle) / 90) % 2 === 1 ? [x, y, x + h, y + w] : [x, y, x + w, y + h];
 }
 
 /** The angle of `p` seen from `c` in page space (y down), degrees clockwise from straight up. */
@@ -668,6 +695,7 @@ export const useImageEdit = create<Store>((set, get) => {
     toggle: (doc, ref) => {
       const next = togglePick(of(doc), ref);
       if (next.length === 0) return get().select(doc, null);
+      if (next.length > MAX_PICKS) return patchDoc(doc, { notice: `At most ${MAX_PICKS} images can be picked at once.` });
       const anchor = next[next.length - 1];
       patchDoc(doc, { selected: anchor, extra: next.slice(0, -1).map((p) => p.index), crop: null, notice: null });
       const te = useTextEdit.getState();
@@ -681,7 +709,10 @@ export const useImageEdit = create<Store>((set, get) => {
         if (!add) get().select(doc, null);
         return;
       }
-      patchDoc(doc, { selected: { page, index: all[all.length - 1] }, extra: all.slice(0, -1), crop: null, notice: null });
+      // A change takes at most MAX_PICKS images: the first ones stay picked and the rail says so.
+      const kept = all.slice(0, MAX_PICKS);
+      const notice = all.length > kept.length ? `That is ${all.length} images; the first ${MAX_PICKS} are picked, since a change takes at most ${MAX_PICKS} at once.` : null;
+      patchDoc(doc, { selected: { page, index: kept[kept.length - 1] }, extra: kept.slice(0, -1), crop: null, notice });
       const te = useTextEdit.getState();
       if (te.docs[doc]?.selected) void te.select(doc, null);
     },

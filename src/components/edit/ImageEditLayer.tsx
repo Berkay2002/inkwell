@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ImageBlock } from "../../lib/api";
 import { groupDelta, normBox } from "../../lib/formsLogic";
 import {
@@ -58,8 +59,21 @@ export const ImageEditLayer = memo(function ImageEditLayer(p: Props) {
   return live ? <Layer {...p} /> : null;
 });
 
-/** What is being dragged: the whole image (or the group), one of its handles, the turn knob, or the crop rectangle. */
-type Drag = { target?: { page: number; index: number }; what: "move" | "rotate" | Handle; crop: boolean; start: [number, number]; d: [number, number]; free: boolean; group?: boolean };
+/**
+ * What is being dragged: the whole image (or the group), one of its handles, the turn knob, or the crop rectangle.
+ * `c0` and `c` are the pointer's screen place at the start and now: the preview that leaves the page follows them.
+ */
+type Drag = {
+  target?: { page: number; index: number };
+  what: "move" | "rotate" | Handle;
+  crop: boolean;
+  start: [number, number];
+  d: [number, number];
+  free: boolean;
+  group?: boolean;
+  c0: [number, number];
+  c: [number, number];
+};
 
 /** Cmd, Ctrl or Shift: adds to the picked images instead of replacing them. */
 const additive = (e: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }) => e.metaKey || e.ctrlKey || e.shiftKey;
@@ -220,13 +234,23 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
       return;
     }
     e.currentTarget.setPointerCapture(e.pointerId);
-    setDrag({ what, crop: cropping, start: toPage(e), d: [0, 0], free: e.shiftKey, group: what === "move" && !cropping && grouped, target });
+    setDrag({
+      what,
+      crop: cropping,
+      start: toPage(e),
+      d: [0, 0],
+      free: e.shiftKey,
+      group: what === "move" && !cropping && grouped,
+      target,
+      c0: [e.clientX, e.clientY],
+      c: [e.clientX, e.clientY],
+    });
   };
   const dragTo = (e: React.PointerEvent) => {
     const g = dragRef.current;
     if (!g) return;
     const q = toPage(e);
-    setDrag({ ...g, d: [q[0] - g.start[0], q[1] - g.start[1]], free: e.shiftKey });
+    setDrag({ ...g, d: [q[0] - g.start[0], q[1] - g.start[1]], free: e.shiftKey, c: [e.clientX, e.clientY] });
     if (g.what === "move" && !g.crop) markDrop(pageUnder(e));
   };
   /** The rectangle a drag makes of `r`: moved, or with the handle's sides moved. */
@@ -322,6 +346,22 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
   const outline = mine && centre && (turn !== 0 || !isQuarter(mine.angle)) ? turnQuad(mine.quad, centre, turn) : null;
   const canTurn = mine != null && mine.editable && !crop && !locked && !grouped;
   const cropRect = crop && mine ? (drag?.crop ? clampRect(dragged(crop.rect, drag), mine.fullRect) : crop.rect) : null;
+
+  // The picks' frames in screen pixels, moved with the pointer, once it has left this page: the page clips what it
+  // holds, so a preview over the page they would land on has to live in the body.
+  const flying: Rect4[] = (() => {
+    if (!drag || drag.crop || drag.what !== "move" || !mine || !space.current?.parentElement) return [];
+    const host = space.current.parentElement.getBoundingClientRect();
+    const [x, y] = drag.c;
+    if (x >= host.left && x <= host.right && y >= host.top && y <= host.bottom) return [];
+    const m = new DOMMatrix(getComputedStyle(space.current).transform);
+    return [mine, ...others].map((b) => {
+      const p = [m.transformPoint({ x: b.fullRect[0], y: b.fullRect[1] }), m.transformPoint({ x: b.fullRect[2], y: b.fullRect[3] })];
+      const dx = host.left + drag.c[0] - drag.c0[0];
+      const dy = host.top + drag.c[1] - drag.c0[1];
+      return [Math.min(p[0].x, p[1].x) + dx, Math.min(p[0].y, p[1].y) + dy, Math.max(p[0].x, p[1].x) + dx, Math.max(p[0].y, p[1].y) + dy];
+    });
+  })();
 
   return (
     <div
@@ -454,6 +494,12 @@ function Layer({ docId, page, rev, rot, rawSize, zoom, visible }: Props) {
           </div>
         </>
       )}
+
+      {flying.length > 0 &&
+        createPortal(
+          flying.map((r, i) => <div key={i} className="ie-fly" style={boxStyle(r)} aria-hidden="true" />),
+          document.body,
+        )}
     </div>
   );
 }

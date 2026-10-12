@@ -57,6 +57,9 @@ import {
   normAngle,
   quadTouches,
   togglePick,
+  MAX_PICKS,
+  ownSize,
+  sizeRect,
   turnQuad,
   turnTo,
   useImageEdit,
@@ -553,6 +556,53 @@ describe("several images", () => {
     expect(dragTurn([0, 0], [0, -100], [Math.sin((20 * Math.PI) / 180) * 100, -Math.cos((20 * Math.PI) / 180) * 100], true)).toBe(15);
   });
 
+  it("measures from where the picture really is, so a stored angle that is a little off is not carried on", () => {
+    // 30.0007 as the engine once stored a typed 30: typing 30 again does nothing, typing 45 gets there from it.
+    expect(turnTo(30.0007, 30)).toBeNull();
+    expect(turnTo(30.0007, 45)).toBeCloseTo(14.9993, 4);
+    expect(30.0007 + turnTo(30.0007, 45)!).toBeCloseTo(45, 4);
+    // What is typed counts to a hundredth.
+    expect(turnTo(0, 33.456)).toBe(33.46);
+  });
+
+  // 150 x 100 turned 30 degrees clockwise about (100, 100): a frame of 179.9 x 161.6, corners as the engine lists them.
+  const turned = () => {
+    const [s, c] = [Math.sin(Math.PI / 6), Math.cos(Math.PI / 6)];
+    const p = (x: number, y: number): [number, number] => [100 + x * c - y * s, 100 + x * s + y * c];
+    const q = [p(-75, 50), p(75, 50), p(75, -50), p(-75, -50)].flat() as ImageBlock["quad"];
+    const xs = [q[0], q[2], q[4], q[6]];
+    const ys = [q[1], q[3], q[5], q[7]];
+    const f: [number, number, number, number] = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    return image({ angle: 30, quad: q, rect: f, fullRect: f });
+  };
+
+  it("gives a turned picture's own size, not the size of its frame", () => {
+    const b = turned();
+    expect(b.fullRect[2] - b.fullRect[0]).toBeCloseTo(179.9, 1);
+    expect(b.fullRect[3] - b.fullRect[1]).toBeCloseTo(161.6, 1);
+    const [w, h] = ownSize(b);
+    expect(w).toBeCloseTo(150);
+    expect(h).toBeCloseTo(100);
+    // An upright one is its frame.
+    expect(ownSize(image())).toEqual([200, 100]);
+  });
+
+  it("sizes a turned picture evenly from its frame's top left, and an upright or quarter-turned one by its sides", () => {
+    const b = turned();
+    const [x, y] = b.fullRect;
+    // Own width 75 of 150: the frame is halved, from where it is.
+    const r = sizeRect(b, 75, 50);
+    expect(r[0]).toBeCloseTo(x);
+    expect(r[1]).toBeCloseTo(y);
+    expect(r[2] - r[0]).toBeCloseTo((b.fullRect[2] - b.fullRect[0]) / 2);
+    expect(r[3] - r[1]).toBeCloseTo((b.fullRect[3] - b.fullRect[1]) / 2);
+    expect(sizeRect(image(), 300, 50)).toEqual([100, 100, 400, 150]);
+    // Turned a quarter, its own width is its frame's height.
+    const q = image({ angle: 90, quad: [200, 100, 200, 300, 100, 300, 100, 100], rect: [100, 100, 200, 300], fullRect: [100, 100, 200, 300] });
+    expect(ownSize(q)).toEqual([200, 100]);
+    expect(sizeRect(q, 400, 100)).toEqual([100, 100, 200, 500]);
+  });
+
   it("turns a quad about a centre, clockwise as seen", () => {
     // y points down: the point straight up from the centre goes to its right.
     const q = turnQuad([0, -10, 0, -10, 0, -10, 0, -10], [0, 0], 90);
@@ -602,6 +652,36 @@ describe("several images: the store", () => {
     expect(editImage).not.toHaveBeenCalled();
     expect(st().selected).toEqual({ page: 0, index: 2 });
     expect(st().extra).toEqual([0]);
+  });
+
+  const many = (n: number) => Array.from({ length: n }, (_, i) => box(i, i));
+
+  it("picks at most 100 by a marquee and says so", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list(many(150)));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.pickMany(1, 0, many(150).map((b) => b.index), false);
+    expect(st().extra.length + 1).toBe(MAX_PICKS);
+    expect(st().notice).toContain("100");
+    // Adding more to a full pick keeps the 100 it has.
+    ie.pickMany(1, 0, [120, 121], true);
+    expect(st().extra.length + 1).toBe(MAX_PICKS);
+    expect(st().extra).not.toContain(120);
+  });
+
+  it("refuses a click that would make the 101st pick", async () => {
+    vi.mocked(api.imageBlocks).mockResolvedValue(list(many(150)));
+    const ie = useImageEdit.getState();
+    await ie.load(1, 0);
+    ie.pickMany(1, 0, many(MAX_PICKS).map((b) => b.index), false);
+    expect(st().notice).toBeNull();
+    ie.toggle(1, { page: 0, index: 120 });
+    expect(st().extra.length + 1).toBe(MAX_PICKS);
+    expect(st().extra).not.toContain(120);
+    expect(st().notice).toContain("100");
+    // One of the 100 can still be taken out.
+    ie.toggle(1, { page: 0, index: 5 });
+    expect(st().extra.length + 1).toBe(MAX_PICKS - 1);
   });
 
   it("deletes the group in one step and picks nothing after", async () => {

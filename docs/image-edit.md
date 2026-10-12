@@ -22,8 +22,15 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
 - **Free angle.** The round knob above the frame turns the picture about its centre (hold Shift for steps of 15°),
   and "Angle" in the rail takes degrees clockwise as seen, typed as the picture's angle (a field commit is one undo
   step, and so is a knob drag). The picture keeps its shape: it is turned by a `cm` matrix about the centre of its
-  box, never sheared. A turned picture shows its own outline next to the frame, hides the side handles and is only
-  scaled evenly (the engine refuses an uneven resize of it).
+  box, never sheared. The `cm` is written to eight decimals, so a typed angle is stored as typed (30 reads back as
+  30.0000, not 30.0007) whatever the picture's proportions. A turned picture shows its own outline next to the frame,
+  hides the side handles and is only scaled evenly (the engine refuses an uneven resize of it).
+- **Size of a turned picture.** The rail's Size is the picture's own width and height (the sides of its outline, the
+  `quad`), which a turn does not change: 150 × 100 stays 150 × 100 at 30°, while its frame, the box that holds it, is
+  179.9 × 161.6. Typing a size on a turned picture scales it evenly (the other side follows, whatever "Keep
+  proportions" says), keeps its angle, and grows or shrinks its frame by the same factor from the frame's top left
+  corner, so the picture's centre moves; the picture's own corner does not stay put. A quarter-turned picture
+  takes the typed width for its own width, which is its frame's height.
 - **Several pictures.** Shift (or Cmd/Ctrl) and click adds a picture to the picks or takes it out; picks are of one
   page at a time. A marquee picks the pictures it **touches**: any overlap counts, including a box that contains a
   picture or sits inside one (Acrobat's rule). A turned picture is tested by its own outline, not by its bounding
@@ -32,7 +39,9 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   A click on an empty page with no drag clears the picks. The frames of the picks are drawn, the rail says "N images
   picked", and a drag of any pick moves all of them as one block that stays on the page (the forms' rule). Move,
   delete, turn (by quarter turns, by an angle, each about its own centre), flip and the six aligns (left, centre,
-  right, top, middle, bottom edges of the group) are one undo step each ("Move 3 images on p. 1").
+  right, top, middle, bottom edges of the group) are one undo step each ("Move 3 images on p. 1"). At most 100
+  pictures can be picked (the engine's batch limit): a marquee that touches more keeps the first 100 and the rail
+  says so, and a Shift-click on a 101st is refused with the same note.
 - **Copy and paste.** Cmd/Ctrl+C or the rail's Copy puts the picked pictures on the app's picture clipboard; Cmd/Ctrl+V
   or "Paste on page N" puts them on the page in view, in the same document or in another open one. A paste lands
   where the copy was, and 16 pt down and right of it for each paste after the first on that page (and from the first
@@ -40,12 +49,13 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   pictures become the picks. One undo step ("Paste 2 images on p. 3"). Only image XObjects are copied: an inline
   picture can be moved to another page but not copied (the rail says so).
 - **Drag to another page.** Dragging picks over another page of the same document and letting go moves them there
-  (the target page is outlined while the pointer is over it): "Move image to p. 3", one undo step. The group lands
+  (the target page is outlined, drawn over its canvases, while the pointer is over it; the frames follow the pointer
+  across the gap and over that page as a preview in the body, since a page clips what it holds): "Move image to p. 3", one undo step. The group lands
   with the same grip on it as at pick-up, so it ends up where it was dropped, whatever the other page's size or
   `/Rotate` (the picture stays upright as seen). A drop partly outside the page is moved back inside it.
 - **Locked.** A certified document refuses every one of these (certification check as for any image change); the
   rail's controls are disabled with the reason, and a paste or a move is refused by the engine too. A document whose
-  owner withholds copying refuses Copy. Pasting into or changing a signed document keeps the signed-file path: the
+  owner withholds copying refuses Copy. Copy and Paste dim to 45% with the not-allowed cursor, like the other controls. Pasting into or changing a signed document keeps the signed-file path: the
   change is saved after the signed bytes and the rail says so.
 - **Crop.** "Crop" dims what is outside the rectangle you drag; Enter or "Apply crop" sends it, Esc leaves.
   By default it is a clip (the picture stays whole in the file and the cut-off part is marked on the frame

@@ -183,8 +183,21 @@
   gap: 8px;
 }
 
-/* The page a dragged picture would land on */
-.ie-drop-target {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+/* The page a dragged picture would land on: drawn over the page canvases (an outline on .page paints under them) */
+.ie-drop-target::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  box-shadow: inset 0 0 0 3px var(--accent);
+  pointer-events: none;
+}
+/* What follows the pointer while pictures are dragged: in the body, so the page's clip does not cut it */
+.ie-fly {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+  pointer-events: none;
 }
