@@ -1185,6 +1185,34 @@ fn a_file_that_grows_past_the_limit_while_it_is_read_is_too_large() {
 }
 
 #[test]
+fn a_refresh_counts_files_that_could_not_be_read_in_their_own_buckets_not_as_changed() {
+    let base = dir("catalog-failed-refresh");
+    let folder = base.join("docs");
+    let big = doc_with(
+        &[vec!["a big file with notice in it"]],
+        Extra { catalog: String::new(), annots: String::new(), objs: vec![stream_obj("", &"x".repeat(200_000))] },
+    );
+    let limit = big.len() as u64 - 1;
+    write(&folder, "big.pdf", big);
+    write(&folder, "broken.pdf", vec![b'x'; 40]);
+    write(&folder, "ok.pdf", plain(&[vec!["a small notice"]]));
+    {
+        use mupdf::pdf::{Encryption, PdfDocument, PdfWriteOptions};
+        let src = PdfDocument::from_bytes(&plain(&[vec!["hidden notice"]])).unwrap();
+        let mut o = PdfWriteOptions::default();
+        o.set_encryption(Encryption::Aes256).set_user_password("secret").set_owner_password("owner");
+        src.save_with_options(&folder.join("secret.pdf").to_string_lossy(), o).unwrap();
+    }
+    let (_, d) = make(&base.join("catalogs"), &folder);
+    let s = build_with(&d, true, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.files, s.added, s.damaged, s.password, s.too_large), (4, 4, 1, 1, 1), "{s:?}");
+    // Nothing on disk changed: the three are tried again, and stay in their buckets.
+    let s = build_with(&d, false, &AtomicBool::new(false), &no_progress(), MAX_READ, limit).unwrap();
+    assert_eq!((s.files, s.added, s.changed, s.removed), (4, 0, 0, 0), "{s:?}");
+    assert_eq!((s.damaged, s.password, s.too_large), (1, 1, 1), "{s:?}");
+}
+
+#[test]
 fn a_forget_asked_for_just_after_the_holder_read_the_list_is_done_when_it_lets_go() {
     let base = dir("catalog-forget-wakeup");
     let folder = base.join("docs");
