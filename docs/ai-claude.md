@@ -146,7 +146,6 @@ Three states, all in the panel:
   colour, `providerMarks.tsx`, noted in `third_party/THIRD-PARTY-NOTICES.txt`) is on the toolbar toggle,
   the picker, its menu rows and the sign-in / consent cards.
   Screens (`scripts/provider-shots.mjs`, the real status of the installed CLI):
-  `docs/screens/assistant/provider-claude-{light,dark}.png` and `provider-picker-claude-{light,dark}.png`.
 * Consent is per provider: "Send this document to Anthropic?" for Claude, with the note
   "Uses your Claude Code login; usage counts against your Claude plan."
 

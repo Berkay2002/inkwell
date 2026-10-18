@@ -1,6 +1,6 @@
 # Edit existing text in place
 
-Acrobat's "Edit text & images" for text (study: [study/02-edit.md](study/02-edit.md)). Engine and UI (see "The UI" below).
+Acrobat's "Edit text & images" for text (an earlier study). Engine and UI (see "The UI" below).
 Code: `src-tauri/src/textedit/`, adapted from pdfcraft `crates/edit/src/text.rs`, `crates/content` and
 `crates/fonts` (b8ddf71, MIT OR Apache-2.0; see `third_party/pdfcraft/`). MuPDF stays the only engine that owns the
 document: pages, resources, fonts and streams are read and written as MuPDF objects, pdfcraft's own COS layer is not used.
@@ -356,5 +356,4 @@ opening any of those closes it (`src/lib/commentRail.ts`).
   (`src/lib/textEdit.ts`); edits list the one page again. A new generation (undo, redo, Replace) lists only the selected page at once, so
   that its block follows or goes (a typed text left without its block is told so); the others when they are shown.
 - **Tests**: `src/lib/textEdit.test.ts` (helpers and store flows), `scripts/edit-shots.mjs` (runtime: edit a line,
-  size, colour, add a text box, undo/redo, save, reopen, on a copy of `docs/study/samples/edit-source.pdf`; screens in
-  `docs/screens/edit/`).
+  size, colour, add a text box, undo/redo, save, reopen, on a copy of `samples/edit-source.pdf`).

@@ -1,8 +1,8 @@
 // Walks the whole Windows app through WebView2's DevTools endpoint and saves one light and one dark screenshot per
 // area at 1440x900 (plus the Home and the viewer at 1920x1080), a console log per area and a few automatic defect
-// probes. Works on COPIES of docs/study samples, never on a user's files. It only records: it fixes nothing.
+// probes. Works on COPIES of samples, never on a user's files. It only records: it fixes nothing.
 //   $d = "$env:TEMP\inkwell-tour"; mkdir $d\in, $d\data, $d\wv
-//   Copy-Item docs\study\samples\{edit-source,form-source,bookmarks-links-source,scan-source,redact-source,pages-a,pages-b}.pdf $d\in
+//   Copy-Item samples\{edit-source,form-source,bookmarks-links-source,scan-source,redact-source,pages-a,pages-b}.pdf $d\in
 //   vite --port 1433 --strictPort            (any free port; the debug exe is built for 1420)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
 //   mkdir $d\hist; $env:INKWELL_HISTORY_ROOT = "$d\hist"   (else versions land in %LOCALAPPDATA%\Inkwell\history and a

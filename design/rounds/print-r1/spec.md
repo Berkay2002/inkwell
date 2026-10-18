@@ -12,18 +12,17 @@ c-ticket one each. The sheet is `--cols 2`.
 standard modal with the preview on the left. Take one thing from c-ticket: make the outcome line ("6 sheets of A4, both
 sides, 2 copies") the prominent summary beside the Print button, and update it live. Skip a-sheet-2."
 b-rail and c-ticket are dropped; a-sheet-2-booklet was never rendered and is skipped.
-Approved: `design/approved/print.png` (a-sheet-1-options). Built as `src/components/PrintSheet.tsx`; the outcome line is
-`outcomeLine` in `src/lib/printStore.ts`. Screens of the build: `docs/screens/print/`.
+Approved: a-sheet-1-options. Built as `src/components/PrintSheet.tsx`; the outcome line is
+`outcomeLine` in `src/lib/printStore.ts`.
 
 Render notes: `a-sheet-2-booklet` was not rendered; the
 booklet state is described above and is built from the engine's own preview. `c-ticket` came out as a wider panel with
 switch rows instead of chips; the idea (outcome first, a few toggles, "More options") is intact. Text in renders is
 not authoritative (the build sets the copy).
 
-## How Acrobat Pro does it (study 12-print: docs/study/12-print.md, screens in docs/study/screens/12-print/)
+## How Acrobat Pro does it
 - Ctrl+P (toolbar printer icon) opens one **modal Win32 dialog**, about 959 x 697 px at 125 % display scaling, which grows
-  downward when More Options or Multiple/Booklet add rows. Controls on the left, preview on the right
-  (`01-print-dialog-defaults.png`).
+  downward when More Options or Multiple/Booklet add rows. Controls on the left, preview on the right.
 - Top band: Printer combo with **Properties** (the driver's own dialog) and **Advanced** (Advanced Print Setup: output,
   marks and bleeds, PostScript, colour management, Print As Image with a dpi); Copies with **Collate** (only shown above 1),
   **Print in grayscale**, **Save ink/toner**.

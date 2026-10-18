@@ -1,9 +1,9 @@
-// Drives a running Inkwell through WebView2's DevTools endpoint: combines three COPIES of docs/study samples (ranges,
+// Drives a running Inkwell through WebView2's DevTools endpoint: combines three COPIES of samples (ranges,
 // bookmarks, contents page), adds / saves out / deletes an attachment, numbers pages in roman, sets a transition and
 // plays it full screen, saves and reopens, undoes. Captures the screens light and dark. Never the user's files.
 // The native save dialog cannot be driven without OS-level input: a debug build answers it with INKWELL_SAVE_DIR.
 //   $d = "$env:TEMP\inkwell-organize-plus"; mkdir $d\in, $d\out, $d\data
-//   copy docs\study\samples\compress-source.pdf, edit-source.pdf, form-source.pdf -> $d\in
+//   copy samples\compress-source.pdf, edit-source.pdf, form-source.pdf -> $d\in
 //   npx vite --port 1420        (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:INKWELL_SAVE_DIR = "$d\out"
 //   $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9246'

@@ -6,8 +6,6 @@ Tauri 2 (WebView2) shell, Rust engine on a patched MuPDF, React + TypeScript + V
 
 **Status:** early. Windows only, unsigned MSI (see [docs/installer.md](docs/installer.md)), no releases yet: build it from source.
 
-![Inkwell viewer](docs/screens/tour/03-viewer-1920-light.png)
-
 ## Privacy
 
 No accounts, no telemetry. The only outside connection is the optional assistant, which runs your own signed-in Codex or
@@ -79,7 +77,7 @@ cargo run --release --bin bench -- 1000   # engine benchmark on a generated 1000
 | `src-tauri/src/bin/` | Engine benchmarks |
 | `src/` | React UI |
 | `scripts/` | Performance and screenshot harnesses, icon and installer scripts |
-| `docs/` | Feature and engine docs ([index](docs/README.md)), screenshots in `docs/screens/` |
+| `docs/` | Feature and engine docs ([index](docs/README.md)) |
 | `vendor/mupdf/` | mupdf 0.8.0 with Inkwell patches, listed in [`vendor/mupdf/PATCHES.md`](vendor/mupdf/PATCHES.md) |
 | `vendor/mupdf-sys/` | mupdf-sys 0.8.0 with JPEG 2000 decoding made thread-parallel (`load-jpx.c`: stock MuPDF decodes JPX under its global FreeType lock, one image at a time) |
 | `third_party/` | Licences and notices for bundled third-party material |

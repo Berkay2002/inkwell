@@ -78,7 +78,7 @@ Rules the tests enforce:
 
 `node scripts/icons-sheet.mjs <outDir> <cdpPort> <vitePort> [custom|all]` draws a contact sheet of the set inside the
 running app (Regular and Filled at 16, 20 and 24, and a tile in three colours, light and dark) for a look before
-committing. `scripts/icons-shots.mjs` takes the toolbar, panel, Home, palette and hover card shots; `docs/screens/icons/panel-full-light.png` and `panel-full-dark.png` show every tool and its tile in one tall panel.
+committing. `scripts/icons-shots.mjs` takes the toolbar, panel, Home, palette and hover card shots; its `panel-full` shots show every tool and its tile in one tall panel.
 
 ## Outside the set
 
@@ -97,5 +97,4 @@ Read | Edit | Organize, Tools and the assistant group share one outer height, `-
 the 24 px assistant button plus its 2 px padding, as measured in the DOM. The segmented container is a border-box of
 that height with 1 px of border and 2 px of padding, so its items are 22 px and the active one never stands taller
 than the right-hand buttons. The toolbar's own height (42 px) and the right-hand buttons are unchanged. Before and
-after: `docs/screens/icons/toolbar-before-*.png` and `toolbar-after-*.png` (light and dark, 100 / 125 / 150 %, with
-`toolbar-*-heights.json`).
+after shots (light and dark, 100 / 125 / 150 %) were taken with `scripts/icons-shots.mjs`.

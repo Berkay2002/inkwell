@@ -1,7 +1,7 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint: Tools > Compress > Advanced on a copy of a
-// docs/study sample (never the original): the space-usage table, the settings sections, the live estimate, a
+// sample PDF from samples/ (never the original): the space-usage table, the settings sections, the live estimate, a
 // saved preset, and the result with the before/after table. Screens (light and dark) go to docs/screens/optimizer.
-//   $d = "$env:TEMP\inkwell-optimizer"; mkdir $d; copy docs\study\samples\compress-source.pdf $d
+//   $d = "$env:TEMP\inkwell-optimizer"; mkdir $d; copy samples\compress-source.pdf $d
 //   npx vite --port 1422 --strictPort                       (the debug exe was built with devUrl 1422)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:INKWELL_HISTORY_ROOT = "$d\store"
 //   $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv2"

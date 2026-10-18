@@ -267,7 +267,7 @@ fn tesseract_is_only_found_where_discover_looks() {
 // ---------------------------------------------------------------- compress
 
 fn sample_doc(d: &Path) -> (Arc<Engine>, DocId, String) {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples/opt-in-01.pdf");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/opt-in-01.pdf");
     let to = d.join("opt-in-01.pdf");
     std::fs::copy(src, &to).unwrap();
     let path = to.to_string_lossy().into_owned();

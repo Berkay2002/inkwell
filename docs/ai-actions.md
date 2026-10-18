@@ -157,9 +157,9 @@ b144e4e and da5d59f; and the two follow-up lows):
 
 The earlier numbers (before main 15e84fb): `cargo test --lib` 1269 passed, `ai::` 161, vitest 711 (46 files).
 
-Live, through the real app (debug exe, scratch data dir, a copy of `docs/study/samples/redact-source.pdf`,
-`AI_LIVE=1 node scripts/ai-actions-shots.mjs docs/screens/ai-actions-live 9246`, signed-in Codex, no scripted
-model). Screens: `docs/screens/ai-actions-live/` (the answers there are the real model's):
+Live, through the real app (debug exe, scratch data dir, a copy of `samples/redact-source.pdf`,
+`AI_LIVE=1 node scripts/ai-actions-shots.mjs <outDir> 9246`, signed-in Codex, no scripted
+model). The answers below are the real model's:
 
 | Question | What the model did |
 |---|---|

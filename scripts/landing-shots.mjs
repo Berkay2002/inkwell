@@ -9,7 +9,7 @@ import path from "node:path";
 
 const out = process.argv[2] ?? "docs/screens/landing";
 const exe = process.argv[3] ?? "src-tauri/target/release/inkwell.exe";
-const samples = "docs/study/samples";
+const samples = "samples";
 const PORT = 9361;
 fs.mkdirSync(out, { recursive: true });
 

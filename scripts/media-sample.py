@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds docs/study/samples/media-source.pdf: a RichMedia annotation with an H.264 mp4 (and a Flash
+"""Builds samples/media-source.pdf: a RichMedia annotation with an H.264 mp4 (and a Flash
 file beside it), a Screen annotation with an mp3 rendition, and on page 2 a 3D annotation and a movie
 whose file is outside the document. Needs ffmpeg with libx264 and libmp3lame. Standard library only.
 

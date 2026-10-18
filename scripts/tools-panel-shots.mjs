@@ -1,8 +1,8 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint: the All tools panel (open, synonym search, the hover
 // card, keyboard use, Recent chips, pinning with its limit of three), the Home tools grid and the palette subtitles,
-// in the light and the dark app theme, on a COPY of a docs/study sample. Never the user's files.
+// in the light and the dark app theme, on a COPY of a sample PDF from samples/. Never the user's files.
 //   $d = "$env:TEMP\inkwell-tools-panel"; mkdir $d\in, $d\data, $d\wv
-//   python make_sample.py docs\study\samples\edit-source.pdf $d\in\tools-sample.pdf
+//   python make_sample.py samples\edit-source.pdf $d\in\tools-sample.pdf
 //   vite --port 1433 --strictPort            (any free port; the debug exe is built for 1420)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9248'

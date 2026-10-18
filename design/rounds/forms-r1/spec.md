@@ -11,12 +11,11 @@ One app window per image at 1536x1024, two images per variant: `-1-fill` (fillin
 Reason: Acrobat puts Prepare Form's field list and properties in a right pane, and a-rail
 keeps that placement, with pdfcraft's floating field strip and properties in the same rail instead of a modal. b-bar and
 c-page are dropped.
-Approved: `design/approved/forms.png` (a-rail-1-fill), `forms-2.png` (a-rail-2-author).
-Built as the Forms rail in the shared dock (Ctrl+Alt+F), the strip floating at the left of the page area. Screens of the
-build: `docs/screens/forms/`. Follow-up from the review: a blank labelled Signature, Sign or Signed is detected as a
+Approved: a-rail-1-fill and a-rail-2-author.
+Built as the Forms rail in the shared dock (Ctrl+Alt+F), the strip floating at the left of the page area. Follow-up from the review: a blank labelled Signature, Sign or Signed is detected as a
 signature field, as in Acrobat.
 
-## How Acrobat Pro does it (study 07-forms; docs/study/screens/07-forms/04-autodetected-fields.png, 05-textfield-props-*.png)
+## How Acrobat Pro does it
 - Filling: open a form, fields are highlighted in pale blue ("Highlight Existing Fields"), you click and type on the page.
 - Prepare a form: All tools > Prepare a form. A launcher auto-detects fields, then the left panel lists *Add form
   components* (Text field, Image field, Checkbox, Radio button, Drop-down list, List box, Button, Date field, Digital

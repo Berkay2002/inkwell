@@ -1,8 +1,7 @@
 # Organize r1: the Organize pages view
 
-First round for this surface. It continues the approved look of home (approved/home.png, d-mix) and the assistant
-(approved/app-assistant*.png): a real Windows 11 desktop app, rounded and smooth, warm palette, one ink-blue accent.
-Function from the Acrobat study (docs/study/03-organize.md): full-window page grid, multi-select with a "Pages
+First round for this surface. It continues the approved look of home (d-mix) and the assistant: a real Windows 11 desktop app, rounded and smooth, warm palette, one ink-blue accent.
+Function from the Acrobat study: full-window page grid, multi-select with a "Pages
 selected" range field (`1, 3-5`), rotate left/right, delete, extract, insert (blank / from file), split, merge;
 drag to reorder with an insertion bar; undo/redo. Inkwell does better: no confirm modal on delete (undo exists),
 actions appear where the selection is.
@@ -17,7 +16,7 @@ rotate animates 200 ms, deleted pages shrink and fade with an "Undo" toast. Redu
 Must not appear: sharp corners, red PDF icons, purple/indigo/violet, gradients, glow, sparkles, emoji, people,
 browser chrome, device frames.
 
-Verdict (2026-10-10): a-panel. User: "Take a-panel". Build it (approved/organize.png). b-floating render recovered from Codex output (c9 of 11 candidates).
+Verdict (2026-10-10): a-panel. User: "Take a-panel". Build it. b-floating render recovered from Codex output (c9 of 11 candidates).
 
 ## Shared
 

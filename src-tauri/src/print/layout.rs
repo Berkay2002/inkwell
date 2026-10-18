@@ -8,7 +8,7 @@
 //! the edges of the overlap strip (pdfcraft puts them at the printable corners), and booklets get
 //! creep, which pdfcraft does not have.
 //!
-//! Orders and counts follow Acrobat's Print dialog (docs/study/12-print.md): the pages are chosen
+//! Orders and counts follow Acrobat's Print dialog (from an earlier study): the pages are chosen
 //! (range, odd or even among them, reversed), then laid on sheets by Size, Multiple, Booklet or
 //! Poster.
 

@@ -1,8 +1,8 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint and saves the icon-system screens: the whole toolbar
 // (light and dark, 100 / 125 / 150 % device scale, with the measured control heights), the All tools panel, the Home
-// grid, a pinned tool, the palette and the hover card. Works on a COPY of a docs/study sample, never the user's files.
+// grid, a pinned tool, the palette and the hover card. Works on a COPY of a sample PDF from samples/, never the user's files.
 //   $d = "$env:TEMP\inkwell-icons"; mkdir $d\in, $d\data, $d\wv
-//   Copy-Item docs\study\samples\edit-source.pdf $d\in\icons-sample.pdf
+//   Copy-Item samples\edit-source.pdf $d\in\icons-sample.pdf
 //   vite --port 1470 --strictPort            (any free port; the debug exe is built for 1420)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9470'

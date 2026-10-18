@@ -2,8 +2,7 @@
 
 Code: `src-tauri/src/convert/` (export.rs, create.rs, flow.rs, docx.rs, rtf.rs), commands in `src-tauri/src/lib.rs`
 (`export_start`, `create_start`, `pick_source`, `pick_folder`, `discard_scratch`), UI in
-`src/components/ConvertPanel.tsx` and `src/lib/convertStore.ts`. Screens: `docs/screens/convert/`
-(`node scripts/convert-shots.mjs`).
+`src/components/ConvertPanel.tsx` and `src/lib/convertStore.ts`. Screens: `node scripts/convert-shots.mjs`.
 
 ## Export
 Page images (PNG, JPEG, TIFF; 36 to 1200 dpi; gray; page range), text (plain or layout), HTML / XHTML,

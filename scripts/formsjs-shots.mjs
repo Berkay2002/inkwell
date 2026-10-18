@@ -1,9 +1,9 @@
-// Drives a running Inkwell through WebView2's DevTools endpoint on a COPY of docs/study/samples/_gen/formsjs-sample.pdf
+// Drives a running Inkwell through WebView2's DevTools endpoint on a COPY of samples/_gen/formsjs-sample.pdf
 // (made by `cargo test --lib write_the_form_javascript_sample -- --ignored`): number format, a date keystroke that rejects bad
 // input, a SUM total, a range error, a runaway script that times out while the app stays responsive, alerts and links as
 // dialogs, save and reopen, the banner switch; then the authoring tabs (live sample, custom script boxes, calculation order).
 // Screens, light and dark, go to docs/screens/forms-js/.
-//   $d = "$env:TEMP\inkwell-formsjs"; mkdir $d; copy docs\study\samples\_gen\formsjs-sample.pdf $d
+//   $d = "$env:TEMP\inkwell-formsjs"; mkdir $d; copy samples\_gen\formsjs-sample.pdf $d
 //   pnpm exec vite --port 1420 --strictPort        (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9241'

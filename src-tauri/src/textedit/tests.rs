@@ -421,7 +421,7 @@ fn text_on_a_hidden_layer_is_not_editable() {
 
 #[test]
 fn study_sample_hidden_layer_is_flagged() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples/redact-source.pdf");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/redact-source.pdf");
     let d = dir("hidden-sample");
     let (eng, id, _) = open(&d, &std::fs::read(src).unwrap());
     let tb = blocks(&eng, id, 0).unwrap();

@@ -134,4 +134,4 @@ data). The format of an export follows the file name: `.fdf` is FDF, anything el
 
 ## Later
 
-- Screenshots (light and dark) in `docs/screens/comments/` still to be taken on copies of sample files.
+- Screenshots (light and dark) still to be taken on copies of sample files.

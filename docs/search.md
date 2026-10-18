@@ -135,4 +135,4 @@ every file in the list; only the latest search's files can be opened).
 caps, skip, cancel, save and reopen; `search::catalog`: parity with the folder search, refresh reads only changed
 files, damaged/encrypted skipped and retried, cancel keeps the old index, corrupt index rebuilt, embedded index and
 its undo, signed/certified refused, a saved redaction gone from index and results, changed files left out), `src/lib/searchLogic.test.ts`, `src/lib/search.test.ts`, and
-`scripts/search-shots.mjs` (CDP on generated copies; screens in `docs/screens/search/`).
+`scripts/search-shots.mjs` (CDP on generated copies).

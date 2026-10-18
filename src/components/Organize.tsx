@@ -13,7 +13,7 @@ import { ContextMenu, pageActions } from "./PageMenu";
 import { TileCanvas } from "./TileCanvas";
 import "./organize.css";
 
-/** Organize pages (design/approved/organize.png): a panel of page actions and a grid of every page. */
+/** Organize pages: a panel of page actions and a grid of every page. */
 
 const st = () => useStore.getState();
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -21,7 +21,7 @@ const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)"
 const PAD = 24;
 const GAP_X = 22;
 const GAP_Y = 18;
-/** Narrowest page cell: a 1440 px window at 100% fits 6 (design/approved/organize.png), wider windows more. */
+/** Narrowest page cell: a 1440 px window at 100% fits 6, wider windows more. */
 const MIN_CELL = 160;
 /** Page box height per unit of cell width (US Letter portrait fits with a little air). */
 const BOX_ASPECT = 1.36;

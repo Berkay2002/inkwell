@@ -3,7 +3,7 @@
 Second round for Organize (organize-r1 approved the grid). It keeps the Inkwell system from `design/README.md`. No render
 was made (spec only, as for edit-r1 and compare-r1); the build is the most standard variant, a-sheet.
 
-## How Acrobat Pro does it (docs/study/03-organize.md, 09-viewer.md)
+## How Acrobat Pro does it
 - **Combine files**: Tools > Combine files opens a full-page workspace (thumbnail tiles per file, Add files, a right-hand
   "Combine files" options column: file size Small / Medium / Large, and a Combine button). Per-file page ranges come from
   expanding a tile. Bookmarks per source file are added automatically; there is no table-of-contents page.

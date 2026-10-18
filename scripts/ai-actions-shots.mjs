@@ -1,8 +1,8 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint and lets the real, logged-in assistant ACT on a
 // document: make copies (compress, export), highlight, compare with the saved file, mark and apply a redaction,
 // and open a tool. Approvals are the app's own Apply buttons (store events), nothing is OS-level input.
-// Works on COPIES of docs/study/samples, never on real files.
-//   $d = "$env:TEMP\inkwell-ai-actions"; mkdir $d; copy docs\study\samples\redact-source.pdf $d\report.pdf
+// Works on COPIES of samples, never on real files.
+//   $d = "$env:TEMP\inkwell-ai-actions"; mkdir $d; copy samples\redact-source.pdf $d\report.pdf
 //   (debug exe built with --features tauri/custom-protocol after `pnpm build`, so it needs no dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:INKWELL_HISTORY_ROOT = "$d\store"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9246'

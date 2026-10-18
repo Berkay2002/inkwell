@@ -2,8 +2,8 @@
 
 Code: `src-tauri/src/protect/` (`mod.rs` the types and the read of /Encrypt, `app.rs` the commands, `tests.rs`),
 the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/components/ProtectPanel.tsx`,
-`src/lib/protectStore.ts` and `src/components/protect.css`. Screens: `docs/screens/protect/`
-(`node scripts/protect-shots.mjs`). Study of Acrobat's Protect: `docs/study/11-protect.md`. Design round:
+`src/lib/protectStore.ts` and `src/components/protect.css`. Screens: `node scripts/protect-shots.mjs`.
+An earlier study looked at Acrobat's Protect. Design round:
 `design/rounds/protect-r1/`.
 
 ## What it does
@@ -65,7 +65,7 @@ the edit-core steps in `src-tauri/src/engine/edit/security.rs`, UI in `src/compo
 - Permission bits follow the PDF spec: print 3, modify 4, copy 5, annotate 6, forms 9, accessibility 10, assemble
   11, high-quality print 12. `Rights::from_p` / `permission()` map both ways; "Pages" = assemble, "Forms" =
   forms, "Comments" = annotate + forms, "All except extracting" = modify + annotate + forms + assemble.
-  Checked against Acrobat's own output (`docs/study/11-protect.md`): identical except that Acrobat leaves bit 11
+  Checked against Acrobat's own output (an earlier study): identical except that Acrobat leaves bit 11
   clear for "All except extracting" (and still reports assembly allowed); we keep it set, which is the more
   permissive and spec-correct choice for strict readers.
 - `SecurityInfo` (what the UI reads): method, revision, open password, the rights, `restricted`, `unlocked` (the

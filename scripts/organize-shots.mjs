@@ -1,7 +1,7 @@
-// Captures the Organize view (design/approved/organize.png) through WebView2's DevTools endpoint:
+// Captures the Organize view through WebView2's DevTools endpoint:
 // the selection of the design, light and dark, a drag in progress, a rotation, a delete with its
 // Undo toast. Steps are store calls, DOM clicks and CDP input events (never OS-level input).
-//   python docs/study/samples/_gen/make_lease.py <copy>/"Lease agreement.pdf"
+//   python samples/_gen/make_lease.py <copy>/"Lease agreement.pdf"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9223'; inkwell.exe <copy>/"Lease agreement.pdf"
 //   node scripts/organize-shots.mjs docs/screens/organize 9223
 import fs from "node:fs";

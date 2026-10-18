@@ -1,6 +1,6 @@
 // Captures the Recognize text sheet's languages, missing-language help, result styles and before/after preview
 // (light and dark) through WebView2's DevTools endpoint, on a COPY of a study sample.
-//   copy docs/study/samples/ocr-in-01.pdf to <dir>/Scan sample.pdf; start the debug exe on it with
+//   copy samples/ocr-in-01.pdf to <dir>/Scan sample.pdf; start the debug exe on it with
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9238'
 //   node scripts/ocr-plus-shots.mjs docs/screens/ocr-plus 9238
 import fs from "node:fs";

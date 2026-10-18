@@ -901,7 +901,7 @@ fn real_backends_make_a_scan_searchable() {
 /// The study's one-page scan: what Acrobat 26 produced is the reference.
 #[test]
 fn study_sample_compared_with_acrobat() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples");
     let (scan, acrobat) = (dir.join("ocr-in-01.pdf"), dir.join("ocr-out-01-english.pdf"));
     assert!(scan.exists() && acrobat.exists(), "study samples are committed; missing: {dir:?}");
     for (b, lang) in real_backends() {

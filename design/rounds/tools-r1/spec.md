@@ -1,8 +1,8 @@
 # Tools r1: Compress and OCR
 
-First round for this surface. Continues the approved look of home, organize (approved/organize.png) and the assistant:
+First round for this surface. Continues the approved look of home, organize and the assistant:
 a real Windows 11 desktop app, rounded and smooth, warm palette, one ink-blue accent.
-Function from the Acrobat study (docs/study/05-compress.md, 04-ocr.md) plus the engines on main:
+Function from the Acrobat study plus the engines on main:
 - Compress: presets Smallest / Balanced / High quality, "Customize" for ppi/codec/strip options, an audit (images / fonts /
   content / overhead bytes) and a PREDICTED size per preset before running, progress with Cancel, result with before/after size,
   "saved 62%", a quality check (max diff / PSNR in plain words), warnings, "Open compressed file". Never overwrites; the new file is

@@ -1,7 +1,7 @@
 # Compare r1: compare two documents (phase 5, compare-files)
 
 First round of the surface; there is no verdict to start from. This reopens nothing: it builds on **history-r1 b-compare**
-(approved/history-2.png: Side by side / Slider / Overlay, "Show differences on", Previous / Next, a Changes rail, the
+(Side by side / Slider / Overlay, "Show differences on", Previous / Next, a Changes rail, the
 version strip) and keeps the Inkwell system (design/README.md): rounded, warm, one ink-blue accent, Segoe UI Variable, change
 marks may use green / red / amber with glyphs (+ − ~) as the history round allowed. One app window per image at 1536x1024,
 two images per variant: `-1-setup` (choose what to compare) and `-2-result` (the comparison). The sheet is `--cols 2`: one
@@ -19,8 +19,8 @@ waits for everything); it opens from the Tools menu and the command palette.
 c-tape were never rendered  and are dropped. Kept as our touches: the dashed connector lines between
 matching changes, the kind chips that work as filters, and the linked page-thumbnail strips. Two rules: (1) Inkwell's real
 navbar (Read / Organize and the rest) stays on screen; the render's Acrobat-style top bar (View / Annotate / Edit / Fill &
-Sign) is not ours. (2) The setup screen is built from a-stage-1. Approved: approved/compare.png (a-stage-1-setup),
-approved/compare-2.png (a-stage-2-result).
+Sign) is not ours. (2) The setup screen is built from a-stage-1. Approved: a-stage-1-setup,
+a-stage-2-result.
 
 Built as: the setup page (Old file / New file slots with first-page thumbnail, "This document | Past version | Another
 file..." under each, swap, "Compare content" switches Text / Formatting / Images, Cancel, Compare) and the result (modes
@@ -28,9 +28,9 @@ Side by side / Slider / Overlay, summary strip with chips as filters, change lis
 Not built: "Page ranges" (the engine compares whole files) and a page count for past versions and picked files (no
 engine call for it); the content switches set which kinds the result starts with, the engine still compares everything.
 
-## How Acrobat Pro does it (study 13-compare, docs/study/screens/13-compare/)
+## How Acrobat Pro does it
 
-Source: `docs/study/13-compare.md`, partly seen (landing screen, `screens/13-compare/01-landing.png`) and partly read from
+Source: an earlier study, partly seen (landing screen) and partly read from
 Acrobat's shipped resources (result screen, report). Its result screen could not be driven, so the second half is wording
 and structure, not observed behaviour.
 

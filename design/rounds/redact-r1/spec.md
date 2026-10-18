@@ -1,8 +1,7 @@
 # Redact r1: removing what must not leave
 
-First round for this surface. It continues the approved look of home, the assistant and organize
-(approved/organize.png): a real Windows 11 desktop app, rounded and smooth, warm palette, one ink-blue accent.
-Function from the Acrobat study (docs/study/01-redact.md): mark text (drag over it), an area (drag a box) or whole
+First round for this surface. It continues the approved look of home, the assistant and organize: a real Windows 11 desktop app, rounded and smooth, warm palette, one ink-blue accent.
+Function from the Acrobat study: mark text (drag over it), an area (drag a box) or whole
 pages; find text or a pattern (SSN, personnummer, card, IBAN, e-mail, phone) and mark the checked hits; review marks
 and unmark; Apply with "remove hidden information" on by default, showing counts per category first; after apply
 the file is rewritten, saved as `<name>_Redacted.pdf`, and checked. Inkwell does better: the engine re-reads the

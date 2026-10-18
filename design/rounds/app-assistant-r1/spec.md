@@ -1,6 +1,6 @@
 # App-assistant r1: the margin
 
-The AI Assistant side panel next to an open PDF. The previous attempt (an earlier build, docs/screens/assistant/ on its
+The AI Assistant side panel next to an open PDF. The previous attempt (an earlier build, on its
 branch) read as generic and AI-made. Why: a sparkle icon, a chat-bubble column with a lilac user bubble, a list of grey citation rows in rounded boxes
 with purple number pills, pill-shaped suggestion chips, a model and effort dropdown pair in the header, a filled
 "Send" button. It is every AI chat sidebar. Kept: what it does (ask about the document, summarise, explain a

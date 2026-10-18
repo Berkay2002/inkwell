@@ -1,10 +1,10 @@
-//! Redaction tests on the study sample (`docs/study/samples/redact-source.pdf`, loaded from memory,
+//! Redaction tests on the study sample (`samples/redact-source.pdf`, loaded from memory,
 //! never written) and on adversarial fixtures. Outputs land in `target/redact-out/` for pdfinspect.
 
 use super::*;
 use mupdf::pdf::PdfDocument;
 
-const SAMPLE: &[u8] = include_bytes!("../../../docs/study/samples/redact-source.pdf");
+const SAMPLE: &[u8] = include_bytes!("../../../samples/redact-source.pdf");
 
 fn sample() -> PdfDocument {
     PdfDocument::from_bytes(SAMPLE).unwrap()

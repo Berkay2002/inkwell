@@ -1,7 +1,7 @@
 # Sign r1: Fill & Sign and digital signatures (phase 5)
 
 First round of the surface; there is no verdict to start from. The design follows `design/README.md` (Inkwell system:
-rounded, warm, one ink-blue accent, Segoe UI Variable) and the approved comments rail (`approved/comments.png`: floating
+rounded, warm, one ink-blue accent, Segoe UI Variable) and the approved comments rail (floating
 vertical tool strip at the left of the page, one right rail at a time, same width and chrome as the assistant rail).
 One app window per image at 1536x1024, two images per variant: `-1-fill` (Fill & Sign: marks and a placed signature on a
 form) and `-2-sign` (a digital signature being made, then the Signatures panel with its validity). Sheet `--cols 2`.
@@ -19,7 +19,7 @@ form) and `-2-sign` (a digital signature being made, then the Signatures panel w
   Signatures rail.
 - Skipped: c-ribbon's pill over the page and anchored card; b-panel's always-open tools rail.
 
-## How Acrobat Pro does it (study 06, docs/study/screens/06-certificates/, 07-forms/07-esign-panel.png)
+## How Acrobat Pro does it
 - **Fill & Sign** is the E-Sign tab's left panel: a row of tools **Aa** (text), **X**, **check**, **dot**, **rounded
   rectangle**, **line**, then two dashed tiles *Add signature* and *Add initials*, then "Save a certified copy".
   A signature is typed, drawn or an image, saved for reuse.

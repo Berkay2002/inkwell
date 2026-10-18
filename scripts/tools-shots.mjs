@@ -1,5 +1,5 @@
-// Captures the Compress and Recognize-text rail (design/approved/tools-*.png) through WebView2's DevTools
-// endpoint, light and dark, on COPIES of docs/study samples (never the user's files). Steps are DOM clicks and
+// Captures the Compress and Recognize-text rail through WebView2's DevTools
+// endpoint, light and dark, on COPIES of samples (never the user's files). Steps are DOM clicks and
 // store calls plus CDP mouse events for the context menu: no OS-level input.
 //   copy compress-source.pdf and scan-source.pdf to <dir>; start the app with both:
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9333'; inkwell.exe <dir>/compress-source.pdf <dir>/scan-source.pdf

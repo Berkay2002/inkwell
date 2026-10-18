@@ -1,10 +1,10 @@
-// Drives a running Inkwell through WebView2's DevTools endpoint: Preflight on copies of docs/study samples (never
+// Drives a running Inkwell through WebView2's DevTools endpoint: Preflight on copies of samples (never
 // the originals): Tools > Preflight, the outcome card and its live line, convert in this document (one undo step),
 // save, reopen, re-run shows conformance, the claim badge and Verify, the other profiles, and a 1200-page document
 // for progress, cancel and responsiveness. The save dialog is native and cannot be driven without OS-level input,
 // so "Save as new file" is covered by the Rust tests and its result card is put into the store for the screen.
 // Screens (light and dark) go to docs/screens/pdfa.
-//   $d = "$env:TEMP\inkwell-pdfa"; mkdir $d; copy docs\study\samples\{compress-source,form-source,redact-source}.pdf $d
+//   $d = "$env:TEMP\inkwell-pdfa"; mkdir $d; copy samples\{compress-source,form-source,redact-source}.pdf $d
 //   $env:INKWELL_SEED_DIR = $d; cargo test --lib seed_compare_screens -- --ignored      (from src-tauri; writes "Big v1.pdf")
 //   npx vite --port 1420                                   (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:INKWELL_HISTORY_ROOT = "$d\store"

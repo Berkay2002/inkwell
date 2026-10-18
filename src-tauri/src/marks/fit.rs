@@ -13,7 +13,7 @@
 //! **Other apps' artifacts.** ISO 32000-2 §14.8.2.2 defines `/Artifact <</Type /Pagination
 //! /Subtype /Header|/Footer|/Watermark …>> BDC … EMC` and `/Type /Background`. Marks without our
 //! `/PCMark` tag are found by the marked-content sequence alone. Acrobat's own private `/PieceInfo`
-//! is not read (see docs/study/15-page-marks.md).
+//! is not read.
 
 use super::apply::{add_stream, check_pages, contents_list, has_tag, inline_sections, set_contents, tag_of};
 use super::geometry::{M, View, mul, n};

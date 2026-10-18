@@ -1,7 +1,6 @@
 # History r1: the Version history panel
 
-First round for this surface (new: the user has not seen it). It continues the approved look of home
-(approved/home.png), the docked assistant (approved/app-assistant.png) and organize (approved/organize.png): a real
+First round for this surface (new: the user has not seen it). It continues the approved look of home, the docked assistant and organize: a real
 Windows 11 desktop app, rounded and smooth (8-12 px corners), warm palette, one ink-blue accent, no sparkles.
 Function from the task: every change (by you, by the assistant, or outside Inkwell) becomes a version; a timeline
 grouped by day with named versions pinned on top; each version shows label, author, time and page chips; selecting
@@ -30,8 +29,7 @@ glow, avatars, emoji, sharp corners, browser chrome.
 
 Verdict (2026-10-10): the standard pattern, per the brief: "take reference from other similar apps
 from Adobe, Google and Microsoft and Github/Gitlab etc. There are alot of ways of showing diffs and so on, just take
-the most standard way of doing it..." Adopted: a-timeline as the panel
-(approved/history.png), "Compare" opens b-compare full-window (approved/history-2.png) with GitHub's image-diff modes
+the most standard way of doing it..." Adopted: a-timeline as the panel, "Compare" opens b-compare full-window with GitHub's image-diff modes
 "2-up | Swipe | Onion skin" (c's slider = Swipe). Conventions, no new ones:
 - Panel = Google Docs / Word version history: versions by day (Today, Yesterday, date), named versions on top plus an
   "Only show named versions" toggle, author + time per row; clicking a version shows the document at that version

@@ -252,7 +252,7 @@ Check again, and a report that no longer matches the document disables Fix and C
   encrypted in place refused, new file fine; A-1 Appearance opt-in; PDF/UA convert; PDF/X-4; plan arithmetic;
   HTML and PDF report; cancel; 1000 pages.
 - `src/lib/preflight.test.ts` (vitest): outcome line arithmetic and live updates, store flows, claim and Verify.
-- End to end on copies of `docs/study` samples with `scripts/pdfa-shots.mjs`; screens in `docs/screens/pdfa/`.
+- End to end on copies of the sample PDFs in `samples/` with `scripts/pdfa-shots.mjs`.
 
 ## Attribution
 

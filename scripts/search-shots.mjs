@@ -2,7 +2,7 @@
 // several files), jump and keyboard, history, a 1000-page document, and captures the screens (light and dark). Works on
 // generated copies, never on real files.
 //   $d = "$env:TEMP\inkwell-search"; mkdir $d
-//   python docs\study\samples\_gen\make_lease.py "$d\Lease agreement.pdf"; python scripts\search-samples.py $d
+//   python samples\_gen\make_lease.py "$d\Lease agreement.pdf"; python scripts\search-samples.py $d
 //   pnpm exec vite --port 1420 --strictPort        (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9237'

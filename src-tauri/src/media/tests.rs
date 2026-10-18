@@ -366,7 +366,7 @@ fn listing_and_serving_leave_the_document_alone() {
 /// The committed sample (scripts/media-sample.py): a real H.264 mp4 and a real mp3.
 #[test]
 fn the_sample_file_lists_what_the_windows_check_expects() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/study/samples/media-source.pdf");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../samples/media-source.pdf");
     let eng = Engine::new(2, 64 << 20);
     let id = eng.open(path).unwrap().doc;
     let items = list_all(&eng, id).unwrap();

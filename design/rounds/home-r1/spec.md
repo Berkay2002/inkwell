@@ -1,7 +1,7 @@
 # Home r1: the desk
 
 The start screen people see every time they open Inkwell (a Windows PDF app, not a marketing page). The previous
-attempt (an earlier build, docs/screens/landing/ on its branch) read as generic and AI-made. Why: an indigo gradient app icon, a dashed upload box with an upload-arrow icon, a
+attempt (an earlier build, on its branch) read as generic and AI-made. Why: an indigo gradient app icon, a dashed upload box with an upload-arrow icon, a
 grid of equal white cards with rounded corners, pill buttons, a faint purple gradient wash. Every piece is the
 default SaaS template; nothing says "paper" or "ink". Kept from it: the facts it shows (recent files with a first
 page, name, folder, pages, size, time; pinning; open by drop or Ctrl+O; Ctrl+K commands). Reopened: the whole look.

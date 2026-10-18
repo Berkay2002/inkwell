@@ -16,7 +16,7 @@ confirm; show what a file restricts and never silently strip owner restrictions.
 
 (pending: what is both standard and what pdfcraft and Acrobat have, with a hint of uniqueness.)
 
-## How Acrobat Pro does it (study 11-protect; see docs/study/11-protect.md and docs/study/screens/11-protect/)
+## How Acrobat Pro does it
 - All tools > Protect a PDF opens the Protect panel; "Protect using password" asks "Viewing" or "Editing", then the
   classic **Password Security - Settings** dialog: a Compatibility combo (Acrobat 3.0 up to Acrobat X and later,
   128-bit RC4 ... 256-bit AES), what to encrypt (all contents, all except metadata, attachments only), then

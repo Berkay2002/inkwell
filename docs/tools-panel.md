@@ -78,4 +78,3 @@ subtitle and the card shows the shortcut. The panel, Home grid, pins and palette
 
 `scripts/tools-panel-shots.mjs` drives the panel through DevTools on a copy of a study sample: landmark and ARIA, synonym
 search, keyboard, hover card delay, Recent, pin limit and persistence, palette subtitle, Home grid, light and dark.
-Screens are in `docs/screens/tools-panel/`.

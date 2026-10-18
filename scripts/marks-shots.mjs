@@ -1,4 +1,4 @@
-// Drives Page marks through WebView2's DevTools endpoint on a COPY of a docs/study sample (never the user's
+// Drives Page marks through WebView2's DevTools endpoint on a COPY of a sample PDF from samples/ (never the user's
 // files): header and footer, watermark and Bates numbering are added (one undo step each), the file is saved,
 // closed and opened again, the marks are found and updated from what the file remembers, removed and undone.
 // Captures the rail and the preview on the page, light and dark. Native dialogs (pick_open, pick_save,

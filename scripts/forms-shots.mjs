@@ -1,7 +1,7 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint: fills every kind of field on a hyperref form, clears and
 // undoes, saves and reopens; then prepares a flat form (detect, move, resize, properties, a new field, tab order, undo)
-// and captures the screens (light and dark). Works on copies of docs/study/samples, never on real files.
-//   $d = "$env:TEMP\inkwell-forms"; mkdir $d; copy docs\study\samples\form-source.pdf, docs\study\samples\flatform-source.pdf $d
+// and captures the screens (light and dark). Works on copies of samples, never on real files.
+//   $d = "$env:TEMP\inkwell-forms"; mkdir $d; copy samples\form-source.pdf, samples\flatform-source.pdf $d
 //   pnpm exec vite --port 1420 --strictPort        (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9237'
 //   src-tauri\target\debug\inkwell.exe "$d\form-source.pdf" "$d\flatform-source.pdf"

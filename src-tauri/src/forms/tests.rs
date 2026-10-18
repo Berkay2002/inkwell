@@ -424,7 +424,7 @@ fn detect_fields_on_a_flat_form_then_add_them_in_one_step() {
 }
 
 fn study_sample(name: &str) -> Option<Vec<u8>> {
-    std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples").join(name)).ok()
+    std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../samples").join(name)).ok()
 }
 
 /// The study sample Acrobat's auto-detection was recorded on: the labels it found are found here too.
@@ -1260,7 +1260,7 @@ fn the_format_preview_shows_what_a_format_makes_of_a_sample() {
     assert_eq!(c, Calculate::Custom("s".into()));
 }
 
-// ---- the form JavaScript sample (docs/study/samples/_gen/formsjs-sample.pdf) -----------------------------------
+// ---- the form JavaScript sample (samples/_gen/formsjs-sample.pdf) -----------------------------------
 
 /// A one-page form for the form JavaScript checks: a number format, a date with `AFDate_KeystrokeEx`, three numbers with a
 /// SUM total, a range-validated age, a custom calculation that calls a document-level function, a field whose /C is
@@ -1825,7 +1825,7 @@ fn the_scripts_banner_does_not_wait_for_a_step_that_holds_the_edit_lane() {
 
 /// Writes the sample for the runtime checks: `cargo test --lib write_the_form_javascript_sample -- --ignored`.
 #[test]
-#[ignore = "writes docs/study/samples/_gen/formsjs-sample.pdf"]
+#[ignore = "writes samples/_gen/formsjs-sample.pdf"]
 fn write_the_form_javascript_sample() {
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("docs").join("study").join("samples").join("_gen").join("formsjs-sample.pdf");
     std::fs::write(out, formsjs_sample()).unwrap();

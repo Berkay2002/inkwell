@@ -34,7 +34,7 @@ facts out in a rail, not three palettes:
 
 ## How Acrobat Pro does it
 
-Read from the shipping files only (`docs/study/14-a11y.md`; nothing was driven). The check has an options dialog (report
+Read from the shipping files only (nothing was driven). The check has an options dialog (report
 options, pages, one check box per rule in seven groups), progress ("Evaluating page", "Evaluating structure"), and a result
 panel that is a tree: the seven groups, each rule as "Rule - Status" (Passed, Failed, Needs manual check, Skipped, plus
 "Passed manually" and "Failed manually" a person sets). Per rule: Fix, Pass or Fail, Skip Rule, Explain, Check Again, Show

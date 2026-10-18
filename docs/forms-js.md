@@ -174,6 +174,5 @@ The rail's field properties follow Acrobat's tabs.
 - `FormDto.calcOrder` lists the `node` of each calculated field in running order.
 
 ## Checked at runtime
-`scripts/formsjs-shots.mjs` drives the debug app over CDP on a copy of `docs/study/samples/_gen/formsjs-sample.pdf` (written by
-`cargo test --lib write_the_form_javascript_sample -- --ignored`) and saves the screens, light and dark, in
-`docs/screens/forms-js/`.
+`scripts/formsjs-shots.mjs` drives the debug app over CDP on a copy of `samples/_gen/formsjs-sample.pdf` (written by
+`cargo test --lib write_the_form_javascript_sample -- --ignored`) and saves the screens, light and dark.

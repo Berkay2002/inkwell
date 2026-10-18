@@ -836,7 +836,7 @@ fn timing_report() {
 // ---- real samples (copies) ----------------------------------------------------------------------
 
 fn sample_copy(name: &str) -> Vec<u8> {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples").join(name);
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples").join(name);
     let dir = std::env::temp_dir().join("inkwell-diff-samples");
     std::fs::create_dir_all(&dir).unwrap();
     let dst = dir.join(name);

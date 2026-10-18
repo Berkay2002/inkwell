@@ -2,7 +2,7 @@
 
 Parity row: Acrobat Pro "Measure" (distance, perimeter, area, with a scale and units). pdfcraft has none, so this is
 written from the PDF spec (ISO 32000-1 section 12.9) and from MuPDF's annotation calls; no code is taken from pdfcraft.
-Brief: `docs/cloud/measure.md`. The UI is described under "In the app" below.
+The UI is described under "In the app" below.
 
 Code: `src-tauri/src/measure/` (`calc.rs` units, scale, geometry, page transform; `numfmt.rs` number formats; `dict.rs`
 `/Measure` and `/VP`; `write.rs` annotations, appearance, listing; `snap.rs`; `mod.rs` the engine calls; `app.rs` the

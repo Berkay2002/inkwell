@@ -1,6 +1,6 @@
 # Edit bookmarks and links
 
-Acrobat's Bookmarks panel and Link tool (study: [study/16-bookmarks-links.md](study/16-bookmarks-links.md), partial:
+Acrobat's Bookmarks panel and Link tool (an earlier study, partial:
 the editing UI is not UIA-reachable, rendering behaviour was observed). Code: `src-tauri/src/outline/` (bookmarks)
 and `src-tauri/src/links/`; UI in `src/components/edit/` (`BookmarksPanel`, `LinksPanel`, `LinkLayer`) and the store
 `src/lib/nav.ts`. Design: `design/rounds/links-r1/spec.md` (a-tabs built; not rendered, image tool at its limit).
@@ -260,9 +260,9 @@ unreadable shapes and caps refuse (pages and name trees past the search cap make
 
 `cargo test --lib outline -- --test-threads=1`, `cargo test --lib links -- --test-threads=1`, `src/lib/nav.test.ts` (including following links).
 
-CDP pass on a copy of `docs/study/samples/bookmarks-links-source.pdf`: `scripts/bookmarks-shots.mjs` (32 checks: add, rename,
+CDP pass on a copy of `samples/bookmarks-links-source.pdf`: `scripts/bookmarks-shots.mjs` (32 checks: add, rename,
 drag reorder and nest, undo and redo, set destination, style, collapse, sidebar menu, draw a link, gate refusal, open
-confirm, audit, save, reopen); screens, light and dark, in `docs/screens/bookmarks/`.
+confirm, audit, save, reopen).
 
 Second pass, for the review fixes: `scripts/links-review-shots.mjs`. The app is started with `bm-copy.pdf`, a
 `hostile.pdf` (a GoToR to `C:/Windows/x.pdf` and a Launch of `run.bat`), a PDF in a sibling folder, a PDF on another

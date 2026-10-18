@@ -1,9 +1,9 @@
-// Drives a running Inkwell through WebView2's DevTools endpoint: shows a COPY of a docs/study sample (a photo, a coloured
+// Drives a running Inkwell through WebView2's DevTools endpoint: shows a COPY of a sample PDF from samples/ (a photo, a coloured
 // link line, colour swatches) with normal and dark pages in the light and dark app theme, checks that the toggle, the
 // three-way setting and the persistence work, that the photo keeps its colours and the chrome is not inverted, and
 // captures search hits, a text selection, a comment and a form field on dark pages. Never the user's files.
 //   $d = "$env:TEMP\inkwell-page-dark"; mkdir $d\in, $d\data, $d\wv
-//   python make_sample.py docs\study\samples\edit-source.pdf $d\in\dark-sample.pdf ; copy form-source.pdf -> $d\in
+//   python make_sample.py samples\edit-source.pdf $d\in\dark-sample.pdf ; copy form-source.pdf -> $d\in
 //   vite --port 1433 --strictPort            (any free port; the debug exe is built for 1420, see PAGE_DARK_VITE below)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_USER_DATA_FOLDER = "$d\wv"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9247'

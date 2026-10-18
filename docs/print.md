@@ -109,7 +109,7 @@ A document that forbids printing (`Permission::PRINT`) is refused with `not-perm
 - vitest: `src/lib/printStore.test.ts` (settings mapping, paper choice, remembered options, the sheet's
   open/plan/preview/start/cancel flow, poster and creep mapping, Save as PDF with and without a printer).
 - Runtime: `scripts/print-shots.mjs` drives the sheet through CDP and prints a copy of a generated sample to
-  Microsoft Print to PDF into `INKWELL_PRINT_DIR`; screens in `docs/screens/print/`.
+  Microsoft Print to PDF into `INKWELL_PRINT_DIR`.
 
 ## Not done, and known limits
 

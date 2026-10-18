@@ -25,9 +25,9 @@ robot icons, emoji, people, marketing-page hero text, browser chrome, laptop fra
 
 Verdict (2026-10-10): no single pick. User: "Honestly same idea with the starting page, for the b option, it reminds me of Microsoft word etc, I think all makes sense, so its hard to pick." Next: one mix render (d-mix) for approval: a's sidebar frame, b's tool row and Continue reading, c's preview pane for the selected recent file.
 
-Verdict 2 (2026-10-10, supersedes the mix): User: "But if you ask me what is the best landing/starting page, its B. But those other two are also good candidates but for other types of views." Build: b-gallery is the home screen (approved/home.png). a-sidebar becomes the Library view (approved/library.png) and c-split its selected-file preview layout (approved/library-2.png). d-mix dropped.
+Verdict 2 (2026-10-10, supersedes the mix): User: "But if you ask me what is the best landing/starting page, its B. But those other two are also good candidates but for other types of views." Build: b-gallery is the home screen. a-sidebar becomes the Library view and c-split its selected-file preview layout. d-mix dropped.
 
-Verdict 3 (2026-10-10, final): User: "Also yes use the d-mix, it looks good. Best of all." Build d-mix as the home screen (approved/home.png). The sidebar's Recent/Pinned/This PC pages use the library layouts (approved/library.png, library-2.png). b-gallery is superseded.
+Verdict 3 (2026-10-10, final): User: "Also yes use the d-mix, it looks good. Best of all." Build d-mix as the home screen. The sidebar's Recent/Pinned/This PC pages use the library layouts. b-gallery is superseded.
 
 ## Shared
 

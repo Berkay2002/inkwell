@@ -1,8 +1,8 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint: the accessibility checker on copies of
-// docs/study samples (never the originals): untagged -> Autotag -> check -> fix -> undo -> save -> reopen, Show on
+// samples (never the originals): untagged -> Autotag -> check -> fix -> undo -> save -> reopen, Show on
 // a finding, the figure's alt-text field, Fix all as one step, and a 1200-page document for progress, cancel and
 // responsiveness. Screens (light and dark) go to docs/screens/a11y.
-//   $d = "$env:TEMP\inkwell-a11y"; mkdir $d; copy docs\study\samples\{compress-source,form-source,redact-source}.pdf $d
+//   $d = "$env:TEMP\inkwell-a11y"; mkdir $d; copy samples\{compress-source,form-source,redact-source}.pdf $d
 //   $env:INKWELL_SEED_DIR = $d; cargo test --lib seed_compare_screens -- --ignored      (from src-tauri; writes "Big v1.pdf")
 //   npx vite --port 1420                                   (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:INKWELL_HISTORY_ROOT = "$d\store"

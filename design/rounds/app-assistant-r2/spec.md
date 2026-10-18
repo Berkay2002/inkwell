@@ -24,7 +24,7 @@ draws a soft rounded highlight on the quoted line; panel slides in 240 ms ease-o
 Must not appear: sparkle/star/magic icons, robot/brain icons, purple/violet/lilac, gradients, glow, avatars, emoji,
 typing dots, sharp square corners.
 
-Verdict (2026-10-10): approved all three as modes. User: "All should be available because all makes sense based on preference. But docked should probably be default, but it can then be floatable or if you want more focus on the actual PDF etc, you can have it as a c-command." Build: docked (a) default; float (b) and command bar (c) as switchable modes. Approved images: approved/app-assistant.png (a), -2 (b), -3 (c). Ignore render slips: "Claude 3.5 Sonnet" label, bright Windows blue (use ink blue #2E4B8F).
+Verdict (2026-10-10): approved all three as modes. User: "All should be available because all makes sense based on preference. But docked should probably be default, but it can then be floatable or if you want more focus on the actual PDF etc, you can have it as a c-command." Build: docked (a) default; float (b) and command bar (c) as switchable modes. Approved renders: a, b and c. Ignore render slips: "Claude 3.5 Sonnet" label, bright Windows blue (use ink blue #2E4B8F).
 
 ## Shared
 

@@ -29,7 +29,7 @@ import { Advanced, AdvancedEstimate, UsageChange } from "./OptimizerPanel";
 import "./tools.css";
 
 /**
- * Compress and Recognize text live in one right-hand rail (approved: design/approved/tools-*.png).
+ * Compress and Recognize text live in one right-hand rail.
  * It takes the assistant's dock width and chrome, and only one of the two is open at a time
  * (the stores see to that). The state itself is `useTools`: options, running, done or error.
  */

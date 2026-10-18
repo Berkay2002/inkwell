@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicUsize;
 static N: AtomicUsize = AtomicUsize::new(0);
 
 fn samples() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples")
 }
 
 /// A scratch directory of its own, removed afterwards.

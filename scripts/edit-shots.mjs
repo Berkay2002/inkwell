@@ -1,7 +1,7 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint and exercises Edit mode on a COPY of a study
 // sample: turns Edit on (Ctrl+E), edits a line, changes size and colour, adds a text box, undoes and redoes,
 // saves, reopens and checks the file. Mouse and keys are CDP Input events to the page (no global input).
-//   $d = "$env:TEMP\inkwell-edit"; mkdir $d; copy docs\study\samples\edit-source.pdf "$d\edit-copy.pdf"
+//   $d = "$env:TEMP\inkwell-edit"; mkdir $d; copy samples\edit-source.pdf "$d\edit-copy.pdf"
 //   node node_modules\vite\bin\vite.js --port 1420 --strictPort        (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9227'

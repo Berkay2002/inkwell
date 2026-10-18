@@ -1,7 +1,7 @@
 """Writes the PDFs scripts/search-shots.mjs searches (plain PDFs, no libraries, Latin-1 text):
   Insurance policy.pdf, Move-out checklist.pdf, Café menu.pdf (accents), Thousand.pdf (1000 pages), sub/Inspection report.pdf,
   broken.pdf (not a PDF, to be skipped) and notes.txt (not listed).
-Run: python scripts/search-samples.py <out-dir>   (Lease agreement.pdf comes from docs/study/samples/_gen/make_lease.py)"""
+Run: python scripts/search-samples.py <out-dir>   (Lease agreement.pdf comes from samples/_gen/make_lease.py)"""
 import os
 import sys
 

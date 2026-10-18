@@ -1,4 +1,4 @@
-// Drives Protect and Remove security through WebView2's DevTools endpoint on a COPY of a docs/study sample
+// Drives Protect and Remove security through WebView2's DevTools endpoint on a COPY of a sample PDF from samples/
 // (never the user's files) and captures the rail, light and dark. The save dialog is a native one that can't be
 // driven without OS-level input, so "Protect this file instead" (a plain Save) is the path that runs for real:
 // the file is encrypted by the engine, closed, reopened with its password, its restrictions shown, and

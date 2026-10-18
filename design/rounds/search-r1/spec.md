@@ -13,9 +13,9 @@ right in the find box, and keep the rest under '...'.
 None of the six renders was made, so there is no sheet; the pick was made from this text. b-side and c-bar are dropped.
 Built: Acrobat's floating find box on the page with the Aa and ab chips, Ignore accents and the include options under
 "...", and Advanced search as the right rail "Search" in the shared dock (pdfcraft's context list). No
-`design/approved/search.png` exists (no render); the build's screens are in `docs/screens/search/`.
+render was made.
 
-## How Acrobat Pro does it (study 09-viewer; docs/study/screens/09-viewer/11-find-ctrl-f.png, 12-find-results.png)
+## How Acrobat Pro does it
 - Ctrl+F opens a small floating find box on the page: the field, previous and next arrows, a "..." menu for options
   (Whole words only, Case-sensitive, Include bookmarks, Include comments), and a close button. Matches are
   highlighted on the page and stepped with Enter. It lists no results.

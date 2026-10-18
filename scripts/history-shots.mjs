@@ -1,6 +1,6 @@
 // Drives a running Inkwell through WebView2's DevTools endpoint and captures the version history panel, a selected
 // version with its changes marked, Compare mode (2-up, Swipe, Onion skin) and the recovery banner, light and dark.
-// The scenario is built from copies of docs/study/samples in a temp dir, with its own history store: never the
+// The scenario is built from copies of samples in a temp dir, with its own history store: never the
 // user's real store or files.
 //   $d = "$env:TEMP\inkwell-hx"
 //   $env:INKWELL_SEED_DIR = $d; cargo test --lib seed_screens -- --ignored      (from src-tauri)

@@ -32,15 +32,11 @@
 - [threads](threads.md): article threads
 - [tools-panel](tools-panel.md): the All tools panel
 
-Screenshots are in [screens/](screens/).
-
 ## Development notes (historical, internal)
 
 Working notes kept for reference. They describe how features were planned and may be out of date.
 
-- [cloud/](cloud/): task briefs for remote build sessions
 - [pdfcraft-parity.md](pdfcraft-parity.md): a dated gap analysis
 - [engine-rules.md](engine-rules.md): a pre-merge review note
 - [insert-links-widgets.md](insert-links-widgets.md): a finished task brief
-- [study/](study/): notes on reference behaviour, with sample PDFs
 - [design/](../design/): design rounds

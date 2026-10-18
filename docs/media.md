@@ -3,7 +3,7 @@
 Code: `src-tauri/src/media/` (`mod.rs` listing, classifying and the decoded-asset cache; `route.rs` the media route's
 paths and byte ranges; `app.rs` the two commands; `tests.rs`). UI: `src/lib/media.ts` (store, `media.test.ts`),
 `src/components/MediaLayer.tsx` (badges and the player over the page), `MediaPanel.tsx` (sidebar tab "Media"),
-command palette "Media in this document". Sample: `docs/study/samples/media-source.pdf`, built by
+command palette "Media in this document". Sample: `samples/media-source.pdf`, built by
 `scripts/media-sample.py` (needs ffmpeg with libx264 and libmp3lame).
 
 Nothing here edits the document: no undo step, no history entry, nothing for Save to write. It is not an assistant

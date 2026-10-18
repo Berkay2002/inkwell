@@ -1,0 +1,96 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Names << /JavaScript << /Names [(lib) 18 0 R] >> >> /AcroForm << /Fields [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R] /CO [13 0 R 14 0 R 17 0 R] /NeedAppearances true /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 3 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /Helv 3 0 R >> >> /Contents 5 0 R /Annots [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R] >>
+endobj
+5 0 obj
+<< /Length 795 >>
+stream
+BT /Helv 18 Tf 72 720 Td (Form scripts sample) Tj ET
+BT /Helv 10 Tf 0.25 g 72 667 Td (Name (alert on commit)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 627 Td (Page to visit (link on commit)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 587 Td (Price (number format)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 547 Td (Date of birth (dd/mm/yyyy)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 507 Td (Rent) Tj ET
+BT /Helv 10 Tf 0.25 g 72 467 Td (Fees) Tj ET
+BT /Helv 10 Tf 0.25 g 72 427 Td (Other) Tj ET
+BT /Helv 10 Tf 0.25 g 72 387 Td (Total (sum of the three)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 347 Td (Tax (custom script, document function)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 307 Td (Age (18 to 65)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 267 Td (Code (custom format + keystroke)) Tj ET
+BT /Helv 10 Tf 0.25 g 72 227 Td (Never finishes (while(true){})) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Name) /Rect [230 660 430 682] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /AA << /V << /S /JavaScript /JS (if (event.value !== "") { app.alert("Welcome, " + event.value + "."); }) >> >> >>
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Website) /Rect [230 620 430 642] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /AA << /V << /S /JavaScript /JS (if (event.value !== "") { app.launchURL("https://example.com/" + event.value); }) >> >> >>
+endobj
+8 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Price) /Rect [230 580 430 602] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, "$", true);) >> /K << /S /JavaScript /JS (AFNumber_Keystroke(2, 0, 0, 0, "$", true);) >> >> >>
+endobj
+9 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Born) /Rect [230 540 430 562] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /AA << /F << /S /JavaScript /JS (AFDate_FormatEx("dd/mm/yyyy");) >> /K << /S /JavaScript /JS (AFDate_KeystrokeEx("dd/mm/yyyy");) >> >> >>
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Rent) /Rect [230 500 430 522] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >>  >>
+endobj
+11 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Fees) /Rect [230 460 430 482] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >>  >>
+endobj
+12 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Other) /Rect [230 420 430 442] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >>  >>
+endobj
+13 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Total) /Rect [230 380 430 402] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /Ff 1 /AA << /F << /S /JavaScript /JS (AFNumber_Format(2, 0, 0, 0, "$", true);) >> /C << /S /JavaScript /JS (AFSimple_Calculate("SUM", new Array("Rent", "Fees", "Other"));) >> >> >>
+endobj
+14 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Tax) /Rect [230 340 430 362] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /Ff 1 /AA << /C << /S /JavaScript /JS (event.value = tax(Number(this.getField("Total").value) || 0);) >> >> >>
+endobj
+15 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Age) /Rect [230 300 430 322] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /AA << /V << /S /JavaScript /JS (AFRange_Validate(true, 18, true, 65);) >> >> >>
+endobj
+16 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Code) /Rect [230 260 430 282] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /AA << /F << /S /JavaScript /JS (if (event.value !== "") {\n  event.value = "#" + event.value;\n}) >> /K << /S /JavaScript /JS (if (event.willCommit) {\n  event.value = event.value.toUpperCase();\n}) >> >> >>
+endobj
+17 0 obj
+<< /Type /Annot /Subtype /Widget /FT /Tx /T (Spin) /Rect [230 220 430 242] /F 4 /P 4 0 R /DA (/Helv 11 Tf 0 g) /MK << /BC [0.6 0.6 0.6] /BG [1 1 1] >> /Ff 1 /AA << /C << /S /JavaScript /JS (while(true){}) >> >> >>
+endobj
+18 0 obj
+<< /S /JavaScript /JS (function tax(x) { return Math.round(x * 25) / 100; }) >>
+endobj
+xref
+0 19
+0000000000 65535 f 
+0000000009 00000 n 
+0000000321 00000 n 
+0000000378 00000 n 
+0000000475 00000 n 
+0000000693 00000 n 
+0000001538 00000 n 
+0000001819 00000 n 
+0000002112 00000 n 
+0000002435 00000 n 
+0000002739 00000 n 
+0000002910 00000 n 
+0000003081 00000 n 
+0000003253 00000 n 
+0000003603 00000 n 
+0000003880 00000 n 
+0000004127 00000 n 
+0000004503 00000 n 
+0000004733 00000 n 
+trailer
+<< /Size 19 /Root 1 0 R >>
+startxref
+4829
+%%EOF

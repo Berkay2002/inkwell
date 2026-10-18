@@ -32,7 +32,7 @@ fonts addressed by CID with no file, JPEG 2000 in PDF/A-1.
 
 ## How Acrobat Pro does it
 
-Read from the shipping files (docs/study/15-preflight.md; nothing was driven). Acrobat's "PDF Standards" tool offers Save as
+Read from the shipping files (nothing was driven). Acrobat's "PDF Standards" tool offers Save as
 PDF/A, PDF/X, PDF/E and Preflight (profiles: Verify compliance with PDF/A-1b, Convert to PDF/A-1b ..., fixups listed per
 profile). Converting runs "Analyze and fix" and saves a new file (Save as Other > Archivable PDF). The shipped PDF/A job
 options say what a conversion does: embed all fonts, **error when a font cannot be embedded**, sRGB conversion, no

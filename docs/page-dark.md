@@ -63,8 +63,8 @@ Limits, on purpose:
 
 ## Checked
 
-`scripts/page-dark-shots.mjs` drives the real app over CDP on a COPY of `docs/study/samples/edit-source.pdf` with an
-added blue link line and colour swatches, plus a copy of `form-source.pdf`. Screens are in `docs/screens/page-dark/`:
+`scripts/page-dark-shots.mjs` drives the real app over CDP on a COPY of `samples/edit-source.pdf` with an
+added blue link line and colour swatches, plus a copy of `form-source.pdf`. Screens:
 
 - `pages-normal-light-app.png`, `pages-dark-light-app.png`, `pages-dark-dark-app.png`, `pages-normal-dark-app.png`
 - `search-dark-pages.png`, `selection-dark-pages.png`, `comments-dark-pages.png` (+ `-light-app`),

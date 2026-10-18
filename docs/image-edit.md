@@ -1,6 +1,6 @@
 # Edit images in place
 
-Acrobat's "Edit text & images" for images (study: [study/02-edit.md](study/02-edit.md)). Code:
+Acrobat's "Edit text & images" for images (an earlier study). Code:
 `src-tauri/src/imageedit/` (engine), `src/lib/imageEdit.ts` and `src/components/edit/Image*.tsx` (UI), adapted from
 pdfcraft `crates/edit/src/images.rs` and `crates/content` (b8ddf71, MIT OR Apache-2.0; see `third_party/pdfcraft/`).
 It shares the content-stream parser, splice and stream writer of [text editing](text-edit.md). MuPDF stays the only
@@ -76,8 +76,7 @@ Edit mode (Ctrl+E) lists the pictures of every page near the viewport as outline
   selected. Esc or Cancel puts the file back; picking the text tool does too.
 - Every change is one undo step ("Move image on p. 1" …), Save writes it, the history records it. A change the page
   moved under (`stale`) is not applied: the selection is found again by position and the rail says so.
-- Checked by `scripts/image-edit-shots.mjs` against generated fixtures (`scripts/make-image-edit-sample.mjs`);
-  screens in `docs/screens/image-edit/`. Unit tests: `src/lib/imageEdit.test.ts`.
+- Checked by `scripts/image-edit-shots.mjs` against generated fixtures (`scripts/make-image-edit-sample.mjs`). Unit tests: `src/lib/imageEdit.test.ts`.
 
 ## Commands
 

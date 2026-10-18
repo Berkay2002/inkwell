@@ -1,5 +1,5 @@
 // Captures the Export and Create PDF rail, light and dark, through WebView2's DevTools endpoint on a COPY of a
-// docs/study sample (never the user's files). The native file dialogs cannot be driven without OS-level input,
+// sample PDF from samples/ (never the user's files). The native file dialogs cannot be driven without OS-level input,
 // so the running and done states are put into the store directly (the same state the commands produce).
 //   copy edit-source.pdf to <dir>; start the app with it:
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9334'; inkwell.exe <dir>/edit-source.pdf

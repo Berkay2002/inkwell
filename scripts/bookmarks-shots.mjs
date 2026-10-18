@@ -2,7 +2,7 @@
 // on a COPY of a study sample: adds, renames, reorders (drag), styles and re-points a bookmark, draws a link,
 // undoes and redoes, saves, reopens and reads everything back. Mouse and keys are CDP Input events to the page
 // (no global input); the native "Open link" dialog is answered at the page's fetch (Cancel, always).
-//   $d = "$env:TEMP\inkwell-bm"; mkdir $d; copy docs\study\samples\bookmarks-links-source.pdf "$d\bm-copy.pdf"
+//   $d = "$env:TEMP\inkwell-bm"; mkdir $d; copy samples\bookmarks-links-source.pdf "$d\bm-copy.pdf"
 //   node node_modules\vite\bin\vite.js --port 1420 --strictPort        (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"
 //   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9229'

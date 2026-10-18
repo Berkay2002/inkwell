@@ -9,20 +9,19 @@ round is only how a person reaches it. One app window per image at 1536x1024, on
 
 2026-10-11: a-rail, chosen from this spec alone (no renders exist): Acrobat's standard flow in our right rail. Taken from c-proof: the one-line summary of what is being
 edited at the top of the format section ("Editing "Sans-serif line…" · CMSS12 · 1 line"), and the "On page N" block list
-(cheap: it is the page's block list, with locked blocks tagged). b-bar was not built. Built screens (light and dark):
-docs/screens/edit/. Build notes: docs/text-edit.md "The UI".
+(cheap: it is the page's block list, with locked blocks tagged). b-bar was not built.
+Build notes: docs/text-edit.md "The UI".
 
-## How Acrobat Pro does it (study 02-edit: docs/study/02-edit.md, screens in docs/study/screens/02-edit/)
-- A top tab **Edit** opens a left panel; the page's text blocks and images get dotted outlines at once
-  (`05-edit-mode-text-blocks.png`). All tools, "Edit a PDF", opens the same panel.
+## How Acrobat Pro does it
+- A top tab **Edit** opens a left panel; the page's text blocks and images get dotted outlines at once. All tools, "Edit a PDF", opens the same panel.
 - The panel has **Modify page**, **Add content** (Text, Image, Header and footer, More) and, only while a text block is
   selected, **Format text**: font, size, colour, lists, alignment, bold/italic/underline, super/subscript, line spacing
-  (1.2), paragraph spacing, horizontal scale, character spacing (`01-edit-panel.png`).
+  (1.2), paragraph spacing, horizontal scale, character spacing.
 - Click into text: a frame with 8 resize handles and a rotate handle, caret at the click, typing re-flows the paragraph
-  inside the frame width (`07-paragraph-reflow.png`). A yellow `!` appears on the block when the original font cannot
+  inside the frame width. A yellow `!` appears on the block when the original font cannot
   show a typed character, and that character falls back to a system font (`03-edit-typed-ZZ.png`).
 - Add content, Text: the cursor becomes a text cursor, click the page and type; the box gets the default font
-  (Minion Pro 12 pt) (`06-add-text-typed.png`). Esc or clicking away commits. Ctrl+S saves in place.
+  (Minion Pro 12 pt). Esc or clicking away commits. Ctrl+S saves in place.
 - It never says what a rewrite will do to the file until it is done.
 
 ## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: crates/ui-egui/src/edit_text_ui.rs)

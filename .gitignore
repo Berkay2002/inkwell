@@ -27,3 +27,12 @@ src-tauri/gen/schemas/
 !vendor/**/*.sln
 design/rounds/*/render*.log
 __pycache__/
+
+# Local only: Acrobat study notes, cloud briefs, screenshots and design renders
+/docs/study/
+/docs/cloud/
+/docs/screens/
+/design/**/*.png
+/design/**/*.jpg
+/design/**/*.jpeg
+/design/**/*.webp

@@ -12,7 +12,7 @@ use crate::redact::app::list_marks;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
-const SAMPLE: &[u8] = include_bytes!("../../../../docs/study/samples/redact-source.pdf");
+const SAMPLE: &[u8] = include_bytes!("../../../../samples/redact-source.pdf");
 
 pub(in crate::ai) struct Host {
     pub(in crate::ai) eng: Arc<Engine>,

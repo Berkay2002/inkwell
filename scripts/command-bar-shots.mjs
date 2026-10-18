@@ -3,7 +3,7 @@
 // conversation, an error and an approval inside the chat, the chats and layout menus, a page chip hovered
 // (connector to the badge), a selection row, the bar moved to the left, and a 900 px window. Light and dark, at
 // 100 % and 150 %. The conversation is staged in the store: no model, no network, no real files.
-//   $d = "$env:TEMP\inkwell-cb"; mkdir $d; copy docs\screens\assistant\northwind-report.pdf $d\report.pdf
+//   $d = "$env:TEMP\inkwell-cb"; mkdir $d; copy <any multi-page PDF> $d\report.pdf
 //   npx vite --port 1420        (the debug exe loads the dev server)
 //   $env:INKWELL_DATA_DIR = "$d\data"; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9231'
 //   src-tauri\target\debug\inkwell.exe "$d\report.pdf"

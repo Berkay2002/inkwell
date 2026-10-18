@@ -3,8 +3,8 @@
 Code: `src-tauri/src/marks/` (`mod.rs` the types and the `<<…>>` tokens, `apply.rs` the writer, reader and Bates
 files, `geometry.rs` display space, `fit.rs` the shrink and other apps' marks, `text.rs` fonts and widths, `app.rs` the commands, `tests.rs`), the edit-core
 hooks in `src-tauri/src/engine/edit.rs`, UI in `src/components/MarksPanel.tsx`, `src/components/MarkPreview.tsx`,
-`src/lib/marksStore.ts` and `src/components/marks.css`. Screens: `docs/screens/marks/` (`node
-scripts/marks-shots.mjs`). Study of Acrobat's marks: `docs/study/15-page-marks.md` (not observed). Design round:
+`src/lib/marksStore.ts` and `src/components/marks.css`. Screens: `node
+scripts/marks-shots.mjs`. An earlier study of Acrobat's marks (not observed). Design round:
 `design/rounds/marks-r1/` (variant a-tabs, with the "Has:" state line from b-list).
 
 ## What it does

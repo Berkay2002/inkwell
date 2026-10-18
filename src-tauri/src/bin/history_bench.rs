@@ -124,7 +124,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // Copies only: never read the user's files in place.
-    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/study/samples");
+    let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples");
     let copy = |name: &str| {
         let to = dir.join(name);
         std::fs::copy(samples.join(name), &to).unwrap();
