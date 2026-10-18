@@ -297,7 +297,7 @@ fz_try_open_file(fz_context *ctx, const char *name)
 fz_stream *
 fz_open_file_w(fz_context *ctx, const wchar_t *name)
 {
-	FILE *file = _wfopen(name, L"rb");
+	FILE *file = _wfopen(name, L"rbN"); /* Inkwell: not inherited by child processes */
 	if (file == NULL)
 		fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot open file %ls: %s", name, strerror(errno));
 

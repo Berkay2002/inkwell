@@ -2,7 +2,7 @@
 
 Inkwell builds on MuPDF 1.27.2 (Copyright (C) 2004-2025 Artifex Software, Inc., AGPL-3.0-or-later) through the Rust
 crates mupdf 0.8.0 and mupdf-sys 0.8.0 (https://github.com/messense/mupdf-rs, AGPL-3.0). Both crates are vendored in
-`vendor/mupdf` and `vendor/mupdf-sys`, and Inkwell modified the files below between 2026-10-10 and 2026-10-18.
+`vendor/mupdf` and `vendor/mupdf-sys`, and Inkwell modified the files below between 2026-10-10 and 2026-10-19.
 This list is the notice of modification that AGPL-3.0 section 5(a) asks for. Every file not listed is unchanged from
 the published crates, and git history (`git log -- vendor/`) has the exact change and date of each edit.
 
@@ -12,6 +12,7 @@ the published crates, and git history (`git log -- vendor/`) has the exact chang
 |---|---|
 | `build.rs` | Reruns when `wrapper/` or the MuPDF sources change. On MSVC, MuJS's `js_malloc`, `js_realloc`, `js_free` and `js_strdup` get a `mujs_` prefix so they do not collide with QuickJS |
 | `mupdf/source/fitz/load-jpx.c` | The OpenJPEG allocator context is thread-local, and JPEG 2000 decoding no longer takes the FreeType lock, so pages decode in parallel |
+| `mupdf/source/fitz/time.c`, `mupdf/source/fitz/stream-open.c` | On Windows, files are opened with a non-inheritable handle, so a process Inkwell starts does not keep an open PDF locked |
 | `mupdf/source/pdf/pdf-appearance.c` | `pdf_update_appearance` never synthesises an appearance for a signature widget, signed or not |
 | `mupdf/source/pdf/pdf-shade-recolor.c` | `pdf_recolor_shade` returns a new reference when it gives back the unchanged shading |
 | `wrapper/internal.h` | Adds the `mupdf_error_stream_cap` error code |

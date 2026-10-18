@@ -264,6 +264,25 @@ fn failed_save_never_touches_the_original() {
     assert_eq!(labels(&eng, id), vec![1, 3]);
 }
 
+/// A process started while a document is open (the assistant's CLI, Tesseract) must not inherit
+/// MuPDF's handle to the file: it would keep the file locked and every save would fail until it exits.
+#[cfg(windows)]
+#[test]
+fn a_child_process_does_not_keep_an_open_document_locked() {
+    let d = dir("inherit");
+    let path = fixture_at(&d, "a.pdf", &pages(3));
+    let eng = Engine::new(2, 64 << 20);
+    let id = eng.open(&path).unwrap().doc;
+    assert_eq!(labels(&eng, id), vec![1, 2, 3]);
+    // Outlives write_atomic's 2 s of retries.
+    let mut child = std::process::Command::new("cmd").args(["/c", "ping -n 6 127.0.0.1 >nul"]).spawn().unwrap();
+    eng.apply(id, EditOp::Delete { pages: vec![1] }).unwrap();
+    let saved = eng.save(id, None);
+    let _ = child.kill();
+    let _ = child.wait();
+    saved.unwrap();
+}
+
 #[test]
 fn extract_split_merge() {
     let d = dir("extract");

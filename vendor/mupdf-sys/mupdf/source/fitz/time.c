@@ -133,6 +133,21 @@ fz_fopen_utf8(const char *name, const char *mode)
 		return NULL;
 	}
 
+	/* Inkwell: "N" (no inherit), so a process started meanwhile does not keep the file open and locked. */
+	{
+		size_t n = wcslen(wmode);
+		wchar_t *m = realloc(wmode, (n + 2) * sizeof(wchar_t));
+		if (m == NULL)
+		{
+			free(wname);
+			free(wmode);
+			return NULL;
+		}
+		wmode = m;
+		wmode[n] = L'N';
+		wmode[n + 1] = 0;
+	}
+
 	file = _wfopen(wname, wmode);
 
 	free(wname);
