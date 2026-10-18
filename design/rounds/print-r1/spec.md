@@ -8,16 +8,14 @@ c-ticket one each. The sheet is `--cols 2`.
 
 ## Verdict
 
-2026-10-11: **a-sheet, as built.** The user delegated design picks to the orchestrator ("choose what is both standard and
-what pdfcraft and acrobat has, but also some hint of uniqueness"); the pick below is berka-43's (the orchestrator), adopted
-by the user through that delegation, not the user's own. In berka-43's words: "a-sheet, as built. It keeps Acrobat's
+2026-10-11: **a-sheet, as built.** "a-sheet, as built. It keeps Acrobat's
 standard modal with the preview on the left. Take one thing from c-ticket: make the outcome line ("6 sheets of A4, both
 sides, 2 copies") the prominent summary beside the Print button, and update it live. Skip a-sheet-2."
 b-rail and c-ticket are dropped; a-sheet-2-booklet was never rendered and is skipped.
 Approved: `design/approved/print.png` (a-sheet-1-options). Built as `src/components/PrintSheet.tsx`; the outcome line is
 `outcomeLine` in `src/lib/printStore.ts`. Screens of the build: `docs/screens/print/`.
 
-Render notes: `a-sheet-2-booklet` was not rendered (the image tool's usage limit was reached, 2026-10-11); the
+Render notes: `a-sheet-2-booklet` was not rendered; the
 booklet state is described above and is built from the engine's own preview. `c-ticket` came out as a wider panel with
 switch rows instead of chips; the idea (outcome first, a few toggles, "More options") is intact. Text in renders is
 not authoritative (the build sets the copy).
@@ -41,7 +39,7 @@ not authoritative (the build sets the copy).
 - Everything is on one screen at once, in small type; the dialog is dense and the options that matter most (how many
   sheets, which side) are never stated in words.
 
-## How pdfcraft does it (E:\Dev\pdfcraft\crates\ui-egui\src\print_ui.rs)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: crates/ui-egui/src/print_ui.rs)
 - The same shape as Acrobat in egui: one window, left options, right preview with "‹ sheet ›" paging.
 - Options: Printer with **Properties...** (the driver's own settings) and "Save as PDF", Copies, Collate, Print in
   grayscale, Two-sided (Off / long edge / short edge), Paper, Pages to Print (All, Current, Pages, Selected pages,

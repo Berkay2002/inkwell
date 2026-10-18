@@ -126,7 +126,7 @@ await shot("apply");
 await ev(`(() => { window.__apply = null; const api = window.__inkwell.redactApi; const real = api.apply; api.apply = (...a) => (window.__apply ? Promise.resolve(window.__apply) : real(...a)); return true })()`);
 await ev(`window.__apply = { status: "refused", leaks: [
   { needle: "alex.johnson@example.com", place: "page 4, hidden text", critical: true },
-  { needle: "811218-9876", place: "the document's metadata", critical: false },
+  { needle: "121212-1212", place: "the document's metadata", critical: false },
   { needle: "alex.johnson@example.com", place: "bookmark \\"Contact\\"", critical: false },
   { needle: "+46 70 123 45 67", place: "page 2, a form field", critical: true } ] }`);
 await click(".rd-actions .rd-btn.primary", "Redact");

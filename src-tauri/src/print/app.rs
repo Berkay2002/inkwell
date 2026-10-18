@@ -27,6 +27,10 @@ pub struct Printers {
 }
 
 fn print_dir() -> Option<PathBuf> {
+    // Debug builds only: a release build always asks where to save.
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     std::env::var_os("INKWELL_PRINT_DIR").filter(|d| !d.is_empty()).map(PathBuf::from)
 }
 

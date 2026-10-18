@@ -8,9 +8,7 @@ handles and the small property popover). The sheet is `--cols 2`: one row per va
 
 ## Verdict
 
-2026-10-11: a-rail. The user did not pick between the variants; they handed the design call to the orchestrator
-(inkwell) in these words: "choose what is both standard and what pdfcraft and acrobat has, but also some hint of
-uniqueness". The pick, a-rail, is **inkwell's, adopted by the user** by that delegation, not the user's own. It takes
+2026-10-11: a-rail, chosen as what is both standard and what pdfcraft and Acrobat have, with a hint of uniqueness. It takes
 Acrobat's rail (search, filter, composer, grouped by page, replies) and pdfcraft's floating vertical tool strip, with
 the pale-blue selection frame and small property popover as its own touch. b-bar and c-margin are dropped.
 Approved: `design/approved/comments.png` (a-rail-1-review), `comments-2.png` (a-rail-2-select).
@@ -25,7 +23,7 @@ the page area. Screens of the build: `docs/screens/comments/`.
   "Add a comment". Markup tools are also on the text-selection context menu. The capture is dark.
 - The sticky note shows as the small yellow note icon at its rect.
 
-## How pdfcraft does it (E:\Dev\pdfcraft\docs\images\pdfcraft-viewer.png)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: docs/images/pdfcraft-viewer.png)
 - A **floating vertical tool strip** at the left of the page: select, hand, note, highlight, pen, eraser.
 - A right-rail **Comments** panel (count in the title), grouped by page ("Page 1 .... 2"): each card a round type
   icon, author, "Type . date", contents, and replies indented under a thin left rule.

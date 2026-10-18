@@ -182,7 +182,7 @@ Tools > Action Wizard, or "Action Wizard" in the command palette. One centred sh
   a run is cancelled while it waits (the footer's Cancel is behind it).
 
 Screens: `docs/screens/batch/` (light and dark), taken by `scripts/batch-shots.mjs` in headless Chrome against a mocked
-invoke layer, so they show the interface, not the engine. The runtime pass against the real exe is still to do on the PC.
+invoke layer, so they show the interface, not the engine. The runtime pass against the real exe is still to do on Windows.
 
 ## Gaps
 - No scheduling, no watch folders. The two exports have no page range (an export of some pages is Convert's job); Compress,

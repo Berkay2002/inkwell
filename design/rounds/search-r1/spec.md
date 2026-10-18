@@ -8,12 +8,9 @@ its options and the results) and `-2-files` (search across a folder: results gro
 
 ## Verdict
 
-2026-10-11: **a-rail, with one touch from b-side.** Picked by the orchestrator session (inkwell) in a cross-session
-message, quoted here: "search-r1 verdict: a-rail. One touch from b-side: show Match case and Whole words as small
-Aa / ab toggle chips right in the find box, and keep the rest under '...'." Recorded as the orchestrator's pick; the
-user's own confirmation is not in this record.
-The image tool was at its usage limit (render.mjs: "Image generation failed because the usage limit was reached", all
-six renders), so there are no renders and no sheet; the pick was made from this text. b-side and c-bar are dropped.
+2026-10-11: **a-rail, with one touch from b-side:** show Match case and Whole words as small Aa / ab toggle chips
+right in the find box, and keep the rest under '...'.
+None of the six renders was made, so there is no sheet; the pick was made from this text. b-side and c-bar are dropped.
 Built: Acrobat's floating find box on the page with the Aa and ab chips, Ignore accents and the include options under
 "...", and Advanced search as the right rail "Search" in the shared dock (pdfcraft's context list). No
 `design/approved/search.png` exists (no render); the build's screens are in `docs/screens/search/`.
@@ -26,7 +23,7 @@ Built: Acrobat's floating find box on the page with the Aa and ab chips, Ignore 
   word or phrase, more options (whole words, case, proximity, stemming, bookmarks, comments), and a results list
   grouped by file with a count and context snippets; double-click opens the file at the hit.
 
-## How pdfcraft does it (E:\Dev\pdfcraft\crates\ui-egui\src\search_ui.rs, canvas.rs)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: crates/ui-egui/src/search_ui.rs, canvas.rs)
 - A find bar with a "Find options" button (Whole words only, Case-sensitive) and, from Edit > Advanced search, a side
   panel: "What word or phrase would you like to search for?", the two check boxes, a count "12 instances", then
   every match as a button with its context ("...text before **match** text after..."), grouped under "Page 3"

@@ -1,8 +1,7 @@
 # Home r1: the desk
 
 The start screen people see every time they open Inkwell (a Windows PDF app, not a marketing page). The previous
-attempt is the worktree-landing build (docs/screens/landing/ on that branch), judged by the user: "really generic
-and screams AI". My reading of why: an indigo gradient app icon, a dashed upload box with an upload-arrow icon, a
+attempt (an earlier build, docs/screens/landing/ on its branch) read as generic and AI-made. Why: an indigo gradient app icon, a dashed upload box with an upload-arrow icon, a
 grid of equal white cards with rounded corners, pill buttons, a faint purple gradient wash. Every piece is the
 default SaaS template; nothing says "paper" or "ink". Kept from it: the facts it shows (recent files with a first
 page, name, folder, pages, size, time; pinning; open by drop or Ctrl+O; Ctrl+K commands). Reopened: the whole look.
@@ -27,7 +26,7 @@ darkens the ground where it will land. Reduced motion: everything settled, hover
 Must not appear: cards, tiles, equal boxes, dashed drop zones, upload/cloud icons, sparkles, gradients, glow, glass,
 purple or indigo, pill buttons, app-icon squircles, people, hands, robots, laptop frames, browser chrome.
 
-Verdict (2026-10-10): rejected. User: "This is not a website, its a desktop app, take reference from other similar apps, but I want not blocky/edgy components and corners etc, it should be rounded and smooth, same for assistant UI". Next round: real desktop-app chrome modelled on comparable PDF apps, rounded and smooth components.
+Verdict (2026-10-10): rejected: it read as a website, not a desktop app; take reference from similar apps, with rounded, smooth components and corners (the assistant UI too). Next round: real desktop-app chrome modelled on comparable PDF apps, rounded and smooth components.
 
 ## Shared
 

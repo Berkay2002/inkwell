@@ -89,7 +89,7 @@ fn find_patterns_on_sample() {
 #[test]
 fn find_across_lines_and_hyphenation() {
     let content = b"BT /F1 12 Tf 72 700 Td (The account is confi-) Tj ET\n\
-BT /F1 12 Tf 72 686 Td (dential: IBAN SE45 5000 0000 0583 9825 7466, pnr 811218-9876, ssn 123-45-) Tj ET\n\
+BT /F1 12 Tf 72 686 Td (dential: IBAN SE45 5000 0000 0583 9825 7466, pnr 121212-1212, ssn 123-45-) Tj ET\n\
 BT /F1 12 Tf 72 672 Td (6789 and the end of the line.) Tj ET";
     let bytes = pdf(
         &[
@@ -112,7 +112,7 @@ BT /F1 12 Tf 72 672 Td (6789 and the end of the line.) Tj ET";
     assert_eq!(h[0].text, "123-45-6789");
     assert_eq!(h[0].quads.len(), 2);
     assert_eq!(hits(&doc, Pattern::Iban), ["SE45 5000 0000 0583 9825 7466"]);
-    assert_eq!(hits(&doc, Pattern::Personnummer), ["811218-9876"]);
+    assert_eq!(hits(&doc, Pattern::Personnummer), ["121212-1212"]);
 
     // Marking the split hit and applying removes both halves.
     let mut doc = doc;

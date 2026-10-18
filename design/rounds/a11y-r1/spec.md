@@ -51,8 +51,7 @@ findings as bullets and no page links. Autotag and reading order are planned the
 
 ## Verdict
 
-2026-10-11, inkwell (the user delegated design picks to inkwell; the image tool was at its usage limit, so no render was
-judged: the pick is from this spec's text): **a-rail**, plus two things taken from b-todo: (1) the predicted outcome on the
+2026-10-11 (no render was judged: the pick is from this spec's text): **a-rail**, plus two things taken from b-todo: (1) the predicted outcome on the
 "Fix all safe issues" button: "Fix 3 issues · after this 12 of 15 pass"; (2) under a failed Figures alternate text finding,
 an inline alt-text field with the figure's thumbnail, so no dialog is needed. c-onpage is dropped. Nothing was rendered;
 no approved image exists for this surface, the build follows the spec text and Inkwell's rails.

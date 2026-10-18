@@ -15,9 +15,8 @@ the outcome said in a sentence.
 
 ## Verdict
 
-**a-tabs**, picked by inkwell (2026-10-11) under the user's standing delegation ("choose what is both standard and
-what pdfcraft and acrobat has, but also some hint of uniqueness"). The images could not be rendered (image tool at its
-usage limit), so the pick is made on this spec text. From b-list, one thing: a small state line at the top of the rail
+**a-tabs** (2026-10-11), as what is both standard and what pdfcraft and Acrobat have, with a hint of uniqueness. The
+images were not rendered, so the pick is made on this spec text. From b-list, one thing: a small state line at the top of the rail
 showing which marks the document already has ("Has: header & footer · watermark"), each with Update and Remove, so
 existing marks are found without opening each tab.
 
@@ -34,7 +33,7 @@ existing marks are found without opening each tab.
 - Bates numbering is a dialog with an "Add files" list, then the same six slots, with "Insert Bates number" opening
   "Number of digits", "Start number", "Prefix" and "Suffix".
 
-## How pdfcraft does it (E:\Dev\pdfcraft\crates\ui-egui\src\marks_ui.rs)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: crates/ui-egui/src/marks_ui.rs)
 - One window "Page marks" with a row of four kinds; the settings of the picked kind below: for header and footer six
   text fields in a two-row grid, a font family, size, colour; for watermark text, size, opacity, rotation and a
   behind or in front switch; a page selection field; "Apply" and "Remove" buttons. The state of the document is a

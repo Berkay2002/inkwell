@@ -15,8 +15,8 @@ waits for everything); it opens from the Tools menu and the command palette.
 
 ## Verdict
 
-2026-10-11, inkwell: **a-stage.** "It is Acrobat's standard layout: side by side, with the change list on the right." b-rail and
-c-tape were never rendered (codex image limit) and are dropped. Kept as our touches: the dashed connector lines between
+2026-10-11: **a-stage.** "It is Acrobat's standard layout: side by side, with the change list on the right." b-rail and
+c-tape were never rendered  and are dropped. Kept as our touches: the dashed connector lines between
 matching changes, the kind chips that work as filters, and the linked page-thumbnail strips. Two rules: (1) Inkwell's real
 navbar (Read / Organize and the rest) stays on screen; the render's Acrobat-style top bar (View / Annotate / Edit / Fill &
 Sign) is not ours. (2) The setup screen is built from a-stage-1. Approved: approved/compare.png (a-stage-1-setup),
@@ -47,7 +47,7 @@ and structure, not observed behaviour.
   files, and a warning before a long comparison that offers page range or text only.
 - Not seen: progress and cancel, the saved report, timings.
 
-## How pdfcraft does it (E:\Dev\pdfcraft: crates/compare, crates/ui-egui/src/compare_ui.rs)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: crates/compare, crates/ui-egui/src/compare_ui.rs)
 
 - "Compare files…" opens a small **dialog** with one dropdown: the older document, chosen among the documents already
   open. The comparison is word-by-word (Myers).

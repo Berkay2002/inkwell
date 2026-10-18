@@ -14,8 +14,7 @@ confirm; show what a file restricts and never silently strip owner restrictions.
 
 ## Verdict
 
-(pending: inkwell picks, under the user's standing delegation of 2026-10-11: "choose what is both standard and what
-pdfcraft and acrobat has, but also some hint of uniqueness".)
+(pending: what is both standard and what pdfcraft and Acrobat have, with a hint of uniqueness.)
 
 ## How Acrobat Pro does it (study 11-protect; see docs/study/11-protect.md and docs/study/screens/11-protect/)
 - All tools > Protect a PDF opens the Protect panel; "Protect using password" asks "Viewing" or "Editing", then the
@@ -31,7 +30,7 @@ pdfcraft and acrobat has, but also some hint of uniqueness".)
   Security" removes it, asking for the permissions password when one is set.
 - It is a modal in front of the document, and the options are many and unordered.
 
-## How pdfcraft does it (E:\Dev\pdfcraft\crates\ui-egui\src\protect.rs)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: crates/ui-egui/src/protect.rs)
 - A small "Protect Using Password" dialog: "Requires user to enter a password for: Viewing / Editing", a password
   field with a Weak / Medium / Strong label, a confirm field, "Advanced Options" folding out Compatibility (256-bit
   AES ... 40-bit RC4), what to encrypt, and, for Editing, Printing allowed, Changes allowed, copying and

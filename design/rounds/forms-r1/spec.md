@@ -7,9 +7,8 @@ One app window per image at 1536x1024, two images per variant: `-1-fill` (fillin
 
 ## Verdict
 
-2026-10-11: a-rail. Picked by the orchestrator (inkwell, now berka-43) under the user's standing rule "choose what is
-both standard and what pdfcraft and acrobat has, but also some hint of uniqueness", so it is **inkwell's pick, adopted by
-the user** by that delegation. Reason: Acrobat puts Prepare Form's field list and properties in a right pane, and a-rail
+2026-10-11: a-rail, chosen as what is both standard and what pdfcraft and Acrobat have, with a hint of uniqueness.
+Reason: Acrobat puts Prepare Form's field list and properties in a right pane, and a-rail
 keeps that placement, with pdfcraft's floating field strip and properties in the same rail instead of a modal. b-bar and
 c-page are dropped.
 Approved: `design/approved/forms.png` (a-rail-1-fill), `forms-2.png` (a-rail-2-author).
@@ -26,7 +25,7 @@ signature field, as in Acrobat.
 - Properties: double-click a field opens a modal "Text Field Properties" with tabs General, Appearance, Position,
   Options, Actions, Format, Validate, Calculate.
 
-## How pdfcraft does it (E:\Dev\pdfcraft\docs\images\pdfcraft-forms.png, crates/ui-egui/src/prepare.rs)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: docs/images/pdfcraft-forms.png, crates/ui-egui/src/prepare.rs)
 - A blue notice bar above the page: "This document contains 13 interactive form fields." with a "Hide field
   highlights" button. A floating vertical tool strip at the left. A right "Fields 13" rail grouped by page with a type
   icon, name and current value per row. Prepare form adds the same nine tools, name tags on the page, Field Properties.

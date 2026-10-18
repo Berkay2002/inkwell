@@ -7,11 +7,13 @@ until a code-signing certificate is added (Tauri's `bundle.windows.certificateTh
 ## Build
 
 ```
-pwsh -File E:\Dev\inkwell\.claude\slot.ps1 -Name <you> -Command "$env:LIBCLANG_PATH='E:\Tools\LLVM\bin'; $env:CARGO_BUILD_JOBS='4'; Set-Location <worktree>; pnpm tauri build"
+$env:LIBCLANG_PATH = '<LLVM>\bin'   # LLVM's bin folder (libclang)
+pnpm tauri build
 ```
 
-Output: `src-tauri/target/release/bundle/msi/Inkwell_<version>_x64_en-US.msi`. `.claude/release-build.ps1` still builds only
-the exe (`--no-bundle`).
+Run it from the repo root. Output: `src-tauri/target/release/bundle/msi/Inkwell_<version>_x64_en-US.msi`.
+
+Before a release, run `node third_party/dependency-licenses.mjs` to regenerate `third_party/RUST-AND-NPM-DEPENDENCIES.txt`.
 
 - `bundle.targets` is `["msi"]`; NSIS is left out (it adds nothing the MSI lacks, and an MSI is what IT tooling expects).
 - WiX 3.14 comes from `%LOCALAPPDATA%\tauri\WixTools314` (the CLI downloads it on first use).
@@ -30,7 +32,7 @@ the exe (`--no-bundle`).
 | Upgrade | A newer version removes the old one and installs in the same folder (MajorUpgrade, same-version reinstall allowed). An older MSI refuses with a message. User data and the desktop-shortcut choice survive. |
 | Start menu | `Inkwell` shortcut directly in Programs (no folder) |
 | Desktop shortcut | Off by default: `msiexec /i Inkwell.msi DESKTOPSHORTCUT=1`. An upgrade keeps the choice. |
-| Licences | `licenses\` under the install folder (THIRD-PARTY-NOTICES, the fonts' OFL texts, pdfcraft MIT/Apache/NOTICE) |
+| Licences | `licenses\` under the install folder (LICENSE-AGPL-3.0.txt, THIRD-PARTY-NOTICES, RUST-AND-NPM-DEPENDENCIES, `mupdf\<lib>` licences, the fonts' OFL texts, pdfcraft MIT/Apache/NOTICE); the installer shows the AGPL as its licence page |
 | WebView2 | `embedBootstrapper`, silent: the 1.7 MB evergreen bootstrapper is inside the MSI and runs only when no WebView2 runtime is installed (never on Windows 11, which ships it). It needs the network at that moment; the rest of the install does not. The 130 MB offline installer is not worth it for an app that already needs Windows 11's runtime. |
 | Silent install | `msiexec /i Inkwell.msi /qn` (add `DESKTOPSHORTCUT=1`, `INSTALLDIR="D:\Apps\Inkwell"`) |
 | Uninstall | Settings > Apps, or `msiexec /x Inkwell.msi` |

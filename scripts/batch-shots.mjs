@@ -1,6 +1,6 @@
 // Screens of the Action Wizard without Windows: the frontend in headless Chrome against a mocked invoke layer
 // (the batch_* commands answer from fixtures below; nothing touches a disk). Light and dark go to docs/screens/batch.
-// What this does NOT cover is the real engine: run scripts/pdfa-shots.mjs-style CDP against the debug exe on the PC for that.
+// What this does NOT cover is the real engine: run scripts/pdfa-shots.mjs-style CDP against the debug exe on Windows for that.
 //   pnpm exec vite --port 1431 --strictPort &
 //   node scripts/batch-shots.mjs docs/screens/batch [port=1431]
 import { spawn } from "node:child_process";

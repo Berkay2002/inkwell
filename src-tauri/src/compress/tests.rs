@@ -135,7 +135,7 @@ fn text_only(path: &Path) {
 
 // ---------------------------------------------------------------- tests
 
-/// The comparison the brief asks for. Acrobat's outputs come from the study; both sides are measured with
+/// The comparison the feature doc asks for. Acrobat's outputs come from the study; both sides are measured with
 /// the same render-diff against `opt-in-01.pdf`, so the numbers are comparable.
 /// Prints the table (`--nocapture`) and checks each Inkwell preset against its Acrobat counterpart.
 #[test]

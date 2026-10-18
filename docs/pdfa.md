@@ -17,7 +17,7 @@ operator. A document that passes here can still fail a strict validator, and one
   report says "ISO 19005" instead of inventing one. Treat the rule name and hint as the information, the clause as a
   pointer.
 - veraPDF is not shipped and not a dependency. It may be used in tests only if it is installed locally
-  (`E:\Tools`), never downloaded into the app.
+  (a local tools folder), never downloaded into the app.
 - "Conforms" in the UI means *no rule that Inkwell checks fails*. The report states this under the verdict, and the
   HTML and PDF reports repeat it.
 

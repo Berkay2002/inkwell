@@ -28,9 +28,9 @@ fades the outlines in 120 ms. Reduced motion: no slide or fade, the settled stat
 Must not appear: git branch graphs, commit hashes, code diff colours (red/green), sparkle icons, purple, gradients,
 glow, avatars, emoji, sharp corners, browser chrome.
 
-Verdict (2026-10-10): the user delegated the pick to the standard pattern: "take reference from other similar apps
+Verdict (2026-10-10): the standard pattern, per the brief: "take reference from other similar apps
 from Adobe, Google and Microsoft and Github/Gitlab etc. There are alot of ways of showing diffs and so on, just take
-the most standard way of doing it..." Adopted (inkwell's recommendation): a-timeline as the panel
+the most standard way of doing it..." Adopted: a-timeline as the panel
 (approved/history.png), "Compare" opens b-compare full-window (approved/history-2.png) with GitHub's image-diff modes
 "2-up | Swipe | Onion skin" (c's slider = Swipe). Conventions, no new ones:
 - Panel = Google Docs / Word version history: versions by day (Today, Yesterday, date), named versions on top plus an

@@ -8,8 +8,7 @@ One app window per image at 1536x1024. Each variant has one image (`-1-links`); 
 
 ## Verdict
 
-2026-10-11: **a-tabs, with two touches.** The user delegated design picks to the orchestrator; the pick below is the
-orchestrator's ("inkwell [7da248]"), adopted by the user through that delegation, not the user's own. In its words:
+2026-10-11: **a-tabs, with two touches.**
 "a-tabs. Keep building it, with two touches. 1. From b-canvas: Acrobat keeps bookmarks in the left navigation pane, so
 make the left sidebar outline editable as well. Rename in place, drag to reorder or nest, and a right-click menu for
 Add, Delete and Set destination. Both views share the nav store and each change is one undo step. 2. From c-ledger:
@@ -21,8 +20,7 @@ the editable outline in the left sidebar while Edit is open (`BookmarkTree`, one
 filter on the bookmark tree and a document-wide "Show problems" check in the Links tab (`links_audit`). Build notes in
 docs/bookmarks-links.md.
 
-Render notes: written 2026-10-11 by the worker building the surface. Nothing was rendered: the image tool reported its
-usage limit on all three first images (2026-10-11), so there is no sheet. The spec stands as text and the most
+Render notes: nothing was rendered (2026-10-11), so there is no sheet. The spec stands as text and the most
 standard variant (a-tabs) is built; b-canvas and c-ledger are described only. Text in renders is not authoritative
 (the build sets the copy).
 
@@ -46,7 +44,7 @@ its resources and marked as such in the study.
 - Every setting sits in modal dialogs with many tabs; no single place shows the document's bookmarks and the page's
   links together.
 
-## How pdfcraft does it (E:\Dev\pdfcraft: bookmark and link code only; ideas, no code copied)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: bookmark and link code only; ideas, no code copied)
 - Bookmarks: add under a parent, rename, delete, move (refuses a move into itself), set open/closed, set page "Set to
   current page (n)", indent and outdent, and build from the structure tree.
 - Links: model Page, Uri or Other (named destinations and actions are kept as "Other"); minimum size 2 pt; links

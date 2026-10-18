@@ -1,8 +1,7 @@
 # Home r2: a desktop app, rounded and smooth
 
-Round 1 (desk / contents / blotter) was rejected: "This is not a website, its a desktop app, take reference from other
-similar apps, but I want not blocky/edgy components and corners etc, it should be rounded and smooth, same for
-assistant UI". R1 composed editorial web pages (huge headline, no app chrome, sharp hairline rules). R2 shows a real
+Round 1 (desk / contents / blotter) was rejected: it read as a website, not a desktop app; the ask was to take reference
+from similar apps, with rounded, smooth components and corners (the assistant UI too). R1 composed editorial web pages (huge headline, no app chrome, sharp hairline rules). R2 shows a real
 Windows 11 desktop application: title bar with tabs, toolbar or sidebar, and soft rounded surfaces (8-12 px corners,
 rounded list rows and buttons, soft shadows), modelled on comparable PDF desktop apps (PDF Expert, PDFgear, UPDF,
 Foxit's home) and polished native apps (Windows 11 Files/Photos/Notepad, Arc, Linear desktop). Kept from r1: the

@@ -113,8 +113,8 @@ await ev(`(() => {
 await waitCount(1, "the highlight");
 await tool("Underline");
 await ev(`(() => {
-  const line = [...document.querySelectorAll('.viewer .page[data-page="1"] .textlayer > div')].find((d) => d.textContent.includes("811218-9876"));
-  const t = line.firstChild, i = t.textContent.indexOf("811218");
+  const line = [...document.querySelectorAll('.viewer .page[data-page="1"] .textlayer > div')].find((d) => d.textContent.includes("121212-1212"));
+  const t = line.firstChild, i = t.textContent.indexOf("121212");
   const r = document.createRange(); r.setStart(t, i); r.setEnd(t, i + 11);
   const s = getSelection(); s.removeAllRanges(); s.addRange(r);
   window.dispatchEvent(new PointerEvent("pointerup"));

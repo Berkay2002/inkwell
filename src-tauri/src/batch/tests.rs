@@ -774,7 +774,7 @@ fn properties_are_set_and_removed() {
     let f = sample(&d, "a.pdf", 1);
     let set = Step::SetProperties(PropertiesStep {
         title: Some("Årsrapport".into()),
-        author: Some("Berkay".into()),
+        author: Some("Alex".into()),
         subject: Some("S".into()),
         keywords: Some("k1, k2".into()),
         ..Default::default()
@@ -786,7 +786,7 @@ fn properties_are_set_and_removed() {
         let i = doc.trailer().unwrap().get_dict("Info").unwrap().unwrap();
         i.get_dict(key).unwrap().map(|v| v.as_string().unwrap_or_default())
     };
-    assert_eq!(info(&out, "Author").as_deref(), Some("Berkay"));
+    assert_eq!(info(&out, "Author").as_deref(), Some("Alex"));
     assert_eq!(info(&out, "Keywords").as_deref(), Some("k1, k2"));
     assert!(info(&out, "Title").is_some());
     let doc = Document::open(out.to_string_lossy().as_ref()).unwrap();
@@ -1005,7 +1005,7 @@ fn form_pdf() -> Vec<u8> {
         "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_string(),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [5 0 R] /Resources << /Font << /Helv 3 0 R >> >> >>".to_string(),
-        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Berkay) /DA (/Helv 12 Tf 0 g) /Rect [72 700 272 720] /P 4 0 R /F 4 >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Alex) /DA (/Helv 12 Tf 0 g) /Rect [72 700 272 720] /P 4 0 R /F 4 >>".to_string(),
     ];
     assemble(&objs, "")
 }
@@ -1022,7 +1022,7 @@ fn flatten_turns_form_fields_into_page_content() {
     let out = PathBuf::from(&r.files[0].outputs[0].path);
     let flat = PdfDocument::open(out.to_string_lossy().as_ref()).unwrap();
     assert_eq!(crate::forms::list(&flat).unwrap().fields.len(), 0);
-    assert!(text_of(&out).contains("Berkay"), "the value is page content now: {:?}", text_of(&out));
+    assert!(text_of(&out).contains("Alex"), "the value is page content now: {:?}", text_of(&out));
 
     // No fields: nothing to do.
     let plain = sample(&d, "plain.pdf", 1);
@@ -1202,7 +1202,7 @@ fn rich_pdf() -> Vec<u8> {
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
         "<< /Author (author@example.org) /Title (Rich) >>".to_string(),
         format!("<< /Type /XObject /Subtype /Image /Width 64 /Height 64 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{hex}>\nendstream", hex.len() + 1),
-        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Berkay) /DA (/Helv 12 Tf 0 g) /Rect [72 400 272 420] /P 4 0 R /F 4 >>".to_string(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /V (Alex) /DA (/Helv 12 Tf 0 g) /Rect [72 400 272 420] /P 4 0 R /F 4 >>".to_string(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
     ];
     assemble(&objs, "/Info 6 0 R")

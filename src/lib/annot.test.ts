@@ -26,10 +26,10 @@ describe("annot store", () => {
     inv.mockImplementation((cmd: string) =>
       Promise.resolve(cmd === "annot_add" ? { state, xref: 7 } : [a({ xref: 7, contents: "hi" })]),
     );
-    useAnnot.setState({ author: "Berkay" });
+    useAnnot.setState({ author: "Alex" });
     const x = await useAnnot.getState().add(1, 0, { type: "note", at: [5, 5], text: "hi" });
     expect(x).toBe(7);
-    expect(inv).toHaveBeenCalledWith("annot_add", { doc: 1, page: 0, what: { type: "note", at: [5, 5], text: "hi" }, style: null, author: "Berkay" });
+    expect(inv).toHaveBeenCalledWith("annot_add", { doc: 1, page: 0, what: { type: "note", at: [5, 5], text: "hi" }, style: null, author: "Alex" });
     expect(applyState).toHaveBeenCalledWith(1, state);
     expect(useAnnot.getState().get(1).selected).toEqual({ page: 0, xref: 7 });
   });

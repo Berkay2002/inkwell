@@ -36,7 +36,7 @@ Outcome before you run it, one sheet, one undo step for every edit (labels, tran
 attachment never runs it: Save out, or open a PDF attachment in a new tab.
 
 ## Verdict
-2026-10-11: **a-sheet**, picked by inkwell (orchestrator, delegated by the user) with two touches from Acrobat:
+2026-10-11: **a-sheet**, with two touches from Acrobat:
 1. Each file row has a small first-page thumbnail; expanding the row (or clicking "pages") shows page thumbnails that
    toggle on click and update the range field. The range text stays the source of truth.
 2. Files dragged from Explorer onto the sheet are added (same token route as drop-to-open, paths.rs).

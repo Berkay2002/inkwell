@@ -1,4 +1,7 @@
 import { type KeyboardEvent, useMemo, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { join, resourceDir } from "@tauri-apps/api/path";
+import { message } from "@tauri-apps/plugin-dialog";
 import { ocrChooseTesseract, ocrClearTesseract } from "../lib/api";
 import { useTools } from "../lib/toolsStore";
 import { openDialog } from "../lib/commands";
@@ -18,6 +21,21 @@ import { MenuButton, type MenuEntry } from "./Menu";
 import "./allTools.css";
 
 const open = (path: string) => void useStore.getState().openPath(path);
+
+/** The AGPL's "Appropriate Legal Notices" (section 5d): copyright, no warranty, the licence and where the source is. */
+async function showAbout() {
+  const [version, licenses] = await Promise.all([
+    getVersion().catch(() => ""),
+    resourceDir().then((d) => join(d, "licenses")).catch(() => "the licenses folder where Inkwell is installed"),
+  ]);
+  await message(
+    `Inkwell ${version}\nCopyright (C) 2026 Berkay\n\n` +
+      "This program comes with ABSOLUTELY NO WARRANTY. It is free software: you can redistribute it and/or modify it " +
+      "under the terms of the GNU Affero General Public License, version 3 or (at your option) any later version.\n\n" +
+      `Source code: https://github.com/Berkay2002/inkwell\nLicence and third-party notices: ${licenses}`,
+    { title: "About Inkwell", kind: "info" },
+  );
+}
 const CONTINUE = 3;
 const RECENT_ROWS = 8;
 
@@ -88,6 +106,8 @@ function Landing({ over, onSeeAll }: { over: boolean; onSeeAll: () => void }) {
     "sep",
     { label: "Command palette", hint: "Ctrl+K", onSelect: () => useStore.getState().setUi({ paletteOpen: true }) },
     { label: "Clear recent files", onSelect: () => useRecents.getState().clear() },
+    "sep",
+    { label: "About Inkwell", onSelect: () => void showAbout() },
   ];
 
   // arrows move the selection, Enter opens it, P pins, Delete removes

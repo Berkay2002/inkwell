@@ -1,6 +1,6 @@
 # Redact r2: the same three ideas, legible
 
-What r1 got wrong (the user, 2026-10-10): "The images are really bad, cant give my verdict." Each r1 render packed two
+What r1 got wrong (2026-10-10): the images could not be judged. Each r1 render packed two
 app windows onto one board, so each screen was about 1000 px wide and its UI text was mushy and unreadable. r2 keeps
 r1's three ideas (a-panel, b-margin, c-sweep) and everything decided in redact-r1/spec.md (idea, palette, marks,
 copy, motion, must-nots). It changes only the framing: one app window per image filling 1536x1024, two images per
@@ -15,10 +15,8 @@ Known drift, not worth another render: a-panel's result puts the panel on the le
 the build keeps one side). b-margin's result chrome differs a little (tab row, toolbar). The review has 4 marks but
 the counts say 7 (the copy is set by the build).
 
-Verdict (2026-10-11): c-sweep, plus a-panel's manual area and page tools, docked on the right. The user, after seeing
-Acrobat's Redact panel, Comments-pane marks, Search window and _Redacted output: "Ok do your recommendation". The
-recommendation (inkwell's, adopted by the user): "c-sweep, plus a-panel's manual area and page tools, docked on the
-right like b-rail". Build: one right rail like the assistant and Tools rails, with the manual tools at its top, then find
+Verdict (2026-10-11): c-sweep, plus a-panel's manual area and page tools, docked on the right. Chosen after comparing with
+Acrobat's Redact panel, Comments-pane marks, Search window and _Redacted output. Build: one right rail like the assistant and Tools rails, with the manual tools at its top, then find
 and pattern pills with counts, hits as page snippets grouped by page, the marks list, sanitize inline (no modal), and the
 result card. The app's colour tokens, not the render's.
 
@@ -37,7 +35,7 @@ Window: slim custom title bar with the ink-drop mark and "Inkwell", a "Home" tab
 Document: a real residential lease agreement on white paper with a soft shadow, page 2, heading "2. PARTIES",
 readable contract sentences: "This Residential Lease Agreement is made on 1 October 2026 between Maple Property
 Management AB (the Landlord) and the Tenant named below." Then a "Tenant" block: "Name: Alex Johnson",
-"Personnummer: 811218-9876", "E-mail: alex.johnson@example.com", "Phone: +46 70 123 45 67", then "2.3 Rent" with a
+"Personnummer: 121212-1212", "E-mail: alex.johnson@example.com", "Phone: +46 70 123 45 67", then "2.3 Rent" with a
 sentence about rent of 12 400 SEK per month due on the 25th.
 Marks before they are applied: a dark ink hatch over the text, a translucent charcoal fill with a thin dashed charcoal
 outline and rounded corners, the text still faintly readable under it. Applied redactions: solid charcoal boxes with
@@ -60,7 +58,7 @@ The page is large in the main area, right of the panel.
 ref: ../../approved/organize.png
 The personnummer, e-mail and phone on the page are under hatched marks; the mouse pointer is dragging a new dashed box
 over the name "Alex Johnson". In the panel, below the patterns, a "Marks" list of quiet rows, each with the marked
-text and a small round "x": "811218-9876", "alex.johnson@example.com", "+46 70 123 45 67", "Area on page 4", "Page 9".
+text and a small round "x": "121212-1212", "alex.johnson@example.com", "+46 70 123 45 67", "Area on page 4", "Page 9".
 
 ## a-panel-2-result
 edit: a-panel-1-review.png
@@ -83,7 +81,7 @@ pattern".
 ## b-margin-1-review
 ref: ../../approved/organize.png
 Each hatched mark (name, personnummer, e-mail, phone) has a thin charcoal leader line to a note in the right margin:
-"Alex Johnson · Name  x", "811218-9876 · Personnummer  x", "alex.johnson@example.com · E-mail  x",
+"Alex Johnson · Name  x", "121212-1212 · Personnummer  x", "alex.johnson@example.com · E-mail  x",
 "+46 70 123 45 67 · Phone  x". At the bottom right a rounded ink-blue pill "Apply 7 marks".
 
 ## b-margin-2-result

@@ -92,7 +92,7 @@ The same sheets as the preview and the printer, written as a vector file:
 
 Printers come from `EnumPrinters`; paper sizes, trays, duplex, colour and copies from `DeviceCapabilitiesW`.
 Print-to-file printers (Microsoft Print to PDF, the XPS writer) ask where to write through the save dialog (a
-path token, `paths.rs`); `INKWELL_PRINT_DIR` writes them into that folder without asking, for automation.
+path token, `paths.rs`); `INKWELL_PRINT_DIR` (debug builds only) writes them into that folder without asking, for automation.
 A document that forbids printing (`Permission::PRINT`) is refused with `not-permitted`.
 
 ## Tests

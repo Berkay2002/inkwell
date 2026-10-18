@@ -125,7 +125,7 @@ fn appearances_draw_on_the_page() {
 #[test]
 fn the_default_author_is_the_login_name() {
     let env = |pairs: &'static [(&str, &str)]| move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_owned());
-    assert_eq!(os_user(env(&[("USERNAME", " berka "), ("USER", "x")])), "berka");
+    assert_eq!(os_user(env(&[("USERNAME", " alex "), ("USER", "x")])), "alex");
     assert_eq!(os_user(env(&[("USERNAME", "  "), ("USER", "bob")])), "bob");
     assert_eq!(os_user(env(&[])), "");
 }

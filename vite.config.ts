@@ -29,7 +29,7 @@ export default defineConfig(() => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-  // Worker worktrees live under .claude/; their tests are not this checkout's.
+  // .claude/ holds local tooling; not part of the test suite
   test: {
     exclude: ["**/node_modules/**", "**/dist/**", ".claude/**"],
   },

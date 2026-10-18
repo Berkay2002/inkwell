@@ -19,7 +19,7 @@ const pages = [
     text(64, 674, 12, "Management AB (the Landlord) and the Tenant named below."),
     text(64, 630, 14, "Tenant", true),
     text(64, 600, 12, "Name:", true) + text(190, 600, 12, "Alex Johnson"),
-    text(64, 578, 12, "Personnummer:", true) + text(190, 578, 12, "811218-9876"),
+    text(64, 578, 12, "Personnummer:", true) + text(190, 578, 12, "121212-1212"),
     text(64, 556, 12, "E-mail:", true) + text(190, 556, 12, "alex.johnson@example.com"),
     text(64, 534, 12, "Phone:", true) + text(190, 534, 12, "+46 70 123 45 67"),
     text(64, 480, 16, "2.3 Rent", true),

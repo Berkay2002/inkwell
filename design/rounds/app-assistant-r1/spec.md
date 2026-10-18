@@ -1,8 +1,7 @@
 # App-assistant r1: the margin
 
-The AI Assistant side panel next to an open PDF. The previous attempt is the worktree-assistant build
-(docs/screens/assistant/ on that branch), judged by the user: "very generic and bad and screams AI". My reading of
-why: a sparkle icon, a chat-bubble column with a lilac user bubble, a list of grey citation rows in rounded boxes
+The AI Assistant side panel next to an open PDF. The previous attempt (an earlier build, docs/screens/assistant/ on its
+branch) read as generic and AI-made. Why: a sparkle icon, a chat-bubble column with a lilac user bubble, a list of grey citation rows in rounded boxes
 with purple number pills, pill-shaped suggestion chips, a model and effort dropdown pair in the header, a filled
 "Send" button. It is every AI chat sidebar. Kept: what it does (ask about the document, summarise, explain a
 selection, answers whose sources are numbered and jump to the quoted lines, three follow-up questions, model
@@ -32,7 +31,7 @@ Reduced motion: underline shown settled.
 Must not appear: sparkle or star icons, robot or brain icons, chat bubbles, avatars, lilac/purple, pill chips,
 rounded grey boxes, gradients, glow, glass, typing dots, emoji.
 
-Verdict (2026-10-10): rejected. User: "This is not a website, its a desktop app, take reference from other similar apps, but I want not blocky/edgy components and corners etc, it should be rounded and smooth, same for assistant UI". Next round: real desktop-app chrome modelled on comparable PDF apps, rounded and smooth components.
+Verdict (2026-10-10): rejected: it read as a website, not a desktop app; take reference from similar apps, with rounded, smooth components and corners (the assistant UI too). Next round: real desktop-app chrome modelled on comparable PDF apps, rounded and smooth components.
 
 ## Shared
 

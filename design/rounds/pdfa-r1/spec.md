@@ -58,7 +58,7 @@ findings.
 
 ## Verdict
 
-**a-rail**, confirmed by the orchestrator (the image tool was not available, nothing was rendered). It is the most
+2026-10-11: **a-rail** (nothing was rendered). It is the most
 standard variant and sits in the accessibility rail's look. One touch is taken from c-ticket: the outcome card carries a
 small checklist of the fix groups (Fonts, Colour and output intent, Metadata, Actions and JavaScript, Embedded files,
 plus Appearance for what changes how pages look). Each group is ticked by default and shows its own count; unticking

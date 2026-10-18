@@ -7,8 +7,7 @@ round is only how a person reaches it. One app window per image at 1536x1024, on
 
 ## Verdict
 
-a-rail, chosen by inkwell [e3c2c6] from this spec alone on 2026-10-11 (the image tool was at its usage limit, so no
-renders exist): Acrobat's standard flow in our right rail. Taken from c-proof: the one-line summary of what is being
+2026-10-11: a-rail, chosen from this spec alone (no renders exist): Acrobat's standard flow in our right rail. Taken from c-proof: the one-line summary of what is being
 edited at the top of the format section ("Editing "Sans-serif line…" · CMSS12 · 1 line"), and the "On page N" block list
 (cheap: it is the page's block list, with locked blocks tagged). b-bar was not built. Built screens (light and dark):
 docs/screens/edit/. Build notes: docs/text-edit.md "The UI".
@@ -26,7 +25,7 @@ docs/screens/edit/. Build notes: docs/text-edit.md "The UI".
   (Minion Pro 12 pt) (`06-add-text-typed.png`). Esc or clicking away commits. Ctrl+S saves in place.
 - It never says what a rewrite will do to the file until it is done.
 
-## How pdfcraft does it (E:\Dev\pdfcraft\crates\ui-egui\src\edit_text_ui.rs)
+## How pdfcraft does it (github.com/storytold/pdfcraft @ b8ddf71: crates/ui-egui/src/edit_text_ui.rs)
 - "Edit text & images": boxes around the paragraphs and images already on the page. Click a paragraph to edit it in
   place; Ctrl+Enter or clicking away applies and rewraps it to the box, Esc cancels. Drag the paragraph to move it,
   drag the handle on its left or right edge to rewrap it to a new width.

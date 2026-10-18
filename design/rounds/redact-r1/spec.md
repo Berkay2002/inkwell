@@ -52,7 +52,7 @@ Window: slim custom title bar with the ink-drop mark and "Inkwell", a "Home" tab
 "Lease agreement.pdf", a "+" button, and the window controls. Under it a slim toolbar with a rounded segmented pill
 "Read | Organize | Redact" with Redact selected, undo and redo icons.
 Document: a lease contract on white paper with soft shadows; page 2 "PARTIES" shows the tenant "Alex Johnson",
-"Personnummer 811218-9876", "alex.johnson@example.com" and "+46 70 123 45 67".
+"Personnummer 121212-1212", "alex.johnson@example.com" and "+46 70 123 45 67".
 Marks before they are applied: a dark ink hatch over the text, a translucent charcoal fill with a thin dashed charcoal
 outline and rounded corners, the text still faintly readable under it. Applied redactions: solid charcoal boxes with
 slightly rounded corners, the text gone.
@@ -78,7 +78,7 @@ rows and counts, "Saves as Lease agreement_Redacted.pdf" in secondary text, and 
 ref: ../../approved/organize.png
 No panel: the marks are reviewed where they are. Left screenshot: page 2 large and slightly left of centre; each
 hatched mark has a thin leader line to a quiet note in the right margin of the window, like a proofreader's margin:
-"811218-9876 · Personnummer  x", "alex.johnson@example.com · E-mail  x", "+46 70 123 45 67 · Phone  x". A small
+"121212-1212 · Personnummer  x", "alex.johnson@example.com · E-mail  x", "+46 70 123 45 67 · Phone  x". A small
 rounded floating toolbar at the top centre holds "Mark text", "Mark area", "Mark pages" icons and a pill field "Find
 or pick a pattern". At the bottom right a rounded ink-blue pill "Apply 7 marks". Right screenshot: after applying:
 the same page with solid charcoal boxes where the marks were, the margin notes now quiet secondary text ending

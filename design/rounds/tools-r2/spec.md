@@ -1,6 +1,6 @@
 # Tools r2: Compress and OCR, legible
 
-Round 1 (tools-r1) could not be judged: user, 2026-10-10: "The images are really bad, cant give my verdict." Cause (ours):
+Round 1 (tools-r1) could not be judged (2026-10-10). Cause:
 each render packed four app windows into one 1536x1024 board, so each screen was about 700 px wide and the UI text was
 unreadable. Same three ideas, nothing else changed; only the render changes:
 - ONE app window per image, filling the whole 1536x1024 frame. No board, no grid, no captions, no desk ground.
@@ -8,8 +8,7 @@ unreadable. Same three ideas, nothing else changed; only the render changes:
   The start and result states are described in the notes below for the build and are not rendered.
 - Large crisp UI text, sharp hairlines, realistic copy.
 
-Verdict (2026-10-11): b-rail approved. The user, relayed by the inkwell session: "Go with b-rail, but before approving, how does
-adobe do it?", and after seeing Acrobat's left-panel tool list and the PDF Optimizer modal: "Sure I approve b-rail".
+Verdict (2026-10-11): b-rail approved, after comparing with Acrobat's left-panel tool list and the PDF Optimizer modal.
 Picks: design/approved/tools-compress.png (b-rail-1-compress-options) and tools-ocr.png (b-rail-2-ocr-progress).
 Build notes: the rail takes the assistant dock's width and chrome and the app's colour tokens (not the render's brighter blue);
 only one right-side panel is open at a time (opening Tools closes the assistant and the other way round; a running tool keeps
@@ -21,7 +20,7 @@ Ideas (unchanged from r1):
 - b-rail: the tool is a 340 px right-hand rail beside the document; page thumbnails tick as pages finish. Start from a page's
   context menu or the command palette.
 - c-bar: a floating bottom action bar that expands upward into a small popover; result inline.
-Recommendation from the inkwell session: b-rail.
+Recommendation: b-rail.
 
 For: someone shrinking a 40 MB scanned contract before emailing it, or making a scan searchable. Feel: calm, direct, native.
 Palette/type/shape: as approved organize (window #F4F2ED, surfaces #FFFFFF, sidebar #ECE9E2, text #1A1C20, secondary #6B675F,

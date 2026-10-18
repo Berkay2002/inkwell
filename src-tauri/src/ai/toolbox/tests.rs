@@ -143,7 +143,7 @@ fn properties_are_set_once_and_a_repeat_is_an_error() {
     let s = steps(&h);
     let t = tool_named("set_document_properties");
     assert_eq!((t.label)(&json!({ "title": "Annual report", "author": "" })), "Set the document title “Annual report”, clear the author");
-    ok(&h, "set_document_properties", json!({ "title": "Annual report 2026", "author": "Berkay" }));
+    ok(&h, "set_document_properties", json!({ "title": "Annual report 2026", "author": "Alex" }));
     assert_eq!(steps(&h), s + 1);
     assert_eq!(title(&h), "Annual report 2026");
     let e = err_of(&h, "set_document_properties", json!({ "title": "Annual report 2026" }));
@@ -266,7 +266,7 @@ fn sanitize_names_what_goes_and_a_clean_document_is_an_error() {
         assert!(e.contains("nothing of the kinds"), "{e}");
         assert_eq!((rev(&h), steps(&h)), (r, s));
     }
-    ok(&h, "set_document_properties", json!({ "title": "Secret plans", "author": "Berkay" }));
+    ok(&h, "set_document_properties", json!({ "title": "Secret plans", "author": "Alex" }));
     let o = ok(&h, "sanitize_document", json!({}));
     assert!(o.text.contains("metadata entries"), "{}", o.text);
     assert_eq!(title(&h), "");

@@ -1,8 +1,7 @@
 # App-assistant r2: rounded, native assistant panel
 
-Round 1 (margin / notebook / ledger) was rejected together with home-r1: "This is not a website, its a desktop app,
-take reference from other similar apps, but I want not blocky/edgy components and corners etc, it should be rounded
-and smooth, same for assistant UI". R1 drew the panel as editorial print (hairlines, footnotes, no controls). R2 is a
+Round 1 (margin / notebook / ledger) was rejected together with home-r1: it read as a website, not a desktop app;
+the ask was to take reference from similar apps, with rounded, smooth components and corners. R1 drew the panel as editorial print (hairlines, footnotes, no controls). R2 is a
 real desktop app's assistant: rounded, smooth surfaces and controls, modelled on comparable apps' AI side panels
 (Acrobat AI Assistant, Edge/Copilot sidebar, Notion AI, Arc, Raycast AI), but without their sparkle/purple clichés.
 Kept from r1: the paper-and-ink palette and one ink-blue accent; numbered sources that jump to and highlight the

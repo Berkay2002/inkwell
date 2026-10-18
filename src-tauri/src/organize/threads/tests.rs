@@ -167,7 +167,7 @@ fn every_step_keeps_the_invariants_and_undo_restores_the_structure() {
     step("delete a bead", &|| thread_delete_bead(&eng, id, a, a_beads[0], USER), &eng);
     step(
         "properties",
-        &|| thread_set_info(&eng, id, b, &Info { title: "Grön fältet \u{2013} Ärende".into(), author: "Berkay".into(), ..Info::default() }, USER),
+        &|| thread_set_info(&eng, id, b, &Info { title: "Grön fältet \u{2013} Ärende".into(), author: "Alex".into(), ..Info::default() }, USER),
         &eng,
     );
     step("reorder", &|| thread_reorder(&eng, id, b, 0, USER), &eng);
@@ -175,7 +175,7 @@ fn every_step_keeps_the_invariants_and_undo_restores_the_structure() {
     let l = list(&eng, id);
     assert_eq!(l.len(), 1);
     assert_eq!(l[0].title, "Grön fältet \u{2013} Ärende");
-    assert_eq!(l[0].info.author, "Berkay");
+    assert_eq!(l[0].info.author, "Alex");
     // the whole thing survives a save
     let (e2, i2) = reopen(&eng, id);
     check(&e2, i2);
@@ -711,10 +711,10 @@ fn properties_applied_unchanged_are_no_step() {
     assert_eq!(eng.edit_state(id).unwrap().undo, before);
     // only the author edited, the title field left empty (what the UI sends for an untitled article): the article
     // gets an author and no /Title, so it is still listed by position
-    let author = Info { author: "Berkay".into(), ..Info::default() };
+    let author = Info { author: "Alex".into(), ..Info::default() };
     thread_set_info(&eng, id, t.id, &author, USER).unwrap();
     let t = list(&eng, id).remove(0);
-    assert_eq!((t.info.title.as_str(), t.info.author.as_str(), t.title.as_str()), ("", "Berkay", "Article 1"));
+    assert_eq!((t.info.title.as_str(), t.info.author.as_str(), t.title.as_str()), ("", "Alex", "Article 1"));
 }
 
 #[test]

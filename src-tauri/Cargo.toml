@@ -5,6 +5,7 @@ description = "Inkwell: a fast, private PDF app"
 authors = ["Berkay"]
 edition = "2024"
 license = "AGPL-3.0-or-later"
+repository = "https://github.com/Berkay2002/inkwell"
 default-run = "inkwell"
 
 [lib]

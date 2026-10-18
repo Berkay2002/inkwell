@@ -128,11 +128,11 @@ mod tests {
 
     #[test]
     fn patterns() {
-        assert_eq!(hits(Personnummer, "pnr 19811218-9876 och 811218-9876, fel 811218-9875"), ["19811218-9876", "811218-9876"]);
+        assert_eq!(hits(Personnummer, "pnr 19121212-1212 och 121212-1212, fel 121212-1213"), ["19121212-1212", "121212-1212"]);
         assert_eq!(hits(Ssn, "SSN: 123-45-6789, 987-65-4321, bad 000-12-3456"), ["123-45-6789", "987-65-4321"]);
         // without separators, and as personnummer with spaces around the dash
         assert_eq!(hits(Ssn, "SSN 123456789 or 123 45 6789, not 987654321 or 1234567890"), ["123456789", "123 45 6789"]);
-        assert_eq!(hits(Personnummer, "pnr 811218 - 9876, 811218 9876 and 811218+9876"), ["811218 - 9876", "811218 9876", "811218+9876"]);
+        assert_eq!(hits(Personnummer, "pnr 121212 - 1212, 121212 1212 and 121212+1212"), ["121212 - 1212", "121212 1212", "121212+1212"]);
         assert_eq!(hits(Iban, "IBAN SE45 5000 0000 0583 9825 7466 or GB82WEST12345698765432, bad GB82WEST12345698765433"),
             ["SE45 5000 0000 0583 9825 7466", "GB82WEST12345698765432"]);
         assert_eq!(hits(Card, "Credit card: 4111 1111 1111 1111 exp 12/27, amex 3782 822463 10005, bad 4111 1111 1111 1112"),

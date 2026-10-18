@@ -236,7 +236,7 @@ fn base(n: usize) -> DocSpec {
                 PageSpec { lines, ..Default::default() }
             })
             .collect(),
-        info: vec![("Title".into(), "Quarterly report".into()), ("Author".into(), "Berkay".into())],
+        info: vec![("Title".into(), "Quarterly report".into()), ("Author".into(), "Alex".into())],
         ..Default::default()
     }
 }
