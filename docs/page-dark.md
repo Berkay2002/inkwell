@@ -56,8 +56,9 @@ Rules in `naturalRects` (`pageDark.ts`, tested):
 
 Limits, on purpose:
 
-- `image_blocks` reads the page's own content only: a picture drawn inside a form XObject is not found, so it is
-  inverted with the page.
+- `image_blocks` finds pictures inside form XObjects only up to its limits (4 forms deep, 64 form drawings per
+  page); a picture past them, in an annotation appearance or in a Type3 glyph is not found, so it is inverted with
+  the page.
 - Thumbnails and the Organize grid (and its drag ghost) are inverted whole: no photo restoration at that size.
 - Plain colour fills (a red swatch) are filtered with the page: only pictures are restored.
 
