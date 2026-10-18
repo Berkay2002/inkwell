@@ -696,7 +696,8 @@ fn a_font_shared_by_many_appearances_is_charged_for_every_copy() {
     assert_eq!((s.added, s.skipped.len()), (n, 0), "{:?}", s.skipped);
     assert!(s.appearances > 100 && s.appearances < n, "{}", s.appearances);
     assert_eq!(s.notes.iter().map(|r| r.count).sum::<usize>(), n - s.appearances, "{:?}", s.notes);
-    assert!(t.elapsed().as_secs() < 60, "{:?}", t.elapsed());
+    // A guard against quadratic work, not a benchmark: a debug build takes about 70 s here and longer on a CI runner.
+    assert!(t.elapsed().as_secs() < 240, "{:?}", t.elapsed());
 }
 
 #[test]

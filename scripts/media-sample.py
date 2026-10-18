@@ -7,7 +7,7 @@ whose file is outside the document. Needs ffmpeg with libx264 and libmp3lame. St
 """
 import os, subprocess, sys, tempfile
 
-out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "docs", "study", "samples", "media-source.pdf")
+out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "samples", "media-source.pdf")
 
 with tempfile.TemporaryDirectory() as t:
     mp4, mp3 = os.path.join(t, "clip.mp4"), os.path.join(t, "voice.mp3")

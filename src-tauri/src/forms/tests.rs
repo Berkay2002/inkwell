@@ -1827,7 +1827,7 @@ fn the_scripts_banner_does_not_wait_for_a_step_that_holds_the_edit_lane() {
 #[test]
 #[ignore = "writes samples/_gen/formsjs-sample.pdf"]
 fn write_the_form_javascript_sample() {
-    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("docs").join("study").join("samples").join("_gen").join("formsjs-sample.pdf");
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("samples").join("_gen").join("formsjs-sample.pdf");
     std::fs::write(out, formsjs_sample()).unwrap();
 }
 

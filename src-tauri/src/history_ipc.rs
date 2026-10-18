@@ -832,7 +832,7 @@ mod tests {
     use crate::history::Kind;
 
     fn sample(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("docs").join("study").join("samples").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("samples").join(name)
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -842,7 +842,7 @@ mod tests {
         d
     }
 
-    /// Builds the scenario `scripts/history-shots.mjs` photographs, from copies of the study samples:
+    /// Builds the scenario `scripts/history-shots.mjs` photographs, from copies of the sample PDFs:
     /// `INKWELL_SEED_DIR=<dir> cargo test --lib seed_screens -- --ignored`. Writes `<dir>/lease.pdf` (three versions:
     /// import (named), assistant checkpoint, save) and `<dir>/notes.pdf` (a crash with an unsaved autosave)
     /// with the store in `<dir>/store`. Never touches anything outside `<dir>`.
