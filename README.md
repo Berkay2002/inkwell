@@ -1,6 +1,10 @@
 # Inkwell
 
-A local, private PDF app for Windows: read, annotate, fill, edit, sign, convert and organise PDFs without an account or a network service.
+A free, open-source alternative to Adobe Acrobat Pro for Windows: every Acrobat Pro tool area, from editing, forms and signatures to redaction, OCR, compare, preflight and print production, running locally with no account and no cloud.
+
+The built-in AI assistant uses your own subscription: it drives the Codex (ChatGPT) or Claude Code CLI you already have
+signed in on your PC, with no API key, and by default every edit it proposes waits for your approval
+([how it works](docs/acrobat-coverage.md#the-assistant-uses-your-own-ai-subscription)).
 
 Tauri 2 (WebView2) shell, Rust engine on a patched MuPDF, React + TypeScript + Vite UI.
 
@@ -14,6 +18,8 @@ Claude Code CLI.
 ## Features
 
 Each area has its own doc; [docs/README.md](docs/README.md) lists them all.
+
+How it compares with Acrobat Pro, area by area, including what is still missing: [docs/acrobat-coverage.md](docs/acrobat-coverage.md).
 
 - View and search: tiled renderer, tabs, outline, full-text search ([search](docs/search.md))
 - Comments and markup ([comments](docs/comments.md), [threads](docs/threads.md))
@@ -113,3 +119,5 @@ version. See [LICENSE](LICENSE).
 Inkwell is built on MuPDF (AGPL-3.0, Artifex). The modified vendored sources are in `vendor/`, with their changes listed
 in [third_party/mupdf/MODIFICATIONS.md](third_party/mupdf/MODIFICATIONS.md) (summary in [vendor/mupdf/PATCHES.md](vendor/mupdf/PATCHES.md)). Other third-party material:
 [third_party/THIRD-PARTY-NOTICES.txt](third_party/THIRD-PARTY-NOTICES.txt).
+
+Adobe and Acrobat are trademarks of Adobe Inc. Inkwell is not affiliated with or endorsed by Adobe.

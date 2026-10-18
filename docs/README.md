@@ -3,6 +3,7 @@
 ## Feature and engine docs
 
 - [a11y](a11y.md): accessibility check and tags
+- [acrobat-coverage](acrobat-coverage.md): Inkwell against Adobe Acrobat Pro, area by area, with known gaps
 - [ai-actions](ai-actions.md), [ai-claude](ai-claude.md): the optional assistant
 - [batch](batch.md): batch actions
 - [bookmarks-links](bookmarks-links.md): edit bookmarks and links
